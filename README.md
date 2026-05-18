@@ -34,3 +34,19 @@ risk_bdt/
 │   └── validation/         # Funzioni per il controllo qualità dei dati
 ├── docker-compose.yml      # Configurazione dell'infrastruttura (Kafka, Zookeeper, DB)
 └── requirements.txt        # Dipendenze Python del progetto
+
+### 2. Configura l'Ambiente Virtuale Python
+
+> ⚠️ **IMPORTANTE (Versione Python):** Il progetto è stato sviluppato e testato utilizzando **Python 3.11** (consigliata versione 3.11.x). Versioni più recenti (es. 3.12+) o più vecchie potrebbero creare conflitti con le librerie di streaming e con i pacchetti di processing.
+
+Crea un ambiente pulito usando esplicitamente Python 3.11 e installa le dipendenze richieste:
+```bash
+# Forza l'uso di Python 3.11 nella creazione del venv
+python3.11 -m venv .venv
+
+# Attiva l'ambiente su macOS/Linux
+source .venv/bin/activate
+
+# Aggiorna pip e installa i pacchetti
+pip install --upgrade pip
+pip install -r requirements.txt
