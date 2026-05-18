@@ -35,7 +35,10 @@ risk_bdt/
 ├── docker-compose.yml      # Configurazione dell'infrastruttura (Kafka, Zookeeper, DB)
 └── requirements.txt        # Dipendenze Python del progetto
 
-### 2. Configura l'Ambiente Virtuale Python
+
+---
+
+## 2. Configura l'Ambiente Virtuale Python
 
 > ⚠️ **IMPORTANTE (Versione Python):** Il progetto è stato sviluppato e testato utilizzando **Python 3.11** (consigliata versione 3.11.x). Versioni più recenti (es. 3.12+) o più vecchie potrebbero creare conflitti con le librerie di streaming e con i pacchetti di processing.
 
