@@ -1,0 +1,13 @@
+# 1. AMBIENTI VIRTUALI 
+.venv/
+venv/
+ENV/
+env/
+
+# 2. DATI LOCALI (Escludiamo i dati scaricati, ma non la struttura delle cartelle)
+data/raw/csv/*
+data/raw/zip/*
+data/raw/events/*
+data/raw/gkg/*
+data/mock_kafka/*
+
