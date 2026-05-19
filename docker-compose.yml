@@ -1,0 +1,73 @@
+version: '3.8'
+
+services:
+  # Layer 1: Data ingestion
+  ingestion:
+    build:
+      context: ./1-ingestion
+      dockerfile: Dockerfile
+    container_name: pipeline_ingestion
+    volumes:
+      - shared_data:/data
+    networks:
+      - pipeline_network
+
+  # Layer 2: Parsing
+  parsing:
+    build:
+      context: ./2-parsing
+      dockerfile: Dockerfile
+    container_name: pipeline_parsing
+    depends_on:
+      - ingestion
+    volumes:
+      - shared_data:/data
+    networks:
+      - pipeline_network
+
+  # Layer 3: Validation
+  validation:
+    build:
+      context: ./3-validation
+      dockerfile: Dockerfile
+    container_name: pipeline_validation
+    depends_on:
+      - parsing
+    volumes:
+      - shared_data:/data
+    networks:
+      - pipeline_network
+
+  # Layer 4: Processing
+  processing:
+    build:
+      context: ./4-processing
+      dockerfile: Dockerfile
+    container_name: pipeline_processing
+    depends_on:
+      - validation
+    volumes:
+      - shared_data:/data
+    networks:
+      - pipeline_network
+
+  # Layer 5: Serving
+  serving:
+    build:
+      context: ./5-serving
+      dockerfile: Dockerfile
+    container_name: pipeline_serving
+    depends_on:
+      - processing
+    volumes:
+      - shared_data:/data
+    networks:
+      - pipeline_network
+    ports:
+      - "8501:8501"
+
+volumes:
+  shared_data:
+
+networks:
+  pipeline_network:

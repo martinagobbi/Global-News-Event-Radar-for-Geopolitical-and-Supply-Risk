@@ -1,0 +1,2 @@
+# Add validation dependencies here
+# Example: pydantic, jsonschema, cerberus
