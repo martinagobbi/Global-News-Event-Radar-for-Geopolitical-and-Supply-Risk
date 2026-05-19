@@ -1,2 +1,0 @@
-# Add ingestion dependencies here
-# Example: requests, boto3, psycopg2
