@@ -11,8 +11,8 @@ def delivery_report(err, msg):
 
 def push_to_kafka(topic, data_list):
     """
-    Prende una lista di dizionari (i tuoi record GDELT) 
-    e li spara su Kafka.
+    Prende una lista di dizionari (i record GDELT) 
+    e li manda su Kafka.
     """
     for record in data_list:
         # Convertiamo il record in stringa JSON

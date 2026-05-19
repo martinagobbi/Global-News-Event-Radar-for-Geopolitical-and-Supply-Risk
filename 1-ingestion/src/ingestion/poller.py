@@ -9,11 +9,11 @@ from typing import Optional
 import pandas as pd
 import requests
 
-# --- MODIFICA 1: IMPORTA IL TUO PRODUCER ---
+# IMPORTA IL PRODUCER KAFKA
 try:
     from src.ingestion.kafka_producer import push_to_kafka
 except ImportError:
-    # Se lo lanci come script semplice potrebbe servire questo fallback
+
     from kafka_producer import push_to_kafka
 
 MASTER_FILE_LIST_URL = "http://data.gdeltproject.org/gdeltv2/masterfilelist.txt"
@@ -90,7 +90,7 @@ def validate_csv(csv_path: Path) -> None:
     sample_df = pd.read_csv(csv_path, sep="\t", header=None, nrows=5, low_memory=False)
     print(f"[OK] CSV valido: {csv_path.name} | sample rows: {len(sample_df)}")
 
-# --- MODIFICA 2: LOGICA DI INVIO ---
+# LOGICA DI INVIO A KAFKA E GESTIONE STATO
 def process_latest_file(session: requests.Session, dataset: str) -> Optional[Path]:
     ensure_directories()
     state = load_state()
@@ -109,7 +109,7 @@ def process_latest_file(session: requests.Session, dataset: str) -> Optional[Pat
     
     validate_csv(csv_path)
 
-    # --- INVIO A KAFKA ---
+    # INVIO A KAFKA 
     print(f"[KAFKA] Caricamento dati in corso...")
     # Carichiamo l'intero file in Pandas (senza header come da standard GDELT)
     df = pd.read_csv(csv_path, sep="\t", header=None, low_memory=False)
@@ -117,7 +117,7 @@ def process_latest_file(session: requests.Session, dataset: str) -> Optional[Pat
     # Trasformiamo in lista di dizionari per Kafka
     records = df.to_dict(orient='records')
     
-    # Inviamo al topic (es: gdelt_raw)
+    # Inviamo al topic 
     push_to_kafka("gdelt_raw", records)
     print(f"[OK] Inviati {len(records)} record a Kafka")
     # --------------------
