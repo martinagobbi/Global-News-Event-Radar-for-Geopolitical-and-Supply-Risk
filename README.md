@@ -23,7 +23,7 @@ This runs all five layers sequentially:
 ### Project Structure
 
 ```
-BDT_project/
+Global-News-Event-Radar-for-Geopolitical-and-Supply-Risk/
 ├── docker-compose.yml
 ├── ingestion/
 │   ├── Dockerfile
@@ -51,6 +51,6 @@ BDT_project/
 
 Each layer should handle a specific responsibility. Add dependencies to each layer's `requirements.txt` as needed.
 
-## License
+## Licence
 
 TBD
