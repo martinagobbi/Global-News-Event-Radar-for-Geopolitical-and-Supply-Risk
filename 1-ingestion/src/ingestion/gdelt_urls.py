@@ -14,10 +14,8 @@ LAST_UPDATE_URL = f"{GDELT_BASE_URL}/lastupdate.txt"
 # I tre tipi di file pubblicati ogni 15 minuti
 FILE_TYPES = {
     "events": "export.CSV.zip",
-    "mentions": "mentions.CSV.zip",
-    "gkg": "gkg.csv.zip",
+    "mentions": "mentions.CSV.zip",  # <--- CAMBIATO DA GKG A MENTIONS
 }
-
 
 def round_to_15min(dt: datetime) -> datetime:
     """
@@ -79,13 +77,13 @@ def generate_timestamps_last_n_days(n_days: int, end_dt: datetime = None):
         current += timedelta(minutes=15)
 
 
-def generate_urls_last_n_days(n_days: int, file_types=("events", "gkg")):
+def generate_urls_last_n_days(n_days: int, file_types=("events", "mentions")):
     """
     Genera tutti gli URL GDELT degli ultimi N giorni per i tipi richiesti.
 
     Args:
         n_days:     numero di giorni (es. 30)
-        file_types: tupla di tipi da scaricare (default: events + gkg)
+        file_types: tupla di tipi da scaricare (default: events + mentions)
 
     Yields:
         dict con 'timestamp', 'file_type', 'url'
@@ -99,7 +97,7 @@ def generate_urls_last_n_days(n_days: int, file_types=("events", "gkg")):
             }
 
 
-def count_urls(n_days: int, file_types=("events", "gkg")) -> int:
+def count_urls(n_days: int, file_types=("events", "mentions")) -> int:
     """
     Stima quanti file verranno scaricati — utile per progress bar.
     Formula: n_days * 96 slot/giorno * len(file_types)

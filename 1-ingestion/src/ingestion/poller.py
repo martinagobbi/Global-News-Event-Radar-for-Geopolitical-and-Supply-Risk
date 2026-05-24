@@ -4,7 +4,7 @@ import time
 import zipfile
 from io import BytesIO
 from pathlib import Path
-from typing import Optional
+from typing import Dict, Optional
 
 import pandas as pd
 import requests
@@ -13,17 +13,14 @@ import requests
 try:
     from src.ingestion.kafka_producer import push_to_kafka
 except ImportError:
-
     from kafka_producer import push_to_kafka
 
-MASTER_FILE_LIST_URL = "http://data.gdeltproject.org/gdeltv2/masterfilelist.txt"
-DATASET_PATTERNS = {
-    "events": ".export.CSV.zip",
-    "gkg": ".gkg.csv.zip",
-}
+# Cambiato all'URL dei 15 minuti, specifico per lo streaming real-time
+LAST_15MIN_URL = "http://data.gdeltproject.org/gdeltv2/last15minutes.txt"
+
 POLL_INTERVAL_SECONDS = 15 * 60
 
-BASE_DIR = Path(__file__).resolve().parent.parent.parent # Corretto per arrivare alla root 'risk_bdt'
+BASE_DIR = Path(__file__).resolve().parent.parent.parent 
 RAW_ZIP_DIR = BASE_DIR / "data" / "raw" / "zip"
 RAW_CSV_DIR = BASE_DIR / "data" / "raw" / "csv"
 STATE_DIR = BASE_DIR / "state"
@@ -44,106 +41,129 @@ def save_state(state: dict) -> None:
     with STATE_FILE.open("w", encoding="utf-8") as f:
         json.dump(state, f, indent=2)
 
-def fetch_master_file_list(session: requests.Session) -> str:
-    response = session.get(MASTER_FILE_LIST_URL, timeout=30)
-    response.raise_for_status()
-    return response.text
+def fetch_latest_urls(session: requests.Session) -> Dict[str, str]:
+    """
+    Legge il file temporaneo di GDELT ed estrae gli ultimi URL di Events e Mentions.
+    Include un meccanismo di retry in caso di 404 temporaneo del server.
+    """
+    retries = 3
+    delay = 5  # secondi da aspettare tra i tentativi
+    
+    for attempt in range(1, retries + 1):
+        try:
+            response = session.get(LAST_15MIN_URL, timeout=30)
+            response.raise_for_status()
+            
+            urls = {}
+            for line in response.text.splitlines():
+                parts = line.strip().split()
+                if len(parts) < 3:
+                    continue
+                candidate_url = parts[2]
+                
+                if candidate_url.endswith(".export.CSV.zip"):
+                    urls["events"] = candidate_url
+                elif candidate_url.endswith(".mentions.CSV.zip"):
+                    urls["mentions"] = candidate_url
+                    
+            return urls
+            
+        except requests.exceptions.HTTPError as http_err:
+            # Se è un 404 ed abbiamo ancora tentativi, aspettiamo e riproviamo
+            if response.status_code == 404 and attempt < retries:
+                print(f"[WARNING] GDELT ha risposto con 404 (tentativo {attempt}/{retries}). Il file si sta aggiornando. Riprovo tra {delay} secondi...")
+                time.sleep(delay)
+                continue
+            raise http_err  # Se i tentativi sono finiti o è un altro errore, fallisci
+        except requests.exceptions.RequestException as req_err:
+            if attempt < retries:
+                time.sleep(delay)
+                continue
+            raise req_err
+            
+    return {}
 
-def extract_latest_file_url(master_file_text: str, dataset: str) -> str:
-    pattern = DATASET_PATTERNS[dataset]
-    matching_urls = []
-    for line in master_file_text.splitlines():
-        parts = line.strip().split()
-        if len(parts) < 3:
-            continue
-        candidate_url = parts[2]
-        if candidate_url.endswith(pattern):
-            matching_urls.append(candidate_url)
-    if not matching_urls:
-        raise ValueError(f"Nessun file trovato per dataset={dataset}")
-    return matching_urls[-1]
-
-def already_processed(state: dict, dataset: str, file_url: str) -> bool:
-    return state.get(dataset) == file_url
-
-def download_file(session: requests.Session, file_url: str) -> bytes:
+def download_and_extract(session: requests.Session, file_url: str) -> Path:
+    """Scarica, salva il file zip ed estrae il CSV"""
     response = session.get(file_url, timeout=120)
     response.raise_for_status()
-    return response.content
+    content = response.content
 
-def save_zip_file(file_url: str, content: bytes) -> Path:
+    # Salva ZIP
     zip_path = RAW_ZIP_DIR / Path(file_url).name
     zip_path.write_bytes(content)
-    return zip_path
 
-def extract_zip(zip_path: Path) -> Path:
+    # Estrae CSV
     with zipfile.ZipFile(zip_path, "r") as zf:
-        members = zf.namelist()
-        if not members:
-            raise ValueError(f"Archivio vuoto: {zip_path}")
-        first_member = members[0]
+        first_member = zf.namelist()[0]
         extracted_path = RAW_CSV_DIR / Path(first_member).name
         extracted_path.write_bytes(zf.read(first_member))
         return extracted_path
 
-def validate_csv(csv_path: Path) -> None:
-    sample_df = pd.read_csv(csv_path, sep="\t", header=None, nrows=5, low_memory=False)
-    print(f"[OK] CSV valido: {csv_path.name} | sample rows: {len(sample_df)}")
+def validate_and_send_to_kafka(csv_path: Path, topic_name: str) -> None:
+    """Valida il CSV e invia i record al rispettivo topic di Kafka"""
+    df = pd.read_csv(csv_path, sep="\t", header=None, low_memory=False)
+    print(f"[OK] CSV valido: {csv_path.name} | Righe rilevate: {len(df)}")
+    
+    print(f"[KAFKA] Caricamento su topic '{topic_name}' in corso...")
+    records = df.to_dict(orient='records')
+    push_to_kafka(topic_name, records)
+    print(f"[OK] Inviati {len(records)} record a {topic_name}")
 
-# LOGICA DI INVIO A KAFKA E GESTIONE STATO
-def process_latest_file(session: requests.Session, dataset: str) -> Optional[Path]:
+def process_pipeline(session: requests.Session) -> None:
+    """Esegue il ciclo completo per caricare sia gli Events che le Mentions"""
     ensure_directories()
     state = load_state()
 
-    master_text = fetch_master_file_list(session)
-    latest_file_url = extract_latest_file_url(master_text, dataset)
-
-    if already_processed(state, dataset, latest_file_url):
-        print(f"[SKIP] File già processato per {dataset}")
-        return None
-
-    print(f"[INFO] Download file: {latest_file_url}")
-    content = download_file(session, latest_file_url)
-    zip_path = save_zip_file(latest_file_url, content)
-    csv_path = extract_zip(zip_path)
+    # 1. Recupera gli ultimi URL disponibili
+    latest_urls = fetch_latest_urls(session)
     
-    validate_csv(csv_path)
+    if not latest_urls.get("events") or not latest_urls.get("mentions"):
+        print("[WARNING] Impossibile trovare gli URL di Events o Mentions nel file di controllo.")
+        return
 
-    # INVIO A KAFKA 
-    print(f"[KAFKA] Caricamento dati in corso...")
-    # Carichiamo l'intero file in Pandas (senza header come da standard GDELT)
-    df = pd.read_csv(csv_path, sep="\t", header=None, low_memory=False)
-    
-    # Trasformiamo in lista di dizionari per Kafka
-    records = df.to_dict(orient='records')
-    
-    # Inviamo al topic 
-    push_to_kafka("gdelt_raw", records)
-    print(f"[OK] Inviati {len(records)} record a Kafka")
-    # --------------------
+    # 2. Gestione degli EVENTI
+    event_url = latest_urls["events"]
+    if state.get("events") == event_url:
+        print("[SKIP] Tabella Events già aggiornata all'ultimo rilascio.")
+    else:
+        print(f"[INFO] Nuovo file Events rilevato: {Path(event_url).name}")
+        csv_events = download_and_extract(session, event_url)
+        validate_and_send_to_kafka(csv_events, "gdelt_events_raw")
+        state["events"] = event_url
 
-    state[dataset] = latest_file_url
+    # 3. Gestione delle MENZIONI
+    mention_url = latest_urls["mentions"]
+    if state.get("mentions") == mention_url:
+        print("[SKIP] Tabella Mentions già aggiornata all'ultimo rilascio.")
+    else:
+        print(f"[INFO] Nuovo file Mentions rilevato: {Path(mention_url).name}")
+        csv_mentions = download_and_extract(session, mention_url)
+        validate_and_send_to_kafka(csv_mentions, "gdelt_mentions_raw")
+        state["mentions"] = mention_url
+
+    # 4. Salva lo stato aggiornato
     save_state(state)
-    return csv_path
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Poller GDELT")
-    parser.add_argument("--dataset", choices=["events", "gkg"], default="events")
-    parser.add_argument("--loop", action="store_true")
+    parser = argparse.ArgumentParser(description="Poller GDELT (Events & Mentions)")
+    parser.add_argument("--loop", action="store_true", help="Resta in ascolto ogni 15 minuti")
     return parser.parse_args()
 
 def main() -> None:
     args = parse_args()
     with requests.Session() as session:
         if args.loop:
+            print("[START] Poller avviato in modalità continua (loop = 15 min)...")
             while True:
                 try:
-                    process_latest_file(session, args.dataset)
+                    process_pipeline(session)
                 except Exception as exc:
-                    print(f"[ERROR] {exc}")
+                    print(f"[ERROR] Errore nel ciclo di esecuzione: {exc}")
                 time.sleep(POLL_INTERVAL_SECONDS)
         else:
-            process_latest_file(session, args.dataset)
+            print("[START] Poller avviato per esecuzione singola...")
+            process_pipeline(session)
 
 if __name__ == "__main__":
     main()
