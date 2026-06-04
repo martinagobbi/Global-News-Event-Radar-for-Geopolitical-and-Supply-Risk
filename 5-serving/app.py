@@ -1,122 +1,66 @@
-import streamlit as st
-import json
-import os
-import requests
 from pathlib import Path
+import sys
 
-# Configuration
-USER_PREFS_DIR = "/data/user_preferences"
-PROCESSED_DIR = "/data/processed"
-PROCESSING_API = "http://processing:8001"
+import streamlit as st
 
-os.makedirs(USER_PREFS_DIR, exist_ok=True)
-os.makedirs(PROCESSED_DIR, exist_ok=True)
 
-def get_user_prefs(user_id: str) -> dict:
-    """Load user preferences from JSON file."""
-    prefs_file = Path(USER_PREFS_DIR) / f"{user_id}_prefs.json"
-    if prefs_file.exists():
-        with open(prefs_file, 'r') as f:
-            return json.load(f)
-    return {
-        "theme": "light",
-        "notifications": True,
-        "data_format": "table"
-    }
+ROOT = Path(__file__).resolve().parent
+if str(ROOT) not in sys.path:
+    sys.path.append(str(ROOT))
 
-def save_user_prefs(user_id: str, prefs: dict):
-    """Save user preferences to JSON file."""
-    prefs_file = Path(USER_PREFS_DIR) / f"{user_id}_prefs.json"
-    with open(prefs_file, 'w') as f:
-        json.dump(prefs, f, indent=2)
+from data.user_store import ensure_storage, get_current_user, is_first_login
 
-def trigger_processing(user_id: str) -> bool:
-    """Call processing API to generate user-specific dataset."""
-    try:
-        response = requests.post(f"{PROCESSING_API}/process/{user_id}", timeout=30)
-        if response.status_code == 200:
-            return True
-        else:
-            st.error(f"Processing API error: {response.status_code}")
-            return False
-    except requests.exceptions.ConnectionError:
-        st.error("Cannot connect to processing layer. Make sure it's running.")
-        return False
-    except Exception as e:
-        st.error(f"Error calling processing API: {str(e)}")
-        return False
 
-# Initialize session state
-if "user_id" not in st.session_state:
-    st.session_state.user_id = "default_user"
+st.set_page_config(
+    page_title="Global News Event Radar for Geopolitical and Supply Risk",
+    page_icon="📡",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
 
-st.set_page_config(page_title="BDT Dashboard", layout="wide")
 
-st.title("📊 BDT Data Pipeline Dashboard")
+def bootstrap() -> None:
+    ensure_storage()
+    user_id = st.query_params.get("user", "demo_user")
+    st.session_state["current_user_id"] = user_id
 
-# Sidebar: User identity and preferences
-with st.sidebar:
-    st.header("User Settings")
-    user_id = st.text_input("Enter your user ID:", value=st.session_state.user_id)
-    st.session_state.user_id = user_id
-    
-    user_prefs = get_user_prefs(user_id)
-    
-    st.subheader("Preferences")
-    theme = st.radio("Theme:", ["light", "dark"], index=0 if user_prefs["theme"] == "light" else 1)
-    notifications = st.checkbox("Enable notifications", value=user_prefs["notifications"])
-    data_format = st.selectbox("Data format:", ["table", "summary", "json"], 
-                                index=["table", "summary", "json"].index(user_prefs["data_format"]))
-    
-    if st.button("Save Preferences"):
-        user_prefs = {
-            "theme": theme,
-            "notifications": notifications,
-            "data_format": data_format
-        }
-        save_user_prefs(user_id, user_prefs)
-        
-        # Trigger processing for this user
-        st.info("Processing data for your preferences...")
-        if trigger_processing(user_id):
-            st.success(f"Preferences saved and data processed for {user_id}")
-        else:
-            st.warning(f"Preferences saved, but processing failed. Try again later.")
 
-# Main dashboard content
-st.header(f"Welcome, {st.session_state.user_id}!")
+def sidebar_status() -> None:
+    user_id = get_current_user()
+    first_login = is_first_login(user_id)
 
-col1, col2, col3 = st.columns(3)
+    st.sidebar.title("Global News Event Radar for Geopolitical and Supply Risk")
+    st.sidebar.caption("This radar continuously ingests massive GDELT and document streams, filtering out media background noise to isolate high-probability events. Use this dashboard to track, map, and assess real-time developments threatening the operational stability of specific firms, sectors, and geographic regions.")
+    st.sidebar.write(f"Current user: `{user_id}`")
+    st.sidebar.write(
+        "Status: first-time setup required" if first_login else "Status: registered user"
+    )
+    st.sidebar.info(
+        "Registered users can open the dashboard immediately."
+    )
+
+
+bootstrap()
+sidebar_status()
+
+st.title("Global News Event Radar for Geopolitical and Supply Risk")
+st.write(
+    "This app separates first-time setup from daily monitoring. New users register their monitoring perimeter first; "
+    "registered users can go straight to the briefing."
+)
+
+col1, col2 = st.columns(2)
 with col1:
-    st.metric("Pipeline Status", "Running", delta="✓")
+    st.page_link("pages/onboarding.py", label="Open setup", icon="🧭")
 with col2:
-    st.metric("Last Run", "Just now")
-with col3:
-    st.metric("Data Points", "1,234")
+    st.page_link("pages/dashboard.py", label="Open dashboard", icon="📊")
 
 st.divider()
-
-# Check if user-specific processed data exists
-processed_data_path = Path(PROCESSED_DIR) / f"processed_{st.session_state.user_id}.csv"
-if processed_data_path.exists():
-    st.subheader("Your Processed Data")
-    import pandas as pd
-    df = pd.read_csv(processed_data_path)
-    
-    if user_prefs["data_format"] == "table":
-        st.dataframe(df)
-    elif user_prefs["data_format"] == "summary":
-        st.bar_chart(df.set_index(df.columns[0]))
-    else:
-        st.json(df.to_dict(orient="records"))
-else:
-    st.info("No processed data available. Set your preferences and save to generate your data.")
-
-st.divider()
-
-# Debug info
-with st.expander("Debug Info"):
-    st.write(f"**User ID:** {st.session_state.user_id}")
-    st.write(f"**User Preferences:** {user_prefs}")
-    st.write(f"**User Data Path:** {processed_data_path}")
-    st.write(f"**Processing API:** {PROCESSING_API}")
+st.subheader("Application flow")
+st.markdown(
+    """
+    - `Phase 1`: first-time registration, monitoring countries, and risk categories.
+    - `Phase 2`: background computation of the user-specific gold layer.
+    - `Phase 3`: dashboard reads from the precomputed gold layer and shows heatmap, briefing, and tags.
+    """
+)
