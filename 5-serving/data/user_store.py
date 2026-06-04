@@ -30,7 +30,7 @@ def _write_json(path: Path, payload: dict) -> None:
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
-def get_current_user() -> str:
+def get_current_user() -> str: # returns user_id and if the user is new it creates a new profile with default values
     return st.session_state.get("current_user_id", "demo_user")
 
 
@@ -69,7 +69,8 @@ def set_event_tag(user_id: str, global_event_id: str, tag: str) -> None:
     user_tags = tags.setdefault(user_id, {})
     user_tags[global_event_id] = tag
     _write_json(TAGS_FILE, tags)
-
+# This is a simple key-value store for user-specific tags on events, which can be used to implement the red/yellow/green tagging logic in the briefing.
 
 def get_event_tags(user_id: str) -> dict[str, str]:
     return _read_json(TAGS_FILE).get(user_id, {})
+# This function retrieves all tags for a given user, returning a dictionary mapping global_event_id to tag. The briefing can use this to determine which events are tagged as "requires_action" (red) or "monitor" (yellow) and display them in the appropriate sections.

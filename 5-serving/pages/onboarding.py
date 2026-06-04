@@ -57,4 +57,4 @@ if submitted:
     save_user_profile(profile)
     trigger_gold_layer_computation(user_id)
     st.success("Profile saved and gold layer refresh requested.")
-    st.page_link("pages/2_dashboard.py", label="Open dashboard", icon="📊")
+    st.page_link("pages/dashboard.py", label="Open dashboard", icon="📊")
