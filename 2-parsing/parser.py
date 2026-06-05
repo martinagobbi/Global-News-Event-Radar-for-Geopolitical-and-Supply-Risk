@@ -107,20 +107,17 @@ def rename_integer_keys(record: dict) -> dict:
     and calls df.to_dict(orient='records'), producing dicts with integer keys:
         {0: "1381729282", 1: "20260430", 2: "202604", …}
 
-    This function maps those integer indices to the official GDELT column names
-    so that all downstream filter and scoring functions work correctly.
-
-    Rows with fewer columns than GDELT_COLUMNS are padded with empty strings.
-
-    Parameters
-    ----------
-    record : dict  —  integer-keyed dict from Kafka 'gdelt_raw' topic
-
-    Returns
-    -------
-    dict  —  the same data with string column names as keys
+    IMPORTANT: the poller then serialises each record with json.dumps() before
+    sending it to Kafka. JSON object keys are ALWAYS strings, so after the
+    consumer's json.loads() the keys arrive as "0", "1", "2", … (strings),
+    not integers. This function therefore accepts BOTH forms: it first tries
+    the integer key (direct/local use) and falls back to the string key
+    (the real Kafka path). Missing columns are padded with empty strings.
     """
-    return {col: record.get(i, "") for i, col in enumerate(GDELT_COLUMNS)}
+    return {
+        col: record.get(i, record.get(str(i), ""))
+        for i, col in enumerate(GDELT_COLUMNS)
+    }
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -186,9 +183,12 @@ def passes_filter(record: dict) -> bool:
     Accepts either integer-keyed dicts (from Kafka) or named-column dicts.
     If integer keys are detected, rename_integer_keys() is called automatically.
     """
-    # Auto-detect integer-keyed records (from Kafka ingestion)
-    if record and isinstance(next(iter(record)), int):
-        record = rename_integer_keys(record)
+    # Auto-detect index-keyed records (from Kafka ingestion). Keys may be
+    # integers (local use) or digit strings "0".."60" (after JSON round-trip).
+    if record:
+        first_key = next(iter(record))
+        if isinstance(first_key, int) or (isinstance(first_key, str) and first_key.isdigit()):
+            record = rename_integer_keys(record)
 
     if not has_relevant_event_code(record):
         return False
@@ -327,3 +327,80 @@ def parse_gdelt_csv_to_json(filepath: str) -> list[dict]:
     """Convenience wrapper: list of silver dicts ready for Kafka or ClickHouse."""
     df_silver = parse_gdelt_csv(filepath)
     return [to_silver_event(dict(row)) for _, row in df_silver.iterrows()]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# GDELT MENTIONS TABLE
+# ═══════════════════════════════════════════════════════════════════════════════
+# The mentions table references events (one event can have many mentions).
+# It is published by GDELT as a separate CSV every 15 minutes and arrives on
+# the Kafka topic 'gdelt_mentions_raw'. The key field is MentionIdentifier,
+# which holds the source-article URL used for Newspaper3k enrichment.
+
+# GDELT 2.0 Mentions columns (16 columns, 0-based index)
+MENTIONS_COLUMNS = [
+    "GlobalEventID",            # 0  links the mention to an event
+    "EventTimeDate",            # 1
+    "MentionTimeDate",          # 2
+    "MentionType",              # 3  1=web, 2=citation, 3=core, ...
+    "MentionSourceName",        # 4  e.g. "bbc.co.uk"
+    "MentionIdentifier",        # 5  the article URL  ← scraped by Newspaper3k
+    "SentenceID",               # 6
+    "Actor1CharOffset",         # 7
+    "Actor2CharOffset",         # 8
+    "ActionCharOffset",         # 9
+    "InRawText",                # 10
+    "Confidence",               # 11
+    "MentionDocLen",            # 12
+    "MentionDocTone",           # 13
+    "MentionDocTranslationInfo",# 14
+    "Extras",                   # 15
+]
+
+
+def rename_mention_integer_keys(record: dict) -> dict:
+    """
+    Same idea as rename_integer_keys() but for the mentions table.
+    The poller sends mention rows with integer keys (0, 1, 2 …) which become
+    string keys ("0", "1", …) after the json.dumps()/json.loads() round-trip
+    through Kafka. Both forms are accepted: integer key first, string key as
+    fallback.
+    """
+    return {
+        col: record.get(i, record.get(str(i), ""))
+        for i, col in enumerate(MENTIONS_COLUMNS)
+    }
+
+
+def to_silver_mention(record: dict) -> dict:
+    """
+    Convert a named-column GDELT mention record into the silver-mention schema.
+
+    The enrichment fields (article_title, article_keywords, enriched) are
+    left empty here; they are filled later by enrichment.enrich_mentions_parallel().
+
+    Output schema:
+        event_id, event_time, mention_time, mention_type, source_name,
+        mention_url, confidence, doc_tone,
+        article_title, article_keywords, enriched
+    """
+    def _float(v):
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return 0.0
+
+    return {
+        "event_id":         _safe_str(record.get("GlobalEventID", "")),
+        "event_time":       _safe_str(record.get("EventTimeDate", "")),
+        "mention_time":     _safe_str(record.get("MentionTimeDate", "")),
+        "mention_type":     _safe_str(record.get("MentionType", "")),
+        "source_name":      _safe_str(record.get("MentionSourceName", "")),
+        "mention_url":      _safe_str(record.get("MentionIdentifier", "")),
+        "confidence":       _float(record.get("Confidence", 0)),
+        "doc_tone":         _float(record.get("MentionDocTone", 0)),
+        # Enrichment fields — populated by Newspaper3k downstream
+        "article_title":    "",
+        "article_keywords": "",
+        "enriched":         False,
+    }
