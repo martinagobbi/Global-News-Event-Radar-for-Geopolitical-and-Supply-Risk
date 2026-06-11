@@ -1,2 +1,2 @@
-# Add validation dependencies here
-# Example: pydantic, jsonschema, cerberus
+pandas>=2.0.0
+clickhouse-driver>=0.2.9

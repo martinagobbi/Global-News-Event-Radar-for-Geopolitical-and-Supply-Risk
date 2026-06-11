@@ -4,9 +4,112 @@ src/processing/processor.py
 """
 
 import logging
+import re
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# KEYWORD NORMALISATION (dashboard "keyword in URL" filter)
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# A user keyword is matched case-insensitively as a substring of the article URL.
+# Before matching, each keyword is normalised into a SET of 1/2/4 variants; the
+# event/article matches if ANY variant is a substring of the lower-cased URL.
+#
+# Rules (in order):
+#   0. Lower-case; remove leading AND trailing spaces; remove spaces directly
+#      adjacent to a math/logic symbol; collapse remaining repeated spaces to one.
+#   1. Ampersand (handled separately, NOT space-stripped) -> two branches:
+#        (a) removed, (b) replaced with the spaced word " and " (never glued).
+#   2. Math/logic symbol present -> two branches:
+#        (a) each symbol -> '-', (b) each symbol removed.
+#      '&' is excluded from this set; '!' and '|' are plain punctuation; a literal
+#      '-' is a separator, never a minus.
+#   3. Per variant: re-collapse spaces, spaces -> '-', strip remaining punctuation
+#      (anything not a-z/0-9/'-'). Hyphens are NEVER collapsed or trimmed
+#      (so "C++" -> "c--").
+
+# Math/logic symbols (ampersand excluded — it has its own rule).
+_MATH_LOGIC = "+*/=<>%^~±×÷≤≥≠√∑∏∞¬∧∨→↔"
+_MATH_LOGIC_SET = set(_MATH_LOGIC)
+# Strip whitespace on either side of any math/logic symbol.
+_SPACE_AROUND_SYMBOL = re.compile(r"\s*([" + re.escape(_MATH_LOGIC) + r"])\s*")
+_MULTISPACE = re.compile(r" +")
+
+
+def _finish_variant(s: str) -> str:
+    """Re-collapse spaces, spaces->hyphen, strip leftover punctuation."""
+    s = _MULTISPACE.sub(" ", s).strip(" ")
+    s = s.replace(" ", "-")
+    return re.sub(r"[^a-z0-9-]", "", s)
+
+
+def normalize_keyword(keyword: str) -> set[str]:
+    """
+    Expand a raw user keyword into the set of normalised variants to match
+    against a URL. See the rules documented above for full behaviour.
+
+    Examples
+    --------
+        "oil & gas"   -> {"oil-gas", "oil-and-gas"}
+        "R&D"         -> {"rd", "r-and-d"}
+        "C++"         -> {"c--", "c"}
+        "price > cost!" -> {"price-cost", "pricecost"}
+        "A & B + C"   -> {"a-b-c", "a-bc", "a-and-b-c", "a-and-bc"}
+    """
+    if keyword is None:
+        return set()
+
+    # ── Step 0 — common pre-clean ─────────────────────────────────────────────
+    s = keyword.lower().strip()                 # leading + trailing spaces gone
+    s = _SPACE_AROUND_SYMBOL.sub(r"\1", s)       # symbols hug their neighbours
+    s = _MULTISPACE.sub(" ", s)
+
+    # ── Step 1 — ampersand branches ───────────────────────────────────────────
+    if "&" in s:
+        amp_variants = [s.replace("&", ""), s.replace("&", " and ")]
+    else:
+        amp_variants = [s]
+
+    # ── Step 2 — math/logic branches (per ampersand variant) ──────────────────
+    branches: list[str] = []
+    for v in amp_variants:
+        if any(c in _MATH_LOGIC_SET for c in v):
+            hyphened = "".join("-" if c in _MATH_LOGIC_SET else c for c in v)
+            removed = "".join("" if c in _MATH_LOGIC_SET else c for c in v)
+            branches.extend([hyphened, removed])
+        else:
+            branches.append(v)
+
+    # ── Step 3 — finish + dedupe ──────────────────────────────────────────────
+    out = {_finish_variant(b) for b in branches}
+    out.discard("")
+    return out
+
+
+def build_keyword_clause(keywords, url_column: str):
+    """
+    Build a ClickHouse WHERE fragment that is true when the URL column contains
+    any normalised variant of any keyword (case-insensitive substring match,
+    accelerated by the ngrambf_v1 index on lower(<url_column>)).
+
+    Returns (sql_fragment, params). sql_fragment is "" when there are no
+    usable keywords (caller should treat that as "no keyword constraint").
+    """
+    variants: set[str] = set()
+    for kw in keywords or []:
+        variants |= normalize_keyword(kw)
+    if not variants:
+        return "", {}
+
+    likes, params = [], {}
+    for i, variant in enumerate(sorted(variants)):
+        key = f"kw{i}"
+        likes.append(f"lower({url_column}) LIKE %({key})s")
+        params[key] = f"%{variant}%"
+    return "(" + " OR ".join(likes) + ")", params
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

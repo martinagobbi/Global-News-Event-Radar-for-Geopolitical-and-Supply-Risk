@@ -1,0 +1,22 @@
+<clickhouse>
+    <!--
+        Dev cluster access for the stock, passwordless `default` user.
+
+        The official image ships users.d/default-user.xml which restricts the
+        `default` user to localhost (::1 / 127.0.0.1). That blocks the pipeline
+        containers and node-to-node (Distributed / ON CLUSTER) traffic.
+
+        This file loads AFTER that one (sorts later in users.d/) and uses
+        replace="replace" to override <networks>, allowing connections from
+        anywhere ON THE PRIVATE DOCKER NETWORK. The ClickHouse ports are not
+        published to the host, so nothing outside the compose network can reach
+        these nodes. No password is used — consistent with the rest of the repo.
+    -->
+    <users>
+        <default>
+            <networks replace="replace">
+                <ip>::/0</ip>
+            </networks>
+        </default>
+    </users>
+</clickhouse>

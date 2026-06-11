@@ -1,0 +1,40 @@
+<clickhouse>
+    <!--
+        Cluster topology for the long-term GDELT store.
+
+        Two shards, one node each (no replicas). Both wide-column tables are
+        sharded by cityHash64(GLOBALEVENTID), so every row belonging to a given
+        event — the event itself and all of its mentions — hashes to the SAME
+        shard. Event<->mention joins are therefore shard-local (no cross-node
+        data movement), which is the whole point of this layout.
+
+        Extend by adding more <shard> blocks (and matching clickhouse-NN
+        services + macros files) — the sharding key needs no change.
+    -->
+    <remote_servers>
+        <gnews_cluster>
+            <shard>
+                <internal_replication>false</internal_replication>
+                <replica>
+                    <host>clickhouse-01</host>
+                    <port>9000</port>
+                </replica>
+            </shard>
+            <shard>
+                <internal_replication>false</internal_replication>
+                <replica>
+                    <host>clickhouse-02</host>
+                    <port>9000</port>
+                </replica>
+            </shard>
+        </gnews_cluster>
+    </remote_servers>
+
+    <!-- ClickHouse Keeper coordinates ON CLUSTER DDL across the nodes. -->
+    <zookeeper>
+        <node>
+            <host>clickhouse-keeper</host>
+            <port>9181</port>
+        </node>
+    </zookeeper>
+</clickhouse>

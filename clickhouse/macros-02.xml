@@ -1,0 +1,8 @@
+<clickhouse>
+    <!-- Identity of shard node 2. Used by ON CLUSTER DDL. -->
+    <macros>
+        <cluster>gnews_cluster</cluster>
+        <shard>02</shard>
+        <replica>clickhouse-02</replica>
+    </macros>
+</clickhouse>

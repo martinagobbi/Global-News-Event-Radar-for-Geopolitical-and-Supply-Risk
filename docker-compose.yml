@@ -1,6 +1,73 @@
-version: '3.8'
-
 services:
+  # ── Messaging: Kafka path for ingestion -> parsing ────────────
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.6.0
+    container_name: pipeline_zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+    networks:
+      - pipeline_network
+
+  kafka:
+    image: confluentinc/cp-kafka:7.6.0
+    container_name: pipeline_kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    networks:
+      - pipeline_network
+
+  # ── Long-term store: 2-shard ClickHouse cluster ─────────────────
+  clickhouse-keeper:
+    image: clickhouse/clickhouse-keeper:24.3
+    container_name: pipeline_ch_keeper
+    volumes:
+      - ./clickhouse/keeper.xml:/etc/clickhouse-keeper/keeper_config.xml:ro
+      - ch_keeper_data:/var/lib/clickhouse-keeper
+    networks:
+      - pipeline_network
+
+  clickhouse-01:
+    image: clickhouse/clickhouse-server:24.3
+    container_name: pipeline_clickhouse_01
+    depends_on:
+      - clickhouse-keeper
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    volumes:
+      - ./clickhouse/cluster.xml:/etc/clickhouse-server/config.d/cluster.xml:ro
+      - ./clickhouse/macros-01.xml:/etc/clickhouse-server/config.d/macros.xml:ro
+      - ./clickhouse/users.xml:/etc/clickhouse-server/users.d/zz-network-access.xml:ro
+      - ch01_data:/var/lib/clickhouse
+    networks:
+      - pipeline_network
+
+  clickhouse-02:
+    image: clickhouse/clickhouse-server:24.3
+    container_name: pipeline_clickhouse_02
+    depends_on:
+      - clickhouse-keeper
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    volumes:
+      - ./clickhouse/cluster.xml:/etc/clickhouse-server/config.d/cluster.xml:ro
+      - ./clickhouse/macros-02.xml:/etc/clickhouse-server/config.d/macros.xml:ro
+      - ./clickhouse/users.xml:/etc/clickhouse-server/users.d/zz-network-access.xml:ro
+      - ch02_data:/var/lib/clickhouse
+    networks:
+      - pipeline_network
+
   # Layer 1: Data ingestion
   ingestion:
     build:
@@ -20,25 +87,41 @@ services:
     container_name: pipeline_parsing
     depends_on:
       - ingestion
+      - kafka
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_TOPIC_EVENTS: gdelt_events_raw
+      KAFKA_TOPIC_MENTIONS: gdelt_mentions_raw
+      MENTION_ENRICH_WORKERS: "8"
+      MENTION_ENRICH_NLP: "1"
+      ENRICH_ONLY_RELEVANT: "1"
     volumes:
       - shared_data:/data
     networks:
       - pipeline_network
 
-  # Layer 3: Validation
+  # Layer 3: Validation + storage owner
   validation:
     build:
-      context: ./3-validation
+      context: ./3-validation_and_storage
       dockerfile: Dockerfile
     container_name: pipeline_validation
     depends_on:
       - parsing
+      - clickhouse-01
+      - clickhouse-02
+    environment:
+      CLICKHOUSE_HOST: clickhouse-01
+      CLICKHOUSE_PORT: "9000"
+      CLICKHOUSE_CLUSTER: gnews_cluster
+      LATEST_FILES_DIR: /data/latest_files
+      STATUS_DIR: /data/status
     volumes:
       - shared_data:/data
     networks:
       - pipeline_network
 
-  # Layer 4: Processing
+  # Layer 4: Processing — pure reader
   processing:
     build:
       context: ./4-processing
@@ -46,6 +129,12 @@ services:
     container_name: pipeline_processing
     depends_on:
       - validation
+      - clickhouse-01
+      - clickhouse-02
+    environment:
+      CLICKHOUSE_HOST: clickhouse-01
+      CLICKHOUSE_PORT: "9000"
+      STATUS_DIR: /data/status
     volumes:
       - shared_data:/data
     networks:
@@ -66,8 +155,11 @@ services:
     ports:
       - "8501:8501"
 
-volumes:
+volumes:        # G: mine
   shared_data:
+  ch_keeper_data:
+  ch01_data:
+  ch02_data:
 
 networks:
   pipeline_network:

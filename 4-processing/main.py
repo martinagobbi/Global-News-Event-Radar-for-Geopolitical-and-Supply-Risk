@@ -46,7 +46,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("processing")
 
-CH_HOST     = os.getenv("CLICKHOUSE_HOST",     "clickhouse")
+CH_HOST     = os.getenv("CLICKHOUSE_HOST",     "clickhouse-01")
 CH_PORT     = int(os.getenv("CLICKHOUSE_PORT", "9000"))
 CH_DATABASE = os.getenv("CLICKHOUSE_DATABASE", "default")
 CH_USER     = os.getenv("CLICKHOUSE_USER",     "default")
@@ -54,6 +54,7 @@ CH_PASSWORD = os.getenv("CLICKHOUSE_PASSWORD", "")
 
 PREFS_DIR     = os.getenv("PREFS_DIR",     "/data/user_preferences")
 PROCESSED_DIR = os.getenv("PROCESSED_DIR", "/data/processed")
+STATUS_FILE   = Path(os.getenv("STATUS_DIR", "/data/status")) / "pipeline_status.json"
 
 os.makedirs(PREFS_DIR,     exist_ok=True)
 os.makedirs(PROCESSED_DIR, exist_ok=True)
@@ -66,6 +67,16 @@ def _get_writer() -> ClickHouseWriter:
         host=CH_HOST, port=CH_PORT,
         database=CH_DATABASE, user=CH_USER, password=CH_PASSWORD,
     )
+
+
+def read_pipeline_status() -> dict:
+    """Read the global error status written by the validation layer."""
+    if not STATUS_FILE.exists():
+        return {"state": "OK"}
+    try:
+        return json.loads(STATUS_FILE.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {"state": "OK"}
 
 
 def _load_user_prefs(user_id: str) -> dict:
@@ -91,6 +102,14 @@ async def process_user(
     and write processed_{user_id}.csv to the shared volume.
     Called automatically by 5-serving/app.py when the user saves preferences.
     """
+    pipeline = read_pipeline_status()
+    if pipeline.get("state") == "ERROR":
+        raise HTTPException(
+            status_code=500,
+            detail=f"Pipeline in error state ({pipeline.get('reason')}); "
+                   f"data may be stale — refusing to serve.",
+        )
+
     try:
         prefs = _load_user_prefs(user_id)
     except FileNotFoundError as exc:
