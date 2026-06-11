@@ -61,6 +61,35 @@ INSERT INTO silver_events (
 ) VALUES
 """
 
+# DDL for the silver_mentions table (mentions enriched with Newspaper3k)
+_CREATE_MENTIONS_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS silver_mentions (
+    event_id          String,
+    event_time        String,
+    mention_time      String,
+    mention_type      String,
+    source_name       String,
+    mention_url       String,
+    confidence        Float64,
+    doc_tone          Float64,
+    article_title     String,
+    article_keywords  String,
+    enriched          UInt8,
+    inserted_at       DateTime DEFAULT now()
+)
+ENGINE = MergeTree()
+ORDER BY (event_id, mention_time)
+SETTINGS index_granularity = 8192
+"""
+
+_INSERT_MENTIONS_SQL = """
+INSERT INTO silver_mentions (
+    event_id, event_time, mention_time, mention_type, source_name,
+    mention_url, confidence, doc_tone,
+    article_title, article_keywords, enriched
+) VALUES
+"""
+
 
 class ClickHouseWriter:
     """
@@ -135,12 +164,13 @@ class ClickHouseWriter:
 
     def ensure_table(self) -> None:
         """
-        Create the silver_events table if it does not exist (idempotent).
-        Call once at service startup.
+        Create the silver_events and silver_mentions tables if they do not
+        exist (idempotent). Call once at service startup.
         """
         client = self._get_client()
         client.execute(_CREATE_TABLE_SQL)
-        logger.info("Table silver_events is ready on ClickHouse")
+        client.execute(_CREATE_MENTIONS_TABLE_SQL)
+        logger.info("Tables silver_events and silver_mentions are ready on ClickHouse")
 
     def write_event(self, event: dict) -> None:
         """
@@ -174,6 +204,33 @@ class ClickHouseWriter:
             types_check=True,
         )
         logger.info("Wrote %d silver events to ClickHouse", len(rows))
+        return len(rows)
+
+    def write_mentions_batch(self, mentions: list[dict]) -> int:
+        """
+        Write a list of enriched silver mentions to ClickHouse.
+
+        Parameters
+        ----------
+        mentions : list[dict] — output of to_silver_mention() after
+                                 enrichment.enrich_mentions_parallel()
+
+        Returns
+        -------
+        int — number of mentions written
+        """
+        if not mentions:
+            logger.debug("write_mentions_batch: empty list, nothing to write")
+            return 0
+
+        rows = [_mention_to_row(m) for m in mentions]
+        client = self._get_client()
+        client.execute(
+            _INSERT_MENTIONS_SQL,
+            rows,
+            types_check=True,
+        )
+        logger.info("Wrote %d silver mentions to ClickHouse", len(rows))
         return len(rows)
 
     def query_silver(
@@ -276,4 +333,25 @@ def _event_to_row(event: dict) -> tuple:
         float(event.get("risk_score", 0.0)),
         str(event.get("source_url", "")),
         str(event.get("source", "gdelt_events")),
+    )
+
+
+def _mention_to_row(mention: dict) -> tuple:
+    """
+    Convert a silver mention dict into the ordered tuple expected by
+    clickhouse-driver for the INSERT. Column order must match exactly the
+    columns listed in _INSERT_MENTIONS_SQL.
+    """
+    return (
+        str(mention.get("event_id", "")),
+        str(mention.get("event_time", "")),
+        str(mention.get("mention_time", "")),
+        str(mention.get("mention_type", "")),
+        str(mention.get("source_name", "")),
+        str(mention.get("mention_url", "")),
+        float(mention.get("confidence", 0.0)),
+        float(mention.get("doc_tone", 0.0)),
+        str(mention.get("article_title", "")),
+        str(mention.get("article_keywords", "")),
+        int(bool(mention.get("enriched", False))),
     )
