@@ -7,8 +7,6 @@
 import math
 import logging
 
-import pandas as pd
-
 logger = logging.getLogger(__name__)
 
 # ── GDELT column names (61 columns, 0-based index) ───────────────────────────
@@ -293,40 +291,6 @@ def to_silver_event(record: dict) -> dict:
         "source_url":   _safe_str(record.get("SOURCEURL", "")),
         "source":       "gdelt_events",
     }
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# BATCH HELPERS (for local / file-based usage)
-# ═══════════════════════════════════════════════════════════════════════════════
-
-def parse_gdelt_csv(filepath: str) -> pd.DataFrame:
-    """
-    Read a single GDELT CSV from disk and return the silver DataFrame.
-    Useful for local testing outside the Kafka/ClickHouse pipeline.
-    """
-    df = pd.read_csv(
-        filepath,
-        sep="\t",
-        header=None,
-        names=GDELT_COLUMNS,
-        dtype=str,
-        low_memory=False,
-        on_bad_lines="skip",
-    )
-    logger.info("CSV loaded: %d total rows", len(df))
-    mask = df.apply(lambda row: passes_filter(dict(row)), axis=1)
-    df_silver = df[mask].copy()
-    logger.info(
-        "After filtering: %d silver events (%.1f%%)",
-        len(df_silver), 100 * len(df_silver) / max(len(df), 1),
-    )
-    return df_silver
-
-
-def parse_gdelt_csv_to_json(filepath: str) -> list[dict]:
-    """Convenience wrapper: list of silver dicts ready for Kafka or ClickHouse."""
-    df_silver = parse_gdelt_csv(filepath)
-    return [to_silver_event(dict(row)) for _, row in df_silver.iterrows()]
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

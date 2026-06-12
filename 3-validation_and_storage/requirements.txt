@@ -1,2 +1,5 @@
 pandas>=2.0.0
 clickhouse-driver>=0.2.9
+newspaper3k>=0.2.8
+lxml_html_clean>=0.1.0
+nltk>=3.8

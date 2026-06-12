@@ -120,6 +120,9 @@ _MENTIONS_BODY = """(
     MentionDocTone             String,
     MentionDocTranslationInfo  String,
     Extras                     String,
+    article_title              String,
+    article_keywords           String,
+    enriched                   UInt8,
     INDEX idx_mentionid lower(MentionIdentifier) TYPE ngrambf_v1(4, 4096, 3, 0) GRANULARITY 4
 )"""
 
@@ -137,6 +140,11 @@ def _to_uint(value) -> int:
         return int(str(value).strip())
     except (TypeError, ValueError):
         return 0
+
+
+def _to_bool_uint(value) -> int:
+    """Parse an 'enriched' flag (True/False/1/0/empty) into a UInt8 0/1."""
+    return 1 if str(value).strip().lower() in ("1", "true", "t", "yes") else 0
 
 
 class Storage:
@@ -176,11 +184,14 @@ class Storage:
         client = self._get_client()
         c, db = self.cluster, self.database
 
-        # Events: local ReplacingMergeTree + Distributed router.
+        # Events: local ReplicatedReplacingMergeTree (3 replicas/shard) + router.
+        # {shard}/{replica} are ClickHouse macros from each node's macros.xml;
+        # the doubled braces emit them literally through the Python f-string.
         client.execute(
             f"CREATE TABLE IF NOT EXISTS gdelt_events_local ON CLUSTER {c} "
             f"{_EVENTS_BODY} "
-            f"ENGINE = ReplacingMergeTree(DATEADDED) "
+            f"ENGINE = ReplicatedReplacingMergeTree("
+            f"'/clickhouse/tables/{{shard}}/gdelt_events_local', '{{replica}}', DATEADDED) "
             f"PARTITION BY substring(Day, 1, 6) "
             f"ORDER BY (ActionGeo_CountryCode, GLOBALEVENTID) "
             f"SETTINGS index_granularity = 8192"
@@ -191,11 +202,12 @@ class Storage:
             f"ENGINE = Distributed({c}, {db}, gdelt_events_local, cityHash64(GLOBALEVENTID))"
         )
 
-        # Mentions: local MergeTree (no dedup) + Distributed router.
+        # Mentions: local ReplicatedMergeTree (3 replicas/shard, no dedup) + router.
         client.execute(
             f"CREATE TABLE IF NOT EXISTS gdelt_mentions_local ON CLUSTER {c} "
             f"{_MENTIONS_BODY} "
-            f"ENGINE = MergeTree() "
+            f"ENGINE = ReplicatedMergeTree("
+            f"'/clickhouse/tables/{{shard}}/gdelt_mentions_local', '{{replica}}') "
             f"PARTITION BY substring(MentionTimeDate, 1, 6) "
             f"ORDER BY (GLOBALEVENTID, MentionIdentifier) "
             f"SETTINGS index_granularity = 8192"
@@ -245,7 +257,9 @@ class Storage:
             return 0
         rows = [
             tuple(
-                _to_uint(r[col]) if col == "GLOBALEVENTID" else str(r[col])
+                _to_uint(r[col]) if col == "GLOBALEVENTID"
+                else _to_bool_uint(r[col]) if col == "enriched"
+                else str(r[col])
                 for col in MENTION_COLUMNS
             )
             for r in df.to_dict("records")

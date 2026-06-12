@@ -13,18 +13,28 @@ Steps
    the current events file OR already in the gdelt_events store. Rows whose
    GLOBALEVENTID matches neither are dropped, and the mentions file in
    latest_files is rewritten without them.
-3. Append both (cleaned) tables to the wide-column store.
-4. Trigger the events dedup so the most-recent DATEADDED wins.
+3. Enrich the surviving mentions with Newspaper3k (article_title,
+   article_keywords, enriched) — only the post-filter survivors are scraped,
+   bounded by a time budget (ENRICH_TIMEOUT_SECONDS).
+4. Append both (cleaned + enriched) tables to the wide-column store.
+5. Trigger the events dedup so the most-recent DATEADDED wins.
 
 Returns a small summary dict for logging.
 """
 
 import logging
+import os
 from pathlib import Path
 
+from enrichment import enrich_dataframe
 from gdelt import EVENT_ID, classify, load_table, save_table
 
 logger = logging.getLogger("validation.validator")
+
+# Enrichment configuration (the logic moved here from the parsing layer).
+ENRICH_WORKERS = int(os.getenv("MENTION_ENRICH_WORKERS", "8"))
+ENRICH_NLP     = os.getenv("MENTION_ENRICH_NLP", "1") == "1"
+ENRICH_TIMEOUT = int(os.getenv("ENRICH_TIMEOUT_SECONDS", "600"))
 
 
 def _split_pair(paths):
@@ -79,6 +89,16 @@ def validate_pair(paths, storage) -> dict:
     dropped = int((~keep_mask).sum())
     mentions_clean = mentions_df[keep_mask].copy()
 
+    # ── Enrich the surviving mentions (Newspaper3k → 3 columns) ───────────────
+    # Only the post-filter survivors are scraped; bounded by ENRICH_TIMEOUT.
+    enrich_dataframe(
+        mentions_clean,
+        url_column="MentionIdentifier",
+        max_workers=ENRICH_WORKERS,
+        do_nlp=ENRICH_NLP,
+        time_budget_s=ENRICH_TIMEOUT,
+    )
+
     if dropped:
         # Rewrite the file in latest_files so the table itself is cleaned.
         save_table(mentions_clean, mentions_path)
@@ -96,4 +116,5 @@ def validate_pair(paths, storage) -> dict:
         "mentions_seen": len(mentions_df),
         "mentions_dropped": dropped,
         "mentions_appended": n_mentions,
+        "mentions_enriched": int(mentions_clean["enriched"].sum()) if n_mentions else 0,
     }

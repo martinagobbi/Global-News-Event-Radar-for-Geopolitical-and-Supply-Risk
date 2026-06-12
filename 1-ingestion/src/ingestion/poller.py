@@ -102,7 +102,11 @@ def download_and_extract(session: requests.Session, file_url: str) -> Path:
 
 def validate_and_send_to_kafka(csv_path: Path, topic_name: str) -> None:
     """Valida il CSV e invia i record al rispettivo topic di Kafka"""
-    df = pd.read_csv(csv_path, sep="\t", header=None, low_memory=False)
+    # dtype=str + keep_default_na=False keep every field as its exact text
+    # (no int→float promotion, no "" → NaN), so the rows round-trip faithfully
+    # through Kafka and the parsing layer can rebuild the raw GDELT file exactly.
+    df = pd.read_csv(csv_path, sep="\t", header=None,
+                     dtype=str, keep_default_na=False, low_memory=False)
     print(f"[OK] CSV valido: {csv_path.name} | Righe rilevate: {len(df)}")
     
     print(f"[KAFKA] Caricamento su topic '{topic_name}' in corso...")

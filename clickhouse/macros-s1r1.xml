@@ -1,0 +1,8 @@
+<clickhouse>
+    <!-- Shard 1, replica 1 (the conventional write entry point for shard 1). -->
+    <macros>
+        <cluster>gnews_cluster</cluster>
+        <shard>01</shard>
+        <replica>clickhouse-s1r1</replica>
+    </macros>
+</clickhouse>

@@ -56,6 +56,10 @@ MENTION_COLUMNS = [
     "Actor1CharOffset", "Actor2CharOffset", "ActionCharOffset",
     "InRawText", "Confidence", "MentionDocLen", "MentionDocTone",
     "MentionDocTranslationInfo", "Extras",
+    # ── Enrichment fields appended by the parsing layer (Newspaper3k) ─────────
+    # A raw 16-column GDELT mentions file leaves these three empty (see
+    # load_table's fillna); an enriched 19-column file fills them.
+    "article_title", "article_keywords", "enriched",
 ]
 
 # The single column shared by both tables.
@@ -128,6 +132,10 @@ def load_table(path) -> pd.DataFrame:
         low_memory=False,
         on_bad_lines="skip",
     )
+    # Pad any missing trailing columns with "" rather than NaN. This is what lets
+    # a raw 16-column mentions file be read against the 19-column enriched schema
+    # (the 3 enrichment columns come back empty instead of the string "nan").
+    df = df.fillna("")
     logger.info("Loaded %s file %s: %d rows", kind, path.name, len(df))
     return df
 

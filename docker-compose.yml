@@ -24,47 +24,118 @@ services:
     networks:
       - pipeline_network
 
-  # ── Long-term store: 2-shard ClickHouse cluster ─────────────────
-  clickhouse-keeper:
+  # ── Coordination: 3-node ClickHouse Keeper ensemble (quorum) ──────────────
+  clickhouse-keeper-1:
     image: clickhouse/clickhouse-keeper:24.3
-    container_name: pipeline_ch_keeper
+    container_name: pipeline_ch_keeper_1
     volumes:
-      - ./clickhouse/keeper.xml:/etc/clickhouse-keeper/keeper_config.xml:ro
-      - ch_keeper_data:/var/lib/clickhouse-keeper
+      - ./clickhouse/keeper-1.xml:/etc/clickhouse-keeper/keeper_config.xml:ro
+      - keeper_1_data:/var/lib/clickhouse-keeper
     networks:
       - pipeline_network
 
-  clickhouse-01:
-    image: clickhouse/clickhouse-server:24.3
-    container_name: pipeline_clickhouse_01
-    depends_on:
-      - clickhouse-keeper
-    ulimits:
-      nofile:
-        soft: 262144
-        hard: 262144
+  clickhouse-keeper-2:
+    image: clickhouse/clickhouse-keeper:24.3
+    container_name: pipeline_ch_keeper_2
     volumes:
-      - ./clickhouse/cluster.xml:/etc/clickhouse-server/config.d/cluster.xml:ro
-      - ./clickhouse/macros-01.xml:/etc/clickhouse-server/config.d/macros.xml:ro
-      - ./clickhouse/users.xml:/etc/clickhouse-server/users.d/zz-network-access.xml:ro
-      - ch01_data:/var/lib/clickhouse
+      - ./clickhouse/keeper-2.xml:/etc/clickhouse-keeper/keeper_config.xml:ro
+      - keeper_2_data:/var/lib/clickhouse-keeper
     networks:
       - pipeline_network
 
-  clickhouse-02:
+  clickhouse-keeper-3:
+    image: clickhouse/clickhouse-keeper:24.3
+    container_name: pipeline_ch_keeper_3
+    volumes:
+      - ./clickhouse/keeper-3.xml:/etc/clickhouse-keeper/keeper_config.xml:ro
+      - keeper_3_data:/var/lib/clickhouse-keeper
+    networks:
+      - pipeline_network
+
+  # ── Long-term store: 2 shards × 3 replicas (6 ClickHouse nodes) ───────────
+  # Shard 1
+  clickhouse-s1r1:
     image: clickhouse/clickhouse-server:24.3
-    container_name: pipeline_clickhouse_02
-    depends_on:
-      - clickhouse-keeper
+    container_name: pipeline_clickhouse_s1r1
+    depends_on: [clickhouse-keeper-1, clickhouse-keeper-2, clickhouse-keeper-3]
     ulimits:
-      nofile:
-        soft: 262144
-        hard: 262144
+      nofile: {soft: 262144, hard: 262144}
     volumes:
       - ./clickhouse/cluster.xml:/etc/clickhouse-server/config.d/cluster.xml:ro
-      - ./clickhouse/macros-02.xml:/etc/clickhouse-server/config.d/macros.xml:ro
+      - ./clickhouse/macros-s1r1.xml:/etc/clickhouse-server/config.d/macros.xml:ro
       - ./clickhouse/users.xml:/etc/clickhouse-server/users.d/zz-network-access.xml:ro
-      - ch02_data:/var/lib/clickhouse
+      - ch_s1r1_data:/var/lib/clickhouse
+    networks:
+      - pipeline_network
+
+  clickhouse-s1r2:
+    image: clickhouse/clickhouse-server:24.3
+    container_name: pipeline_clickhouse_s1r2
+    depends_on: [clickhouse-keeper-1, clickhouse-keeper-2, clickhouse-keeper-3]
+    ulimits:
+      nofile: {soft: 262144, hard: 262144}
+    volumes:
+      - ./clickhouse/cluster.xml:/etc/clickhouse-server/config.d/cluster.xml:ro
+      - ./clickhouse/macros-s1r2.xml:/etc/clickhouse-server/config.d/macros.xml:ro
+      - ./clickhouse/users.xml:/etc/clickhouse-server/users.d/zz-network-access.xml:ro
+      - ch_s1r2_data:/var/lib/clickhouse
+    networks:
+      - pipeline_network
+
+  clickhouse-s1r3:
+    image: clickhouse/clickhouse-server:24.3
+    container_name: pipeline_clickhouse_s1r3
+    depends_on: [clickhouse-keeper-1, clickhouse-keeper-2, clickhouse-keeper-3]
+    ulimits:
+      nofile: {soft: 262144, hard: 262144}
+    volumes:
+      - ./clickhouse/cluster.xml:/etc/clickhouse-server/config.d/cluster.xml:ro
+      - ./clickhouse/macros-s1r3.xml:/etc/clickhouse-server/config.d/macros.xml:ro
+      - ./clickhouse/users.xml:/etc/clickhouse-server/users.d/zz-network-access.xml:ro
+      - ch_s1r3_data:/var/lib/clickhouse
+    networks:
+      - pipeline_network
+
+  # Shard 2
+  clickhouse-s2r1:
+    image: clickhouse/clickhouse-server:24.3
+    container_name: pipeline_clickhouse_s2r1
+    depends_on: [clickhouse-keeper-1, clickhouse-keeper-2, clickhouse-keeper-3]
+    ulimits:
+      nofile: {soft: 262144, hard: 262144}
+    volumes:
+      - ./clickhouse/cluster.xml:/etc/clickhouse-server/config.d/cluster.xml:ro
+      - ./clickhouse/macros-s2r1.xml:/etc/clickhouse-server/config.d/macros.xml:ro
+      - ./clickhouse/users.xml:/etc/clickhouse-server/users.d/zz-network-access.xml:ro
+      - ch_s2r1_data:/var/lib/clickhouse
+    networks:
+      - pipeline_network
+
+  clickhouse-s2r2:
+    image: clickhouse/clickhouse-server:24.3
+    container_name: pipeline_clickhouse_s2r2
+    depends_on: [clickhouse-keeper-1, clickhouse-keeper-2, clickhouse-keeper-3]
+    ulimits:
+      nofile: {soft: 262144, hard: 262144}
+    volumes:
+      - ./clickhouse/cluster.xml:/etc/clickhouse-server/config.d/cluster.xml:ro
+      - ./clickhouse/macros-s2r2.xml:/etc/clickhouse-server/config.d/macros.xml:ro
+      - ./clickhouse/users.xml:/etc/clickhouse-server/users.d/zz-network-access.xml:ro
+      - ch_s2r2_data:/var/lib/clickhouse
+    networks:
+      - pipeline_network
+
+  clickhouse-s2r3:
+    image: clickhouse/clickhouse-server:24.3
+    container_name: pipeline_clickhouse_s2r3
+    depends_on: [clickhouse-keeper-1, clickhouse-keeper-2, clickhouse-keeper-3]
+    ulimits:
+      nofile: {soft: 262144, hard: 262144}
+    volumes:
+      - ./clickhouse/cluster.xml:/etc/clickhouse-server/config.d/cluster.xml:ro
+      - ./clickhouse/macros-s2r3.xml:/etc/clickhouse-server/config.d/macros.xml:ro
+      - ./clickhouse/users.xml:/etc/clickhouse-server/users.d/zz-network-access.xml:ro
+      - ch_s2r3_data:/var/lib/clickhouse
     networks:
       - pipeline_network
 
@@ -92,15 +163,12 @@ services:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       KAFKA_TOPIC_EVENTS: gdelt_events_raw
       KAFKA_TOPIC_MENTIONS: gdelt_mentions_raw
-      MENTION_ENRICH_WORKERS: "8"
-      MENTION_ENRICH_NLP: "1"
-      ENRICH_ONLY_RELEVANT: "1"
     volumes:
       - shared_data:/data
     networks:
       - pipeline_network
 
-  # Layer 3: Validation + storage owner
+  # Layer 3: Validation + storage owner (writes to the replicated cluster)
   validation:
     build:
       context: ./3-validation_and_storage
@@ -108,14 +176,17 @@ services:
     container_name: pipeline_validation
     depends_on:
       - parsing
-      - clickhouse-01
-      - clickhouse-02
+      - clickhouse-s1r1   # write entry point for shard 1 (cluster handles the rest)
+      - clickhouse-s2r1   # write entry point for shard 2
     environment:
-      CLICKHOUSE_HOST: clickhouse-01
+      CLICKHOUSE_HOST: clickhouse-s1r1
       CLICKHOUSE_PORT: "9000"
       CLICKHOUSE_CLUSTER: gnews_cluster
       LATEST_FILES_DIR: /data/latest_files
       STATUS_DIR: /data/status
+      MENTION_ENRICH_WORKERS: "8"
+      MENTION_ENRICH_NLP: "1"
+      ENRICH_TIMEOUT_SECONDS: "600"
     volumes:
       - shared_data:/data
     networks:
@@ -129,10 +200,10 @@ services:
     container_name: pipeline_processing
     depends_on:
       - validation
-      - clickhouse-01
-      - clickhouse-02
+      - clickhouse-s1r1
+      - clickhouse-s2r1
     environment:
-      CLICKHOUSE_HOST: clickhouse-01
+      CLICKHOUSE_HOST: clickhouse-s1r1
       CLICKHOUSE_PORT: "9000"
       STATUS_DIR: /data/status
     volumes:
@@ -155,11 +226,17 @@ services:
     ports:
       - "8501:8501"
 
-volumes:        # G: mine
+volumes:
   shared_data:
-  ch_keeper_data:
-  ch01_data:
-  ch02_data:
+  keeper_1_data:
+  keeper_2_data:
+  keeper_3_data:
+  ch_s1r1_data:
+  ch_s1r2_data:
+  ch_s1r3_data:
+  ch_s2r1_data:
+  ch_s2r2_data:
+  ch_s2r3_data:
 
 networks:
   pipeline_network:

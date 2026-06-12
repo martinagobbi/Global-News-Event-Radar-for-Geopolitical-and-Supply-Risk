@@ -1,9 +1,6 @@
 <clickhouse>
-    <!--
-        ClickHouse Keeper: the coordination service (a built-in ZooKeeper
-        replacement) that ON CLUSTER DDL uses to apply schema changes to every
-        node. Single-node Keeper is fine for this dev cluster.
-    -->
+    <!-- Keeper node 1 of a 3-node ensemble. Only <server_id> differs per node;
+         the <raft_configuration> below lists all three and is identical on each. -->
     <logger>
         <level>warning</level>
         <console>true</console>
@@ -21,11 +18,9 @@
             <raft_logs_level>warning</raft_logs_level>
         </coordination_settings>
         <raft_configuration>
-            <server>
-                <id>1</id>
-                <hostname>clickhouse-keeper</hostname>
-                <port>9234</port>
-            </server>
+            <server><id>1</id><hostname>clickhouse-keeper-1</hostname><port>9234</port></server>
+            <server><id>2</id><hostname>clickhouse-keeper-2</hostname><port>9234</port></server>
+            <server><id>3</id><hostname>clickhouse-keeper-3</hostname><port>9234</port></server>
         </raft_configuration>
     </keeper_server>
 </clickhouse>

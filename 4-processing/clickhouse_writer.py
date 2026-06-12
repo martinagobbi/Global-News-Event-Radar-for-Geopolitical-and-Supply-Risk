@@ -7,6 +7,8 @@ import logging
 import os
 from typing import Optional
 
+import pandas as pd
+
 logger = logging.getLogger(__name__)
 
 # DDL for the silver_events table
@@ -219,6 +221,48 @@ class ClickHouseWriter:
         data_rows, columns = rows
         col_names = [c[0] for c in columns]
         return [dict(zip(col_names, row)) for row in data_rows]
+
+    # ── New store readers (gdelt_events / gdelt_mentions) ────────────────────
+
+    def query_events(self, date_from=None, date_to=None, limit=5000) -> pd.DataFrame:
+        """
+        Read deduplicated events from the gdelt_events Distributed table.
+        Returns a DataFrame (with column headers even when there are 0 rows).
+        date_from/date_to are YYYYMMDD bounds applied to the GDELT `Day` column.
+        """
+        conditions = ["1=1"]
+        params: dict = {"lim": int(limit)}
+        if date_from:
+            conditions.append("Day >= %(df)s")
+            params["df"] = date_from
+        if date_to:
+            conditions.append("Day <= %(dt)s")
+            params["dt"] = date_to
+        where = " AND ".join(conditions)
+        sql = (
+            f"SELECT * FROM gdelt_events FINAL WHERE {where} "
+            f"ORDER BY DATEADDED DESC LIMIT %(lim)s"
+        )
+        data, cols = self._get_client().execute(sql, params, with_column_types=True)
+        return pd.DataFrame(data, columns=[c[0] for c in cols])
+
+    def query_mentions_for_events(self, event_ids, limit=50000) -> pd.DataFrame:
+        """
+        Read the mentions whose GLOBALEVENTID is in `event_ids` from the
+        gdelt_mentions Distributed table. Returns a DataFrame (headers even when
+        empty — an empty id list yields a 0-row frame with the right columns).
+        """
+        ids = [int(i) for i in event_ids if i]
+        client = self._get_client()
+        if not ids:
+            data, cols = client.execute(
+                "SELECT * FROM gdelt_mentions LIMIT 0", with_column_types=True)
+            return pd.DataFrame(data, columns=[c[0] for c in cols])
+        data, cols = client.execute(
+            "SELECT * FROM gdelt_mentions WHERE GLOBALEVENTID IN %(ids)s LIMIT %(lim)s",
+            {"ids": ids, "lim": int(limit)}, with_column_types=True,
+        )
+        return pd.DataFrame(data, columns=[c[0] for c in cols])
 
     def close(self) -> None:
         """Close the database connection."""

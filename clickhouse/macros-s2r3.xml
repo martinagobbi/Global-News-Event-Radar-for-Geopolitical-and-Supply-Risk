@@ -1,0 +1,8 @@
+<clickhouse>
+    <!-- Shard 2, replica 3. -->
+    <macros>
+        <cluster>gnews_cluster</cluster>
+        <shard>02</shard>
+        <replica>clickhouse-s2r3</replica>
+    </macros>
+</clickhouse>

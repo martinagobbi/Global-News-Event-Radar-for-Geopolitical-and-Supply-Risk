@@ -14,7 +14,7 @@ File: /data/status/pipeline_status.json
     {
       "state": "ERROR" | "OK",
       "source": "3-validation_and_storage",
-      "reason": "too_many_files" | "stale_latest_files",
+      "reason": "stale_latest_files",
       "triggered_at": "20260611091500",
       "snapshot_files": ["<file A>", "<file B>"]
     }

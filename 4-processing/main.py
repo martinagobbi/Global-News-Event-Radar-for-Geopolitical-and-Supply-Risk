@@ -32,12 +32,10 @@ import logging
 import os
 from pathlib import Path
 
-import pandas as pd
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import JSONResponse
 
 from clickhouse_writer import ClickHouseWriter
-from processor import silver_to_gold, build_user_geo_filter
 
 logging.basicConfig(
     level=logging.INFO,
@@ -95,12 +93,16 @@ async def process_user(
     user_id: str,
     date_from: str | None = Query(default=None, description="Start date YYYYMMDD"),
     date_to:   str | None = Query(default=None, description="End date YYYYMMDD"),
-    limit:     int        = Query(default=5000,  description="Max silver rows"),
+    limit:     int        = Query(default=5000,  description="Max events"),
 ):
     """
-    Read silver events from ClickHouse, apply the user's geographic filter,
-    and write processed_{user_id}.csv to the shared volume.
-    Called automatically by 5-serving/app.py when the user saves preferences.
+    Read this user's slice of the store from gdelt_events / gdelt_mentions and
+    write it to the shared volume for the serving layer.
+
+    NOTE: the per-user geographic and keyword filters, and the silver->gold
+    transform, are NOT applied yet — those are defined once we know how each
+    user's data reaches this layer. For now this reads the deduplicated raw
+    events and their related mentions from the store and writes them as-is.
     """
     pipeline = read_pipeline_status()
     if pipeline.get("state") == "ERROR":
@@ -111,61 +113,36 @@ async def process_user(
         )
 
     try:
-        prefs = _load_user_prefs(user_id)
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc))
-
-    cameo_codes, fips_codes = build_user_geo_filter(prefs)
-    country_weights = prefs.get("country_weights", {})
-    min_risk_score  = float(prefs.get("min_risk_score", 0.0))
-
-    try:
         with _get_writer() as writer:
-            silver_events = writer.query_silver(
-                date_from=date_from,
-                date_to=date_to,
-                min_risk_score=0.0,  # country weights may raise an event above min_risk_score
-                limit=limit,
+            events_df = writer.query_events(
+                date_from=date_from, date_to=date_to, limit=limit,
             )
+            event_ids = events_df["GLOBALEVENTID"].tolist() if not events_df.empty else []
+            mentions_df = writer.query_mentions_for_events(event_ids)
     except Exception as exc:
         logger.error("ClickHouse query failed for user %s: %s", user_id, exc)
         raise HTTPException(status_code=500, detail=f"ClickHouse error: {exc}")
 
-    gold_events = silver_to_gold(
-        silver_events=silver_events,
-        cameo_codes=cameo_codes,
-        fips_codes=fips_codes,
-        country_weights=country_weights,
-        min_risk_score=min_risk_score,
-    )
-
-    # Write CSV with the filename expected by 5-serving/app.py
-    output_file = Path(PROCESSED_DIR) / f"processed_{user_id}.csv"
-    if gold_events:
-        pd.DataFrame(gold_events).to_csv(output_file, index=False)
-    else:
-        # Empty file with header so app.py does not raise an error
-        pd.DataFrame(columns=[
-            "event_id", "date", "event_code", "event_root",
-            "actor1", "actor2", "country_code", "fips_country",
-            "lat", "lon", "goldstein", "avg_tone", "num_articles",
-            "risk_score", "source_url", "source", "layer",
-        ]).to_csv(output_file, index=False)
+    # No silver->gold transform and no per-user geo/keyword filtering yet.
+    events_file   = Path(PROCESSED_DIR) / f"processed_{user_id}.csv"
+    mentions_file = Path(PROCESSED_DIR) / f"processed_{user_id}_mentions.csv"
+    events_df.to_csv(events_file, index=False)
+    mentions_df.to_csv(mentions_file, index=False)
 
     logger.info(
-        "User %s: %d silver → %d gold → %s",
-        user_id, len(silver_events), len(gold_events), output_file,
+        "User %s: %d events, %d mentions → %s",
+        user_id, len(events_df), len(mentions_df), events_file,
     )
 
     return JSONResponse({
         "status":         "success",
         "user_id":        user_id,
-        "silver_count":   len(silver_events),
-        "gold_count":     len(gold_events),
-        "output_file":    str(output_file),
-        "cameo_filter":   sorted(cameo_codes) if cameo_codes else None,
-        "fips_filter":    sorted(fips_codes)  if fips_codes  else None,
-        "min_risk_score": min_risk_score,
+        "events_count":   int(len(events_df)),
+        "mentions_count": int(len(mentions_df)),
+        "events_file":    str(events_file),
+        "mentions_file":  str(mentions_file),
+        "note": "raw read from gdelt_events/gdelt_mentions; "
+                "per-user filtering and gold transform not applied yet",
     })
 
 

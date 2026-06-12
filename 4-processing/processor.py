@@ -89,27 +89,88 @@ def normalize_keyword(keyword: str) -> set[str]:
     return out
 
 
-def build_keyword_clause(keywords, url_column: str):
+def normalize_keyword_enriched(keyword: str) -> str:
     """
-    Build a ClickHouse WHERE fragment that is true when the URL column contains
-    any normalised variant of any keyword (case-insensitive substring match,
-    accelerated by the ngrambf_v1 index on lower(<url_column>)).
+    Light normalisation used when matching against the ENRICHED fields
+    (article_keywords / article_title) — deliberately different from the URL
+    normalisation above.
 
-    Returns (sql_fragment, params). sql_fragment is "" when there are no
-    usable keywords (caller should treat that as "no keyword constraint").
+    The ONLY edits: strip leading/trailing spaces and collapse runs of internal
+    spaces to a single space. Every symbol is kept as-is, nothing is turned into
+    a hyphen, and case is preserved. Returns "" for an empty/blank keyword.
     """
-    variants: set[str] = set()
-    for kw in keywords or []:
-        variants |= normalize_keyword(kw)
-    if not variants:
+    if not keyword:
+        return ""
+    return _MULTISPACE.sub(" ", keyword.strip())
+
+
+def build_keyword_clause(
+    keywords,
+    url_column: str = "MentionIdentifier",
+    title_column: str = "article_title",
+    keywords_column: str = "article_keywords",
+    enriched_column: str = "enriched",
+):
+    """
+    Row-conditional keyword match for the enriched mentions table. A row matches
+    if a keyword is found in the field appropriate to THAT row:
+
+        enriched = 0                           -> search the URL
+        enriched = 1 AND article_keywords = '' -> search lower(article_title)
+        enriched = 1 AND article_keywords <> ''-> search article_keywords
+
+    Two different normalisations are applied to the search words:
+        * URL branch      -> normalize_keyword()          (lower-case, hyphenation,
+                                                            &/math-logic branching)
+        * enriched branch -> normalize_keyword_enriched() (trim + collapse spaces
+                                                            only; symbols & case kept)
+
+    URL matches use LIKE (backed by the ngrambf index on lower(url)); enriched
+    matches use position() — an exact, wildcard-free substring search — so that
+    symbols kept in the keyword are matched literally.
+
+    Returns (sql_fragment, params); ("", {}) when there are no usable keywords.
+    """
+    if not keywords:
         return "", {}
 
-    likes, params = [], {}
-    for i, variant in enumerate(sorted(variants)):
-        key = f"kw{i}"
-        likes.append(f"lower({url_column}) LIKE %({key})s")
-        params[key] = f"%{variant}%"
-    return "(" + " OR ".join(likes) + ")", params
+    url_variants: set[str] = set()
+    for kw in keywords:
+        url_variants |= normalize_keyword(kw)
+
+    enr_variants = {normalize_keyword_enriched(kw) for kw in keywords}
+    enr_variants.discard("")
+
+    params: dict = {}
+    branches: list[str] = []
+
+    # enriched = 0 → the URL (heavy/hyphen variants, case-insensitive via lower)
+    if url_variants:
+        likes = []
+        for i, v in enumerate(sorted(url_variants)):
+            key = f"kw_url_{i}"
+            params[key] = f"%{v}%"
+            likes.append(f"lower({url_column}) LIKE %({key})s")
+        branches.append(f"({enriched_column} = 0 AND (" + " OR ".join(likes) + "))")
+
+    # enriched = 1 → article_title when keywords are empty, else article_keywords
+    if enr_variants:
+        title_pos, kw_pos = [], []
+        for i, v in enumerate(sorted(enr_variants)):
+            key = f"kw_enr_{i}"
+            params[key] = v  # literal substring; symbols & case preserved
+            title_pos.append(f"position(lower({title_column}), %({key})s) > 0")
+            kw_pos.append(f"position({keywords_column}, %({key})s) > 0")
+        branches.append(
+            f"({enriched_column} = 1 AND {keywords_column} = '' AND ("
+            + " OR ".join(title_pos) + "))"
+        )
+        branches.append(
+            f"({enriched_column} = 1 AND {keywords_column} != '' AND ("
+            + " OR ".join(kw_pos) + "))"
+        )
+
+    return "(" + " OR ".join(branches) + ")", params
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
