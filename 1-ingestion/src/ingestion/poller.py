@@ -83,8 +83,8 @@ def fetch_latest_urls(session: requests.Session) -> Dict[str, str]:
             
     return {}
 
-def download_and_extract(session: requests.Session, file_url: str) -> Path:
-    """Scarica, salva il file zip ed estrae il CSV"""
+def download_and_extract(session: requests.Session, file_url: str) -> tuple[Path, Path]:
+    """Scarica, salva il file zip ed estrae il CSV. Restituisce (csv_path, zip_path)."""
     response = session.get(file_url, timeout=120)
     response.raise_for_status()
     content = response.content
@@ -98,21 +98,22 @@ def download_and_extract(session: requests.Session, file_url: str) -> Path:
         first_member = zf.namelist()[0]
         extracted_path = RAW_CSV_DIR / Path(first_member).name
         extracted_path.write_bytes(zf.read(first_member))
-        return extracted_path
+        return extracted_path, zip_path
 
-def validate_and_send_to_kafka(csv_path: Path, topic_name: str) -> None:
-    """Valida il CSV e invia i record al rispettivo topic di Kafka"""
-    # dtype=str + keep_default_na=False keep every field as its exact text
-    # (no int→float promotion, no "" → NaN), so the rows round-trip faithfully
-    # through Kafka and the parsing layer can rebuild the raw GDELT file exactly.
-    df = pd.read_csv(csv_path, sep="\t", header=None,
-                     dtype=str, keep_default_na=False, low_memory=False)
+def validate_send_and_cleanup(csv_path: Path, zip_path: Path, topic_name: str) -> None:
+    """Valida il CSV, invia i record a Kafka, poi rimuove i file raw dal volume."""
+    df = pd.read_csv(csv_path, sep="\t", header=None, low_memory=False)
     print(f"[OK] CSV valido: {csv_path.name} | Righe rilevate: {len(df)}")
-    
+
     print(f"[KAFKA] Caricamento su topic '{topic_name}' in corso...")
     records = df.to_dict(orient='records')
     push_to_kafka(topic_name, records)
     print(f"[OK] Inviati {len(records)} record a {topic_name}")
+
+    # Pulizia: i dati sono ora su Kafka, non servono più sul volume condiviso
+    csv_path.unlink(missing_ok=True)
+    zip_path.unlink(missing_ok=True)
+    print(f"[CLEANUP] Rimossi file raw: {csv_path.name}, {zip_path.name}")
 
 def process_pipeline(session: requests.Session) -> None:
     """Esegue il ciclo completo per caricare sia gli Events che le Mentions"""
@@ -132,8 +133,8 @@ def process_pipeline(session: requests.Session) -> None:
         print("[SKIP] Tabella Events già aggiornata all'ultimo rilascio.")
     else:
         print(f"[INFO] Nuovo file Events rilevato: {Path(event_url).name}")
-        csv_events = download_and_extract(session, event_url)
-        validate_and_send_to_kafka(csv_events, "gdelt_events_raw")
+        csv_events, zip_events = download_and_extract(session, event_url)
+        validate_send_and_cleanup(csv_events, zip_events, "gdelt_events_raw")
         state["events"] = event_url
 
     # 3. Gestione delle MENZIONI
@@ -142,8 +143,8 @@ def process_pipeline(session: requests.Session) -> None:
         print("[SKIP] Tabella Mentions già aggiornata all'ultimo rilascio.")
     else:
         print(f"[INFO] Nuovo file Mentions rilevato: {Path(mention_url).name}")
-        csv_mentions = download_and_extract(session, mention_url)
-        validate_and_send_to_kafka(csv_mentions, "gdelt_mentions_raw")
+        csv_mentions, zip_mentions = download_and_extract(session, mention_url)
+        validate_send_and_cleanup(csv_mentions, zip_mentions, "gdelt_mentions_raw")
         state["mentions"] = mention_url
 
     # 4. Salva lo stato aggiornato
