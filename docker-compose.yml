@@ -1,28 +1,4 @@
 services:
-  # ── Messaging: Kafka path for ingestion -> parsing ────────────
-  zookeeper:
-    image: confluentinc/cp-zookeeper:7.6.0
-    container_name: pipeline_zookeeper
-    environment:
-      ZOOKEEPER_CLIENT_PORT: 2181
-    networks:
-      - pipeline_network
-
-  kafka:
-    image: confluentinc/cp-kafka:7.6.0
-    container_name: pipeline_kafka
-    depends_on:
-      - zookeeper
-    ports:
-      - "9092:9092"
-    environment:
-      KAFKA_BROKER_ID: 1
-      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
-      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
-      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
-    networks:
-      - pipeline_network
 
   # ── Coordination: 3-node ClickHouse Keeper ensemble (quorum) ──────────────
   clickhouse-keeper-1:
@@ -158,11 +134,6 @@ services:
     container_name: pipeline_parsing
     depends_on:
       - ingestion
-      - kafka
-    environment:
-      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
-      KAFKA_TOPIC_EVENTS: gdelt_events_raw
-      KAFKA_TOPIC_MENTIONS: gdelt_mentions_raw
     volumes:
       - shared_data:/data
     networks:

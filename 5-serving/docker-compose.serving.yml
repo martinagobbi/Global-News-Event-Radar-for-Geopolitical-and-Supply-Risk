@@ -1,0 +1,20 @@
+services:
+  frontend:
+    build: ./frontend
+    container_name: radar-frontend
+    environment:
+      BACKEND_URL: http://backend:8000
+    ports:
+      - "8501:8501"
+    depends_on:
+      - backend
+
+  backend:
+    build: ./backend
+    container_name: radar-backend
+    environment:
+      DATA_DIR: /data
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/data

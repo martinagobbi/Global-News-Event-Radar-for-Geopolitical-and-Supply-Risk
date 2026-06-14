@@ -9,6 +9,7 @@ from data.gold_layer import (
     get_dashboard_summary,
     get_gold_layer_status,
     get_older_events,
+    get_system_status,
     trigger_gold_layer_computation,
 )
 from data.user_store import get_current_user, get_user_profile, is_first_login, save_user_profile
@@ -25,7 +26,13 @@ if is_first_login(user_id):
 
 profile = get_user_profile(user_id)
 status = get_gold_layer_status(user_id)
+system_status = get_system_status(user_id)
 
+if system_status.get("status") == "ERROR":
+    st.error(
+        "Due to technical difficulties, this dashboard has not been updated since "
+        f"{system_status.get('timestamp_of_last_update', 'an unknown time')}."
+    )
 header_left, header_right = st.columns([3, 1])
 with header_left:
     st.caption(

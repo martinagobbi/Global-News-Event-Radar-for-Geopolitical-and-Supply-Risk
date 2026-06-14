@@ -21,7 +21,7 @@ st.set_page_config(
 
 def bootstrap() -> None:
     ensure_storage()
-    user_id = st.query_params.get("user", "demo_user")
+    user_id = st.query_params.get("user", "demo_logistics")
     st.session_state["current_user_id"] = user_id
 
 

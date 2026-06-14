@@ -1,7 +1,11 @@
 #!/usr/bin/env python
 """
-Ingestion layer: Fetch/read raw data from source
+Ingestion layer: entry point per il Docker container.
+Lancia il poller GDELT in modalità loop (ogni 15 minuti) o in modalità backfill.
+La modalità è controllata dalla variabile d'ambiente MODE (default: poller).
 """
 
-print("Ingestion layer running...")
-# Add your ingestion logic here
+from src.ingestion.poller import main
+
+if __name__ == "__main__":
+    main()

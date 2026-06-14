@@ -2,6 +2,3 @@ requests~=2.34
 pandas~=2.2
 numpy~=2.2
 tqdm~=4.67
-confluent_kafka~=2.14
-os~=0.1
-

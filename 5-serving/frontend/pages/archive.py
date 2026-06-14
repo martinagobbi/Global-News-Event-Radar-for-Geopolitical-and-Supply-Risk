@@ -10,7 +10,7 @@ user_id = get_current_user()
 
 if is_first_login(user_id):
     st.warning("The archive becomes available after first-time setup.")
-    st.page_link("pages/1_onboarding.py", label="Open setup", icon="🧭")
+    st.page_link("pages/onboarding.py", label="Open setup", icon="🧭")
     st.stop()
 
 archived_events = get_archived_events(user_id)

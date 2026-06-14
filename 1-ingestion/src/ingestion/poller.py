@@ -9,20 +9,16 @@ from typing import Dict, Optional
 import pandas as pd
 import requests
 
-# IMPORTA IL PRODUCER KAFKA
-try:
-    from src.ingestion.kafka_producer import push_to_kafka
-except ImportError:
-    from kafka_producer import push_to_kafka
-
 # Cambiato all'URL dei 15 minuti, specifico per lo streaming real-time
 LAST_15MIN_URL = "http://data.gdeltproject.org/gdeltv2/last15minutes.txt"
 
 POLL_INTERVAL_SECONDS = 15 * 60
 
-BASE_DIR = Path(__file__).resolve().parent.parent.parent 
-RAW_ZIP_DIR = BASE_DIR / "data" / "raw" / "zip"
-RAW_CSV_DIR = BASE_DIR / "data" / "raw" / "csv"
+BASE_DIR = Path(__file__).resolve().parent.parent.parent
+# In Docker, /data è il volume condiviso (shared_data). In locale, si usa data/ relativo alla root.
+DATA_DIR = Path("/data") if Path("/data").exists() else BASE_DIR / "data"
+RAW_ZIP_DIR = DATA_DIR / "raw" / "zip"
+RAW_CSV_DIR = DATA_DIR / "raw" / "csv"
 STATE_DIR = BASE_DIR / "state"
 STATE_FILE = STATE_DIR / "last_seen.json"
 
@@ -100,20 +96,15 @@ def download_and_extract(session: requests.Session, file_url: str) -> tuple[Path
         extracted_path.write_bytes(zf.read(first_member))
         return extracted_path, zip_path
 
-def validate_send_and_cleanup(csv_path: Path, zip_path: Path, topic_name: str) -> None:
-    """Valida il CSV, invia i record a Kafka, poi rimuove i file raw dal volume."""
+def validate_and_cleanup(csv_path: Path, zip_path: Path) -> None:
+    """Valida il CSV, lo scrive sul volume condiviso per il parsing, poi rimuove lo ZIP."""
     df = pd.read_csv(csv_path, sep="\t", header=None, low_memory=False)
     print(f"[OK] CSV valido: {csv_path.name} | Righe rilevate: {len(df)}")
 
-    print(f"[KAFKA] Caricamento su topic '{topic_name}' in corso...")
-    records = df.to_dict(orient='records')
-    push_to_kafka(topic_name, records)
-    print(f"[OK] Inviati {len(records)} record a {topic_name}")
-
-    # Pulizia: i dati sono ora su Kafka, non servono più sul volume condiviso
-    csv_path.unlink(missing_ok=True)
+    # Il CSV rimane in RAW_CSV_DIR (/data/raw/csv/) dove il parsing lo leggerà.
+    # Il parsing è responsabile di cancellarlo dopo averlo processato.
     zip_path.unlink(missing_ok=True)
-    print(f"[CLEANUP] Rimossi file raw: {csv_path.name}, {zip_path.name}")
+    print(f"[CLEANUP] Rimosso ZIP raw: {zip_path.name}")
 
 def process_pipeline(session: requests.Session) -> None:
     """Esegue il ciclo completo per caricare sia gli Events che le Mentions"""
@@ -134,7 +125,7 @@ def process_pipeline(session: requests.Session) -> None:
     else:
         print(f"[INFO] Nuovo file Events rilevato: {Path(event_url).name}")
         csv_events, zip_events = download_and_extract(session, event_url)
-        validate_send_and_cleanup(csv_events, zip_events, "gdelt_events_raw")
+        validate_and_cleanup(csv_events, zip_events)
         state["events"] = event_url
 
     # 3. Gestione delle MENZIONI
@@ -144,7 +135,7 @@ def process_pipeline(session: requests.Session) -> None:
     else:
         print(f"[INFO] Nuovo file Mentions rilevato: {Path(mention_url).name}")
         csv_mentions, zip_mentions = download_and_extract(session, mention_url)
-        validate_send_and_cleanup(csv_mentions, zip_mentions, "gdelt_mentions_raw")
+        validate_and_cleanup(csv_mentions, zip_mentions)
         state["mentions"] = mention_url
 
     # 4. Salva lo stato aggiornato
