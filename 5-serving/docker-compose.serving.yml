@@ -8,13 +8,31 @@ services:
       - "8501:8501"
     depends_on:
       - backend
+    networks:
+      - pipeline_network
 
   backend:
     build: ./backend
     container_name: radar-backend
     environment:
-      DATA_DIR: /data
+      USE_MOCK: "false"
+      MONGO_URI: "mongodb://pipeline_mongo1:27017,pipeline_mongo2:27017,pipeline_mongo3:27017/?replicaSet=rs0"
+      MONGO_DB: "radar"
+      MONGO_TIMEOUT: "5"
+      ORACLE_HOST: "pipeline_oracle"
+      ORACLE_PORT: "1521"
+      ORACLE_SERVICE: "GDELT"
+      ORACLE_USER: "radar"
+      ORACLE_PASSWORD: "radar"
+      ORACLE_TIMEOUT: "10"
+      ORACLE_RETRIES: "3"
     ports:
       - "8000:8000"
-    volumes:
-      - ./data:/data
+    depends_on:
+      - backend-ready
+    networks:
+      - pipeline_network
+
+networks:
+  pipeline_network:
+    external: true

@@ -115,6 +115,34 @@ services:
     networks:
       - pipeline_network
 
+   # ── MongoDB: replica set a 3 nodi (per i profili utente del serving) ───────
+  mongo1:
+    image: mongo:7
+    container_name: pipeline_mongo1
+    command: ["--replSet", "rs0", "--bind_ip_all"]
+    volumes:
+      - mongo1_data:/data/db
+    networks:
+      - pipeline_network
+
+  mongo2:
+    image: mongo:7
+    container_name: pipeline_mongo2
+    command: ["--replSet", "rs0", "--bind_ip_all"]
+    volumes:
+      - mongo2_data:/data/db
+    networks:
+      - pipeline_network
+
+  mongo3:
+    image: mongo:7
+    container_name: pipeline_mongo3
+    command: ["--replSet", "rs0", "--bind_ip_all"]
+    volumes:
+      - mongo3_data:/data/db
+    networks:
+      - pipeline_network
+
   # Layer 1: Data ingestion
   ingestion:
     build:
@@ -183,19 +211,12 @@ services:
       - pipeline_network
 
   # Layer 5: Serving
-  serving:
-    build:
-      context: ./5-serving
-      dockerfile: Dockerfile
-    container_name: pipeline_serving
-    depends_on:
-      - processing
-    volumes:
-      - shared_data:/data
-    networks:
-      - pipeline_network
-    ports:
-      - "8501:8501"
+  # ── Serving: managed by the separate compose file in 5-serving/ ───────────
+  # Not defined here — the compose file in 5-serving/docker-compose.yml
+  # declares pipeline_network as an external network and attaches to it.
+  # To start the full stack:
+  #   1. docker compose up -d          (this file — creates pipeline_network)
+  #   2. docker compose -f 5-serving/docker-compose.yml up -d
 
 volumes:
   shared_data:
@@ -208,6 +229,8 @@ volumes:
   ch_s2r1_data:
   ch_s2r2_data:
   ch_s2r3_data:
-
+  mongo1_data:
+  mongo2_data:
+  mongo3_data:
 networks:
   pipeline_network:

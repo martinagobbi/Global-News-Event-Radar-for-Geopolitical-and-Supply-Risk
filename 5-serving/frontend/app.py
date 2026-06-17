@@ -8,7 +8,7 @@ ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
-from data.user_store import ensure_storage, get_current_user, is_first_login
+from data.user_store import get_current_user, is_first_login
 
 
 st.set_page_config(
@@ -20,7 +20,6 @@ st.set_page_config(
 
 
 def bootstrap() -> None:
-    ensure_storage()
     user_id = st.query_params.get("user", "demo_logistics")
     st.session_state["current_user_id"] = user_id
 
@@ -28,16 +27,13 @@ def bootstrap() -> None:
 def sidebar_status() -> None:
     user_id = get_current_user()
     first_login = is_first_login(user_id)
-
-    st.sidebar.title("Global News Event Radar for Geopolitical and Supply Risk")
-    st.sidebar.caption("This radar continuously ingests massive GDELT and document streams, filtering out media background noise to isolate high-probability events. Use this dashboard to track, map, and assess real-time developments threatening the operational stability of specific firms, sectors, and geographic regions.")
+    st.sidebar.title("Global News Event Radar")
+    st.sidebar.caption(
+        "Continuously ingests GDELT streams, filtering media noise to isolate "
+        "high-probability events threatening supply chain stability."
+    )
     st.sidebar.write(f"Current user: `{user_id}`")
-    st.sidebar.write(
-        "Status: first-time setup required" if first_login else "Status: registered user"
-    )
-    st.sidebar.info(
-        "Registered users can open the dashboard immediately."
-    )
+    st.sidebar.write("Status: " + ("first-time setup required" if first_login else "registered user"))
 
 
 bootstrap()
@@ -45,8 +41,8 @@ sidebar_status()
 
 st.title("Global News Event Radar for Geopolitical and Supply Risk")
 st.write(
-    "This app separates first-time setup from daily monitoring. New users register their monitoring perimeter first; "
-    "registered users can go straight to the briefing."
+    "New users complete the monitoring perimeter setup first. "
+    "Registered users can go straight to the briefing dashboard."
 )
 
 col1, col2 = st.columns(2)
@@ -57,10 +53,8 @@ with col2:
 
 st.divider()
 st.subheader("Application flow")
-st.markdown(
-    """
-    - `Phase 1`: first-time registration, monitoring countries, and risk categories.
-    - `Phase 2`: background computation of the user-specific gold layer.
-    - `Phase 3`: dashboard reads from the precomputed gold layer and shows heatmap, briefing, and tags.
-    """
-)
+st.markdown("""
+- **Phase 1** — Register monitoring perimeter (countries, risk categories).
+- **Phase 2** — Processing pipeline queries GDELT, stores user-article associations in Oracle.
+- **Phase 3** — Dashboard reads from Oracle via backend API and renders event cards.
+""")

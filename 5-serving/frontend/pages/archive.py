@@ -1,5 +1,6 @@
 import streamlit as st
 
+from components.event_card import render_event_card
 from data.gold_layer import get_archived_events
 from data.user_store import get_current_user, is_first_login
 
@@ -13,17 +14,12 @@ if is_first_login(user_id):
     st.page_link("pages/onboarding.py", label="Open setup", icon="🧭")
     st.stop()
 
-archived_events = get_archived_events(user_id)
+st.caption("Events removed from the main Radar Briefing with the 'Not important / Archive' tag.")
 
-st.caption("Events removed from the main Radar's Briefing with the Not important / Archive tag.")
+archived = get_archived_events(user_id)
 
-if not archived_events:
+if not archived:
     st.info("No archived events yet.")
 else:
-    for event in archived_events:
-        with st.expander(f"{event['card_title']} ({event['country']})"):
-            st.write(event["event_summary"])
-            st.write(f"GlobalEventID: `{event['global_event_id']}`")
-            st.write(f"Available articles: `{len(event['articles'])}`")
-            if event.get("top_article_url"):
-                st.link_button("Open top source", event["top_article_url"])
+    for event in archived:
+        render_event_card(event)
