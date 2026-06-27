@@ -2,44 +2,42 @@
 """
 2-parsing/main.py
 -----------------
-Parsing layer — a (near) raw pass-through that turns the per-row Kafka stream
-back into per-15-minute GDELT files and drops them into latest_files for the
+Parsing layer — a (near) raw file-based pass-through that turns the 15-minute GDELT files and drops them into latest_files for the
 validation layer.
 
 Flow
 ----
-Ingestion publishes each GDELT row to Kafka (one message per row) on two topics:
-    gdelt_events_raw    — raw Events rows   (61 columns)
-    gdelt_mentions_raw  — raw Mentions rows (16 columns)
+The ingestion poller drops the raw GDELT files into RAW_CSV_DIR (/data/raw/csv):
+    <slice>.export.CSV     (events,   61 columns, tab-separated, no header)
+    <slice>.mentions.CSV   (mentions, 16 columns, tab-separated, no header)
+where <slice> is the GDELT 15-minute timestamp (e.g. 20260514083000).
 
-This layer reassembles those rows into the original 15-minute "slices":
-    * events   — kept ONLY if they pass the supply-chain relevance filter, then
-                 written RAW (untransformed) so validation sees real GDELT columns.
-    * mentions — passed through COMPLETELY RAW: no filtering, no enrichment, no
-                 extra columns. (Validation does the GLOBALEVENTID filter and the
-                 Newspaper3k enrichment.)
+This layer watches that directory and, for every slice whose events AND mentions
+files are both present and stable, it:
+    1. keeps only supply-chain-relevant events (parser.passes_filter),
+    2. keeps ALL mentions raw (validation does the referential-integrity filter),
+    3. writes the pair into LATEST_FILES_DIR (/data/latest_files) for layer 3,
+    4. deletes the consumed source files from RAW_CSV_DIR.
 
 A "slice" is identified by its 15-minute timestamp, which is uniform within one
 GDELT file: DATEADDED (events, column 59) and MentionTimeDate (mentions, col 2).
 
-Flush conditions — a slice T is closed and queued for publishing when EITHER:
-    1. BOTH topics have advanced past T, i.e. min(newest_event_ts,
-       newest_mention_ts) > T. Each topic preserves its own order, so once both
-       have shown a newer slice, every row of T has been consumed. This is the
-       catch-up/backlog trigger and is immune to cross-topic lag.
-    2. No new row has arrived for T within PARSING_SLICE_IDLE_SECONDS — the live
-       (15-min cadence) trigger and the safety net for the newest slice.
-
-Back-pressure: completed slices are published ONE pair at a time, only when
-latest_files is empty, so validation (which can take minutes to enrich) is never
-handed more than one pair at once.
+Hand-off rules to layer 3 (validation):
+    * tab-separated, header-less, official GDELT column order — matches
+      gdelt.load_table();
+    * atomic write (temp name -> rename), mentions renamed LAST, so the watcher
+      never sees a half-written file;
+    * back-pressure: a new pair is published only when latest_files is empty
+      (the previous pair has been consumed), so validation — which can take
+      minutes to enrich — is never overrun.
 
 Environment variables
 ---------------------
-    KAFKA_BOOTSTRAP_SERVERS / KAFKA_TOPIC_EVENTS / KAFKA_TOPIC_MENTIONS / KAFKA_CONSUMER_GROUP
-    LATEST_FILES_DIR             output dir (default /data/latest_files)
-    PARSING_SLICE_IDLE_SECONDS   idle flush threshold (default 90)
-    POLL_TIMEOUT                 Kafka poll timeout, seconds (default 1.0)
+    RAW_CSV_DIR              input dir   (default /data/raw/csv)
+    LATEST_FILES_DIR         output dir  (default /data/latest_files)
+    FILTER_EVENTS            keep only relevant events 1/0 (default 1)
+    SCAN_INTERVAL_SECONDS    directory poll interval       (default 5)
+    FILE_STABLE_SECONDS      min file age before reading   (default 3)
 """
 
 import json
@@ -48,193 +46,127 @@ import os
 import time
 from pathlib import Path
 
-from confluent_kafka import Consumer, KafkaError, KafkaException
+import pandas as pd
 
-from parser import passes_filter
-
+from parser import passes_filter, GDELT_COLUMNS, MENTIONS_COLUMNS
+ 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger("parsing")
-
-KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092")
-TOPIC_EVENTS    = os.getenv("KAFKA_TOPIC_EVENTS",   "gdelt_events_raw")
-TOPIC_MENTIONS  = os.getenv("KAFKA_TOPIC_MENTIONS", "gdelt_mentions_raw")
-KAFKA_GROUP     = os.getenv("KAFKA_CONSUMER_GROUP", "parsing-group")
-
+ 
+RAW_CSV_DIR      = Path(os.getenv("RAW_CSV_DIR",      "/data/raw/csv"))
 LATEST_FILES_DIR = Path(os.getenv("LATEST_FILES_DIR", "/data/latest_files"))
-IDLE_SECONDS     = int(os.getenv("PARSING_SLICE_IDLE_SECONDS", "90"))
-POLL_TIMEOUT     = float(os.getenv("POLL_TIMEOUT", "1.0"))
-STARTUP_RETRY_DELAY = 5
-
-# Column counts and the index of the 15-minute slice timestamp in each table.
-EVENT_NCOLS = 61
-MENTION_NCOLS = 16
-EVENT_SLICE_IDX = 59     # DATEADDED
-MENTION_SLICE_IDX = 2    # MentionTimeDate
-
-
-def build_consumer() -> Consumer:
-    conf = {
-        "bootstrap.servers":  KAFKA_BOOTSTRAP,
-        "group.id":           KAFKA_GROUP,
-        "auto.offset.reset":  "earliest",
-        "enable.auto.commit": True,
-    }
-    consumer = Consumer(conf)
-    consumer.subscribe([TOPIC_EVENTS, TOPIC_MENTIONS])
-    logger.info("Kafka consumer connected to %s; topics '%s','%s' (group %s)",
-                KAFKA_BOOTSTRAP, TOPIC_EVENTS, TOPIC_MENTIONS, KAFKA_GROUP)
-    return consumer
-
-
-# ── Raw-row helpers ───────────────────────────────────────────────────────────
-
-def _field(record: dict, i: int) -> str:
-    """Read column i from a JSON record whose keys are "0".."N" (or ints)."""
-    v = record.get(str(i), record.get(i, ""))
-    return "" if v is None else str(v)
-
-
-def _raw_line(record: dict, ncols: int) -> str:
-    """Reconstruct the original tab-separated GDELT row from the record."""
-    return "\t".join(_field(record, i) for i in range(ncols))
-
-
-def _atomic_write(path: Path, text: str) -> None:
-    """Write via a hidden temp file + rename so readers never see a partial file.
-    Validation ignores dotfiles, so the temp stays invisible until the rename."""
-    tmp = path.with_name("." + path.name + ".tmp")
-    tmp.write_text(text, encoding="utf-8")
-    os.replace(tmp, path)
-
-
+FILTER_EVENTS    = os.getenv("FILTER_EVENTS", "1") == "1"
+SCAN_INTERVAL    = int(os.getenv("SCAN_INTERVAL_SECONDS", "5"))
+FILE_STABLE_SECS = int(os.getenv("FILE_STABLE_SECONDS", "3"))
+ 
+EVENTS_SUFFIX   = ".export.CSV"
+MENTIONS_SUFFIX = ".mentions.CSV"
+ 
+ 
+def _slice_of(path: Path) -> str | None:
+    """Return the 15-minute slice id from a GDELT filename, or None."""
+    name = path.name
+    if name.endswith(EVENTS_SUFFIX):
+        return name[: -len(EVENTS_SUFFIX)]
+    if name.endswith(MENTIONS_SUFFIX):
+        return name[: -len(MENTIONS_SUFFIX)]
+    return None
+ 
+ 
+def _stable(path: Path) -> bool:
+    """True if the file is old enough to be considered fully written."""
+    try:
+        return (time.time() - path.stat().st_mtime) >= FILE_STABLE_SECS
+    except OSError:
+        return False
+ 
+ 
+def _ready_pairs() -> list[tuple[str, Path, Path]]:
+    """Find slices whose events+mentions files are both present and stable."""
+    events: dict[str, Path] = {}
+    mentions: dict[str, Path] = {}
+    if not RAW_CSV_DIR.exists():
+        return []
+    for p in RAW_CSV_DIR.iterdir():
+        if not p.is_file() or p.name.startswith("."):
+            continue
+        sl = _slice_of(p)
+        if sl is None:
+            continue
+        (events if p.name.endswith(EVENTS_SUFFIX) else mentions)[sl] = p
+ 
+    pairs = []
+    for sl in sorted(set(events) & set(mentions)):       # oldest slice first
+        ev, mn = events[sl], mentions[sl]
+        if _stable(ev) and _stable(mn):
+            pairs.append((sl, ev, mn))
+    return pairs
+ 
+ 
 def _latest_files_empty() -> bool:
+    """True if no pair is still pending in latest_files."""
     if not LATEST_FILES_DIR.exists():
         return True
     return not any(p.is_file() and not p.name.startswith(".")
                    for p in LATEST_FILES_DIR.iterdir())
-
-
-def _publish(slice_ts: str, slc: dict) -> None:
-    """Write the raw events+mentions pair for one slice into latest_files."""
-    events_text   = "\n".join(slc["events"])   + ("\n" if slc["events"]   else "")
-    mentions_text = "\n".join(slc["mentions"]) + ("\n" if slc["mentions"] else "")
-    _atomic_write(LATEST_FILES_DIR / f"{slice_ts}.export.CSV",   events_text)
-    _atomic_write(LATEST_FILES_DIR / f"{slice_ts}.mentions.CSV", mentions_text)
-    logger.info("Published slice %s (events=%d, mentions=%d)",
-                slice_ts, len(slc["events"]), len(slc["mentions"]))
-
-
-# ── Main loop ───────────────────────────────────────────────────────────────
-
-def main() -> None:
+ 
+ 
+def _atomic_write(df: pd.DataFrame, final: Path) -> None:
+    """Write df as header-less TSV via a hidden temp file + rename."""
+    tmp = final.with_name(f".{final.name}.tmp")
+    df.to_csv(tmp, sep="\t", header=False, index=False)
+    os.replace(tmp, final)
+ 
+ 
+def process_pair(slice_id: str, ev_path: Path, mn_path: Path) -> None:
+    """Filter events, keep mentions, publish the pair, delete the sources."""
+    events_df = pd.read_csv(ev_path, sep="\t", header=None,
+                            names=GDELT_COLUMNS, dtype=str,
+                            keep_default_na=False, low_memory=False)
+    mentions_df = pd.read_csv(mn_path, sep="\t", header=None,
+                              names=MENTIONS_COLUMNS, dtype=str,
+                              keep_default_na=False, low_memory=False)
+ 
+    if FILTER_EVENTS:
+        mask = events_df.apply(lambda r: passes_filter(r.to_dict()), axis=1)
+        events_out = events_df[mask]
+    else:
+        events_out = events_df
+ 
     LATEST_FILES_DIR.mkdir(parents=True, exist_ok=True)
-
-    consumer = None
-    while consumer is None:
-        try:
-            consumer = build_consumer()
-        except KafkaException as exc:
-            logger.warning("Kafka not ready (%s) — retry in %ds…", exc, STARTUP_RETRY_DELAY)
-            time.sleep(STARTUP_RETRY_DELAY)
-
-    slices: dict[str, dict] = {}     # slice_ts -> {events:[], mentions:[], last_update}
-    completed: list[tuple] = []      # ordered (slice_ts, slice) ready to publish
-    newest_event = ""
-    newest_mention = ""
-
-    def _close(ts: str) -> None:
-        if ts in slices:
-            completed.append((ts, slices.pop(ts)))
-            completed.sort(key=lambda x: x[0])
-
-    def _close_older_than(safe_ts: str) -> None:
-        if not safe_ts:
-            return
-        for ts in [t for t in list(slices) if t < safe_ts]:
-            _close(ts)
-
-    def _close_idle(now: float) -> None:
-        for ts in [t for t, s in list(slices.items())
-                   if now - s["last_update"] > IDLE_SECONDS]:
-            _close(ts)
-
-    def _publish_if_clear() -> None:
-        if completed and _latest_files_empty():
-            ts, slc = completed.pop(0)
+    # events first, mentions LAST: layer 3 only acts on a full pair.
+    _atomic_write(events_out,   LATEST_FILES_DIR / f"{slice_id}{EVENTS_SUFFIX}")
+    _atomic_write(mentions_df,  LATEST_FILES_DIR / f"{slice_id}{MENTIONS_SUFFIX}")
+ 
+    # Parsing owns deletion of the consumed source files.
+    ev_path.unlink(missing_ok=True)
+    mn_path.unlink(missing_ok=True)
+ 
+    logger.info("Published slice %s (events %d->%d, mentions %d)",
+                slice_id, len(events_df), len(events_out), len(mentions_df))
+ 
+ 
+def main() -> None:
+    logger.info("Parsing (file-based) started — %s -> %s (filter=%s)",
+                RAW_CSV_DIR, LATEST_FILES_DIR, "on" if FILTER_EVENTS else "off")
+    while True:
+        published = False
+        for slice_id, ev, mn in _ready_pairs():
+            if not _latest_files_empty():
+                break  # previous pair not consumed yet — wait
             try:
-                _publish(ts, slc)
-            except Exception as exc:  # noqa: BLE001 — retry on next tick
-                logger.error("Publish failed for slice %s: %s", ts, exc)
-                completed.insert(0, (ts, slc))
-
-    logger.info("Parsing started — reassembling slices into %s", LATEST_FILES_DIR)
-    try:
-        while True:
-            msg = consumer.poll(timeout=POLL_TIMEOUT)
-            now = time.monotonic()
-
-            if msg is None:                          # idle tick
-                _close_idle(now)
-                _publish_if_clear()
-                continue
-            if msg.error():
-                if msg.error().code() != KafkaError._PARTITION_EOF:
-                    logger.error("Kafka error: %s", msg.error())
-                continue
-
-            try:
-                record = json.loads(msg.value().decode("utf-8"))
-            except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-                logger.warning("Bad message at offset %s: %s", msg.offset(), exc)
-                continue
-
-            topic = msg.topic()
-            if topic == TOPIC_EVENTS:
-                ts = _field(record, EVENT_SLICE_IDX)
-                if not ts:
-                    continue
-                if ts > newest_event:
-                    newest_event = ts
-                if passes_filter(record):            # only relevant events kept
-                    slc = slices.get(ts)
-                    if slc is None:
-                        slc = slices[ts] = {"events": [], "mentions": [], "last_update": now}
-                    slc["events"].append(_raw_line(record, EVENT_NCOLS))
-                    slc["last_update"] = now
-            elif topic == TOPIC_MENTIONS:
-                ts = _field(record, MENTION_SLICE_IDX)
-                if not ts:
-                    continue
-                if ts > newest_mention:
-                    newest_mention = ts
-                slc = slices.get(ts)                 # mentions: keep ALL, raw
-                if slc is None:
-                    slc = slices[ts] = {"events": [], "mentions": [], "last_update": now}
-                slc["mentions"].append(_raw_line(record, MENTION_NCOLS))
-                slc["last_update"] = now
-            else:
-                continue
-
-            # Condition 1 — both topics moved past a slice ⇒ that slice is complete.
-            safe_ts = min(newest_event, newest_mention) if (newest_event and newest_mention) else ""
-            _close_older_than(safe_ts)
-            # Condition 2 — idle.
-            _close_idle(now)
-            _publish_if_clear()
-
-    except KeyboardInterrupt:
-        logger.info("Interrupt received — shutting down parsing layer…")
-    finally:
-        consumer.close()
-        pending = len(slices) + len(completed)
-        if pending:
-            logger.warning("Stopped with %d slice(s) not yet published", pending)
-        logger.info("Parsing stopped.")
-
-
+                process_pair(slice_id, ev, mn)
+                published = True
+            except Exception as exc:
+                logger.error("Failed to process slice %s: %s", slice_id, exc)
+            break  # one pair at a time; rescan next loop
+        if not published:
+            time.sleep(SCAN_INTERVAL)
+ 
+ 
 if __name__ == "__main__":
     main()
