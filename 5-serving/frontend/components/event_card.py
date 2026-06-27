@@ -42,7 +42,6 @@ def render_event_card(event: dict) -> None:
         st.caption(
             f"Event `{event['global_event_id']}` | "
             f"{event['country']} | "
-            f"Risk score `{event['risk_score']}` | "
             f"{_tag_badge(event.get('user_tag'))}"
         )
 

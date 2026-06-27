@@ -11,7 +11,6 @@ def _render_event_table(events: list[dict]) -> None:
             "Event":         event["card_title"],
             "Country":       event["country"],
             "Risk category": event.get("risk_category", "Not classified"),
-            "Risk score":    event["risk_score"],
             "Date":          event["event_date"],
             "Tag":           event.get("user_tag") or "Untagged",
             "Top source":    event.get("top_article_url"),

@@ -19,7 +19,7 @@ def render_heatmap(summary: list[dict], selected_countries: list[str]) -> None:
                     "HeatmapLayer",
                     data=frame,
                     get_position=["longitude", "latitude"],
-                    get_weight="risk_score",
+                    get_weight="event_count",
                     radius_pixels=60,
                 ),
                 pdk.Layer(
@@ -31,7 +31,7 @@ def render_heatmap(summary: list[dict], selected_countries: list[str]) -> None:
                     pickable=True,
                 ),
             ],
-            tooltip={"text": "{country}\nRisk score: {risk_score}\nEvents: {event_count}"},
+            tooltip={"text": "{country}\nEvents: {event_count}"},
         ),
         use_container_width=True,
     )
