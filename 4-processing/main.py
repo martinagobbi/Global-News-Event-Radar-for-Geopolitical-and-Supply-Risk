@@ -1,41 +1,44 @@
 #!/usr/bin/env python
 """
-4-processing/main.py
+4-processing/main.py — Processing layer.
 
+Reads silver from ClickHouse (gdelt_events / gdelt_mentions), maps it to the
+serving's Oracle gold schema, and writes the three tables serving reads:
 
-Compatibility with the serving layer
---------------------------------------
-5-serving/app.py reads:
-    Path(PROCESSED_DIR) / f"processed_{user_id}.csv"
-This layer writes exactly that file.
+    articles         — per-article event records (upserted)
+    user_articles    — which articles each user gets (the per-user gold)
+    pipeline_status  — OK/ERROR + last-update time (mirrors the global status)
 
-User preferences format (saved by 5-serving/app.py):
-    {
-        "theme":            "light",
-        "notifications":    true,
-        "data_format":      "table",
-        "cameo_countries":  ["US", "CN"],       <- added by updated app.py
-        "fips_countries":   ["EI"],              <- added by updated app.py
-        "country_weights":  {"CN": 1.5},         <- added by updated app.py
-        "min_risk_score":   3.0                  <- added by updated app.py
-    }
+Entry points (the triggers that *call* these are a loose end — see below):
+    POST /process-all        — silver changed -> rebuild articles + every user's set
+    POST /process/{user_id}  — one user's prefs changed -> recompute only their set
 
-Environment variables
----------------------
-    CLICKHOUSE_HOST / PORT / DATABASE / USER / PASSWORD
-    PREFS_DIR      (default: /data/user_preferences)
-    PROCESSED_DIR  (default: /data/processed)
+The per-user FILTER (countries via CAMEO/FIPS, risk categories, keywords) is a
+work in progress: gold.select_document_ids_for_user currently returns ALL
+articles for every user.
+
+Environment
+-----------
+    CLICKHOUSE_HOST / PORT / DATABASE / USER / PASSWORD   (silver source)
+    MONGO_URI / MONGO_DB / MONGO_COLLECTION               (user profiles)
+    ORACLE_HOST / PORT / SERVICE / USER / PASSWORD        (gold sink)
+    STATUS_DIR        global status dir (default /data/status)
+    GOLD_EVENTS_LIMIT max events pulled per run (default 20000)
 """
 
 import json
 import logging
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 
 from clickhouse_writer import ClickHouseWriter
+import mongo_reader
+import oracle_writer
+import gold
 
 logging.basicConfig(
     level=logging.INFO,
@@ -44,23 +47,19 @@ logging.basicConfig(
 )
 logger = logging.getLogger("processing")
 
-CH_HOST     = os.getenv("CLICKHOUSE_HOST",     "clickhouse-01")
+CH_HOST     = os.getenv("CLICKHOUSE_HOST",     "clickhouse-s1r1")
 CH_PORT     = int(os.getenv("CLICKHOUSE_PORT", "9000"))
 CH_DATABASE = os.getenv("CLICKHOUSE_DATABASE", "default")
 CH_USER     = os.getenv("CLICKHOUSE_USER",     "default")
 CH_PASSWORD = os.getenv("CLICKHOUSE_PASSWORD", "")
 
-PREFS_DIR     = os.getenv("PREFS_DIR",     "/data/user_preferences")
-PROCESSED_DIR = os.getenv("PROCESSED_DIR", "/data/processed")
-STATUS_FILE   = Path(os.getenv("STATUS_DIR", "/data/status")) / "pipeline_status.json"
-
-os.makedirs(PREFS_DIR,     exist_ok=True)
-os.makedirs(PROCESSED_DIR, exist_ok=True)
+STATUS_FILE  = Path(os.getenv("STATUS_DIR", "/data/status")) / "pipeline_status.json"
+EVENTS_LIMIT = int(os.getenv("GOLD_EVENTS_LIMIT", "20000"))
 
 app = FastAPI(title="Supply Risk — Processing Layer")
 
 
-def _get_writer() -> ClickHouseWriter:
+def _ch() -> ClickHouseWriter:
     return ClickHouseWriter(
         host=CH_HOST, port=CH_PORT,
         database=CH_DATABASE, user=CH_USER, password=CH_PASSWORD,
@@ -68,7 +67,7 @@ def _get_writer() -> ClickHouseWriter:
 
 
 def read_pipeline_status() -> dict:
-    """Read the global error status written by the validation layer."""
+    """The global error status written by the validation layer."""
     if not STATUS_FILE.exists():
         return {"state": "OK"}
     try:
@@ -77,78 +76,70 @@ def read_pipeline_status() -> dict:
         return {"state": "OK"}
 
 
-def _load_user_prefs(user_id: str) -> dict:
-    prefs_file = Path(PREFS_DIR) / f"{user_id}_prefs.json"
-    if not prefs_file.exists():
-        raise FileNotFoundError(
-            f"Preferences file not found for user '{user_id}'. "
-            f"Expected: {prefs_file}"
-        )
-    with open(prefs_file, "r") as f:
-        return json.load(f)
-
-
-@app.post("/process/{user_id}")
-async def process_user(
-    user_id: str,
-    date_from: str | None = Query(default=None, description="Start date YYYYMMDD"),
-    date_to:   str | None = Query(default=None, description="End date YYYYMMDD"),
-    limit:     int        = Query(default=5000,  description="Max events"),
-):
-    """
-    Read this user's slice of the store from gdelt_events / gdelt_mentions and
-    write it to the shared volume for the serving layer.
-
-    NOTE: the per-user geographic and keyword filters, and the silver->gold
-    transform, are NOT applied yet — those are defined once we know how each
-    user's data reaches this layer. For now this reads the deduplicated raw
-    events and their related mentions from the store and writes them as-is.
-    """
-    pipeline = read_pipeline_status()
-    if pipeline.get("state") == "ERROR":
-        raise HTTPException(
-            status_code=500,
-            detail=f"Pipeline in error state ({pipeline.get('reason')}); "
-                   f"data may be stale — refusing to serve.",
-        )
-
-    try:
-        with _get_writer() as writer:
-            events_df = writer.query_events(
-                date_from=date_from, date_to=date_to, limit=limit,
-            )
-            event_ids = events_df["GLOBALEVENTID"].tolist() if not events_df.empty else []
-            mentions_df = writer.query_mentions_for_events(event_ids)
-    except Exception as exc:
-        logger.error("ClickHouse query failed for user %s: %s", user_id, exc)
-        raise HTTPException(status_code=500, detail=f"ClickHouse error: {exc}")
-
-    # No silver->gold transform and no per-user geo/keyword filtering yet.
-    events_file   = Path(PROCESSED_DIR) / f"processed_{user_id}.csv"
-    mentions_file = Path(PROCESSED_DIR) / f"processed_{user_id}_mentions.csv"
-    events_df.to_csv(events_file, index=False)
-    mentions_df.to_csv(mentions_file, index=False)
-
-    logger.info(
-        "User %s: %d events, %d mentions → %s",
-        user_id, len(events_df), len(mentions_df), events_file,
-    )
-
-    return JSONResponse({
-        "status":         "success",
-        "user_id":        user_id,
-        "events_count":   int(len(events_df)),
-        "mentions_count": int(len(mentions_df)),
-        "events_file":    str(events_file),
-        "mentions_file":  str(mentions_file),
-        "note": "raw read from gdelt_events/gdelt_mentions; "
-                "per-user filtering and gold transform not applied yet",
-    })
+def _build_article_rows() -> list[dict]:
+    """Pull silver from ClickHouse and map it to Oracle `articles` rows."""
+    with _ch() as ch:
+        events_df = ch.query_events(limit=EVENTS_LIMIT)
+        event_ids = events_df["GLOBALEVENTID"].tolist() if not events_df.empty else []
+        mentions_df = ch.query_mentions_for_events(event_ids)
+    return gold.build_article_rows(events_df, mentions_df)
 
 
 @app.get("/health")
-async def health_check():
-    return JSONResponse({"status": "processing layer is running"})
+def health() -> dict:
+    return {"status": "processing layer is running"}
+
+
+@app.post("/process-all")
+def process_all():
+    """Silver changed: rebuild `articles`, every user's `user_articles`, and status."""
+    try:
+        rows = _build_article_rows()
+        n_articles = oracle_writer.write_articles(rows)
+
+        per_user: dict[str, int] = {}
+        for profile in mongo_reader.get_all_profiles():
+            uid = str(profile.get("_id") or profile.get("user_id") or "")
+            if not uid:
+                continue
+            docs = gold.select_document_ids_for_user(profile, rows)
+            oracle_writer.write_user_articles(uid, docs)
+            per_user[uid] = len(docs)
+
+        state = read_pipeline_status().get("state", "OK")
+        oracle_writer.write_pipeline_status(state, datetime.now(timezone.utc))
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("process-all failed: %s", exc)
+        raise HTTPException(status_code=500, detail=f"process-all failed: {exc}")
+
+    return JSONResponse({
+        "status": "success",
+        "articles": n_articles,
+        "users": per_user,
+        "pipeline_status": state,
+    })
+
+
+@app.post("/process/{user_id}")
+def process_user(user_id: str):
+    """One user's prefs changed: recompute only their `user_articles`."""
+    profile = mongo_reader.get_user_profile(user_id)
+    if profile is None:
+        raise HTTPException(status_code=404, detail=f"No profile for user '{user_id}'")
+
+    try:
+        rows = _build_article_rows()
+        docs = gold.select_document_ids_for_user(profile, rows)
+        # Upsert the articles this user references so the user_articles join is
+        # always satisfied even if /process-all hasn't run yet.
+        doc_set = set(docs)
+        oracle_writer.write_articles([r for r in rows if r["document_identifier"] in doc_set])
+        n = oracle_writer.write_user_articles(user_id, docs)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("process failed for %s: %s", user_id, exc)
+        raise HTTPException(status_code=500, detail=f"process failed: {exc}")
+
+    return JSONResponse({"status": "success", "user_id": user_id, "user_articles": n})
 
 
 if __name__ == "__main__":

@@ -201,10 +201,23 @@ services:
       - validation
       - clickhouse-s1r1
       - clickhouse-s2r1
+      - mongo1
+      - mongo2
+      - mongo3
     environment:
       CLICKHOUSE_HOST: clickhouse-s1r1
       CLICKHOUSE_PORT: "9000"
       STATUS_DIR: /data/status
+      # MongoDB replica set holding the per-user profiles (countries/keywords).
+      MONGO_URI: mongodb://mongo1:27017,mongo2:27017,mongo3:27017/?replicaSet=rs0
+      MONGO_DB: radar             # matches the serving backend's MONGO_DB
+      MONGO_COLLECTION: users     # the serving backend's profiles collection
+      # Oracle = the gold sink that serving reads (matches 5-serving's settings).
+      ORACLE_HOST: pipeline_oracle
+      ORACLE_PORT: "1521"
+      ORACLE_SERVICE: GDELT
+      ORACLE_USER: radar
+      ORACLE_PASSWORD: radar
     volumes:
       - shared_data:/data
     networks:
