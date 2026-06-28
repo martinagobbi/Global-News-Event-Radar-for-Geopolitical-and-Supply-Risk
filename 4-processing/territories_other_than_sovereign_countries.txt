@@ -1,0 +1,41 @@
+cd "/Users/edoardoluigialtieri/Desktop/Big data technologies/BDT Assessment/Global-News-Event-Radar-for-Geopolitical-and-Supply-Risk/4-processing" && python3 - << 'PYEOF'
+import countries
+C = set(countries.COUNTRY_CODES)
+
+GROUPS = {
+ "UK Crown Dependencies": ["Guernsey","Jersey","Isle of Man"],
+ "British Overseas Territories": ["Anguilla","Bermuda","British Indian Ocean Territory",
+    "British Virgin Islands","Cayman Islands","Falkland Islands","Gibraltar","Montserrat",
+    "Saint Helena","Turks and Caicos Islands"],
+ "French overseas departments / collectivities / territories": ["French Guiana","French Polynesia",
+    "French Southern and Antarctic Lands","Guadeloupe","Martinique","Mayotte","New Caledonia",
+    "Reunion","Saint Martin","Saint Pierre and Miquelon","Saint-Barthelemy Island","Wallis and Futuna"],
+ "US territories": ["American Samoa","Guam","Northern Mariana Islands","Puerto Rico",
+    "United States Virgin Islands"],
+ "Chinese Special Administrative Regions": ["Hong Kong","Macau"],
+ "Danish autonomous territories": ["Greenland","Faroe Islands"],
+ "Finnish autonomous region": ["Aland Islands"],
+ "Dutch constituent country": ["Aruba"],
+ "New Zealand associated states / territory": ["Cook Islands","Niue","Tokelau"],
+ "Disputed / limited recognition": ["Kosovo","Taiwan","Western Sahara","Palestine (Gaza Strip & West Bank)"],
+ "Sovereign city-state (UN observer, IS a country)": ["Vatican City"],
+}
+
+classified = {n for names in GROUPS.values() for n in names}
+total_terr = sum(len(v) for k,v in GROUPS.items() if not k.startswith("Sovereign"))
+print(f"{total_terr} non-sovereign / autonomous entries (+ Vatican City, a sovereign micro-state):\n")
+for grp, names in GROUPS.items():
+    missing = [n for n in names if n not in C]
+    flag = f"  [!! NOT IN TABLE: {missing}]" if missing else ""
+    print(f"{grp} ({len(names)}):{flag}")
+    print("   " + ", ".join(names))
+    print()
+
+# completeness check: any entry I classified that isn't sovereign-checked?
+UN193 = classified  # everything in GROUPS is non-member; members = the rest
+unclassified = sorted(n for n in C if n not in classified and n in {
+    # spot list of obviously-sovereign? skip — just show count
+})
+print("entries classified as non-member/special:", len(classified))
+print("remaining entries (treated as sovereign UN members):", len(C) - len(classified))
+PYEOF

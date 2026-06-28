@@ -9,13 +9,15 @@ serving's Oracle gold schema, and writes the three tables serving reads:
     user_articles    — which articles each user gets (the per-user gold)
     pipeline_status  — OK/ERROR + last-update time (mirrors the global status)
 
-Entry points (the triggers that *call* these are a loose end — see below):
+Entry points (also driven automatically by triggers.py, started on startup):
     POST /process-all        — silver changed -> rebuild articles + every user's set
     POST /process/{user_id}  — one user's prefs changed -> recompute only their set
 
-The per-user FILTER (countries via CAMEO/FIPS, risk categories, keywords) is a
-work in progress: gold.select_document_ids_for_user currently returns ALL
-articles for every user.
+The per-user FILTER is pushed down into ClickHouse
+(clickhouse_writer.query_user_documents): a geographic clause on the event
+country codes (CAMEO actor codes + FIPS geo codes, via countries.py) plus the
+keyword clause (processor.build_keyword_clause) select exactly the mentions a
+user receives.
 
 Environment
 -----------
@@ -36,9 +38,11 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 
 from clickhouse_writer import ClickHouseWriter
+import countries
 import mongo_reader
 import oracle_writer
 import gold
+import triggers
 
 logging.basicConfig(
     level=logging.INFO,
@@ -76,12 +80,30 @@ def read_pipeline_status() -> dict:
         return {"state": "OK"}
 
 
-def _build_article_rows() -> list[dict]:
-    """Pull silver from ClickHouse and map it to Oracle `articles` rows."""
-    with _ch() as ch:
-        events_df = ch.query_events(limit=EVENTS_LIMIT)
-        event_ids = events_df["GLOBALEVENTID"].tolist() if not events_df.empty else []
-        mentions_df = ch.query_mentions_for_events(event_ids)
+def _gather_keywords(profile: dict) -> list[str]:
+    """Flatten a profile's per-question keyword lists into one de-duplicated list."""
+    kw = profile.get("keywords") or {}
+    out: list[str] = []
+    seen: set[str] = set()
+    for vals in kw.values():
+        for v in (vals or []):
+            v = str(v).strip()
+            if v and v not in seen:
+                seen.add(v)
+                out.append(v)
+    return out
+
+
+def _rows_for_profile(ch: ClickHouseWriter, profile: dict) -> list[dict]:
+    """Run a user's geo + keyword filter in ClickHouse and map the hits to rows."""
+    cameo_codes, fips_codes = countries.codes_for_names(profile.get("territories", []))
+    keywords = _gather_keywords(profile)
+    events_df, mentions_df = ch.query_user_documents(
+        cameo_codes=cameo_codes,
+        fips_codes=fips_codes,
+        keywords=keywords,
+        event_limit=EVENTS_LIMIT,
+    )
     return gold.build_article_rows(events_df, mentions_df)
 
 
@@ -90,56 +112,85 @@ def health() -> dict:
     return {"status": "processing layer is running"}
 
 
-@app.post("/process-all")
-def process_all():
-    """Silver changed: rebuild `articles`, every user's `user_articles`, and status."""
-    try:
-        rows = _build_article_rows()
-        n_articles = oracle_writer.write_articles(rows)
-
-        per_user: dict[str, int] = {}
+def recompute_all() -> dict:
+    """
+    Recompute every user's `user_articles`, refresh `articles`, and mirror the
+    pipeline status. Pure function (no HTTP) — shared by the /process-all route
+    and the silver-watermark trigger.
+    """
+    per_user: dict[str, int] = {}
+    catalog: dict[str, dict] = {}
+    with _ch() as ch:
         for profile in mongo_reader.get_all_profiles():
             uid = str(profile.get("_id") or profile.get("user_id") or "")
             if not uid:
                 continue
-            docs = gold.select_document_ids_for_user(profile, rows)
+            rows = _rows_for_profile(ch, profile)
+            for r in rows:
+                catalog[r["document_identifier"]] = r
+            docs = [r["document_identifier"] for r in rows]
             oracle_writer.write_user_articles(uid, docs)
             per_user[uid] = len(docs)
 
-        state = read_pipeline_status().get("state", "OK")
-        oracle_writer.write_pipeline_status(state, datetime.now(timezone.utc))
+    # `articles` only needs the rows some user references (serving joins
+    # user_articles -> articles); upsert the de-duplicated union once.
+    n_articles = oracle_writer.write_articles(list(catalog.values()))
+    state = read_pipeline_status().get("state", "OK")
+    oracle_writer.write_pipeline_status(state, datetime.now(timezone.utc))
+    return {"articles": n_articles, "users": per_user, "pipeline_status": state}
+
+
+@app.post("/process-all")
+def process_all():
+    """Silver changed: recompute every user's `user_articles`, refresh `articles`, status."""
+    try:
+        result = recompute_all()
     except Exception as exc:  # noqa: BLE001
         logger.exception("process-all failed: %s", exc)
         raise HTTPException(status_code=500, detail=f"process-all failed: {exc}")
+    return JSONResponse({"status": "success", **result})
 
-    return JSONResponse({
-        "status": "success",
-        "articles": n_articles,
-        "users": per_user,
-        "pipeline_status": state,
-    })
+
+def recompute_user(user_id: str) -> int | None:
+    """
+    Recompute one user's `user_articles` (and upsert the articles they
+    reference). Returns the count, or None if the user has no profile. Shared by
+    the /process/{user_id} route and the Mongo change-stream trigger.
+    """
+    profile = mongo_reader.get_user_profile(user_id)
+    if profile is None:
+        return None
+    with _ch() as ch:
+        rows = _rows_for_profile(ch, profile)
+    docs = [r["document_identifier"] for r in rows]
+    # Upsert the articles this user references so the user_articles join is
+    # always satisfied even if /process-all hasn't run yet.
+    oracle_writer.write_articles(rows)
+    return oracle_writer.write_user_articles(user_id, docs)
 
 
 @app.post("/process/{user_id}")
 def process_user(user_id: str):
     """One user's prefs changed: recompute only their `user_articles`."""
-    profile = mongo_reader.get_user_profile(user_id)
-    if profile is None:
-        raise HTTPException(status_code=404, detail=f"No profile for user '{user_id}'")
-
     try:
-        rows = _build_article_rows()
-        docs = gold.select_document_ids_for_user(profile, rows)
-        # Upsert the articles this user references so the user_articles join is
-        # always satisfied even if /process-all hasn't run yet.
-        doc_set = set(docs)
-        oracle_writer.write_articles([r for r in rows if r["document_identifier"] in doc_set])
-        n = oracle_writer.write_user_articles(user_id, docs)
+        n = recompute_user(user_id)
     except Exception as exc:  # noqa: BLE001
         logger.exception("process failed for %s: %s", user_id, exc)
         raise HTTPException(status_code=500, detail=f"process failed: {exc}")
-
+    if n is None:
+        raise HTTPException(status_code=404, detail=f"No profile for user '{user_id}'")
     return JSONResponse({"status": "success", "user_id": user_id, "user_articles": n})
+
+
+@app.on_event("startup")
+def _startup() -> None:
+    """Start the background triggers (silver watermark + Mongo change stream)."""
+    if os.getenv("ENABLE_TRIGGERS", "1") == "1":
+        triggers.start(
+            ch_factory=_ch,
+            recompute_all=recompute_all,
+            recompute_user=recompute_user,
+        )
 
 
 if __name__ == "__main__":

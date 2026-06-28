@@ -27,7 +27,6 @@ CREATE TABLE IF NOT EXISTS silver_events (
     goldstein       Float64,
     avg_tone        Float64,
     num_articles    Int32,
-    risk_score      Float64,
     source_url      String,
     source          String,
     inserted_at     DateTime DEFAULT now()
@@ -44,7 +43,7 @@ INSERT INTO silver_events (
     event_id, date, event_code, event_root,
     actor1, actor2, country_code, fips_country,
     lat, lon, goldstein, avg_tone, num_articles,
-    risk_score, source_url, source
+    source_url, source
 ) VALUES
 """
 
@@ -168,7 +167,6 @@ class ClickHouseWriter:
         country_code: Optional[str] = None,
         date_from: Optional[str] = None,
         date_to: Optional[str] = None,
-        min_risk_score: float = 0.0,
         limit: int = 1000,
     ) -> list[dict]:
         """
@@ -180,15 +178,14 @@ class ClickHouseWriter:
         country_code   : str   — CAMEO country code (e.g. "US")
         date_from      : str   — start date YYYYMMDD (e.g. "20240101")
         date_to        : str   — end date YYYYMMDD
-        min_risk_score : float — minimum risk score threshold
         limit          : int   — maximum number of rows returned
 
         Returns
         -------
         list[dict] — list of events in the silver schema
         """
-        conditions = ["risk_score >= %(min_risk)s"]
-        params: dict = {"min_risk": min_risk_score, "lim": limit}
+        conditions = ["1=1"]
+        params: dict = {"lim": limit}
 
         if country_code:
             conditions.append("country_code = %(country)s")
@@ -206,10 +203,10 @@ class ClickHouseWriter:
                 event_id, date, event_code, event_root,
                 actor1, actor2, country_code, fips_country,
                 lat, lon, goldstein, avg_tone, num_articles,
-                risk_score, source_url, source
+                source_url, source
             FROM silver_events
             WHERE {where}
-            ORDER BY risk_score DESC, date DESC
+            ORDER BY date DESC
             LIMIT %(lim)s
         """
         client = self._get_client()
@@ -264,6 +261,68 @@ class ClickHouseWriter:
         )
         return pd.DataFrame(data, columns=[c[0] for c in cols])
 
+    def query_user_documents(
+        self,
+        cameo_codes=None,
+        fips_codes=None,
+        keywords=None,
+        event_limit: int = 20000,
+        mention_limit: int = 50000,
+    ):
+        """
+        Per-user filter, pushed down into ClickHouse (the scalable path).
+
+        1. Geographic filter on gdelt_events (FINAL): keep events whose
+           Actor1/Actor2CountryCode is in the user's CAMEO set OR whose
+           ActionGeo_/Actor1Geo_/Actor2Geo_CountryCode is in the FIPS set
+           (match if EITHER standard hits). No geo codes -> all recent events.
+        2. Keyword filter on gdelt_mentions for those events via
+           build_keyword_clause (URL ngrambf LIKE / enriched position match).
+           No keywords -> every mention of the matched events.
+
+        Returns (events_df, mentions_df), ready for gold.build_article_rows().
+        """
+        from processor import build_keyword_clause  # local: avoid import cycle
+
+        client = self._get_client()
+
+        geo_sql, geo_params = _build_geo_clause(cameo_codes, fips_codes)
+        ev_params = {**geo_params, "elim": int(event_limit)}
+        ev_sql = (
+            f"SELECT * FROM gdelt_events FINAL WHERE {geo_sql or '1=1'} "
+            f"ORDER BY DATEADDED DESC LIMIT %(elim)s"
+        )
+        edata, ecols = client.execute(ev_sql, ev_params, with_column_types=True)
+        events_df = pd.DataFrame(edata, columns=[c[0] for c in ecols])
+
+        if events_df.empty:
+            mdata, mcols = client.execute(
+                "SELECT * FROM gdelt_mentions LIMIT 0", with_column_types=True)
+            return events_df, pd.DataFrame(mdata, columns=[c[0] for c in mcols])
+
+        event_ids = [int(i) for i in events_df["GLOBALEVENTID"].tolist() if i]
+        kw_sql, kw_params = build_keyword_clause(keywords or [])
+        m_where = "GLOBALEVENTID IN %(ids)s"
+        m_params = {"ids": event_ids, "mlim": int(mention_limit)}
+        if kw_sql:
+            m_where += f" AND {kw_sql}"
+            m_params.update(kw_params)
+        m_sql = f"SELECT * FROM gdelt_mentions WHERE {m_where} LIMIT %(mlim)s"
+        mdata, mcols = client.execute(m_sql, m_params, with_column_types=True)
+        return events_df, pd.DataFrame(mdata, columns=[c[0] for c in mcols])
+
+    def silver_watermark(self):
+        """
+        Max DATEADDED on gdelt_events — advances each time the validation layer
+        appends a new 15-min batch. Used as a cheap change signal by the silver
+        trigger (ClickHouse has no change stream). Returns an int, or None when
+        the store is empty.
+        """
+        rows = self._get_client().execute("SELECT max(DATEADDED) FROM gdelt_events")
+        if rows and rows[0] and rows[0][0]:
+            return int(rows[0][0])
+        return None
+
     def close(self) -> None:
         """Close the database connection."""
         if self._client is not None:
@@ -302,7 +361,31 @@ def _event_to_row(event: dict) -> tuple:
         float(event.get("goldstein", 0.0)),
         float(event.get("avg_tone", 0.0)),
         int(event.get("num_articles", 0)),
-        float(event.get("risk_score", 0.0)),
         str(event.get("source_url", "")),
         str(event.get("source", "gdelt_events")),
     )
+
+
+def _build_geo_clause(cameo_codes, fips_codes):
+    """
+    Build the per-user geographic WHERE fragment for gdelt_events.
+
+    CAMEO codes match the actor-affiliation columns (Actor1/Actor2CountryCode);
+    FIPS codes match the geo columns (ActionGeo_/Actor1Geo_/Actor2Geo_CountryCode).
+    Match if EITHER standard hits. Returns ("", {}) when there is no geo filter.
+    """
+    parts: list[str] = []
+    params: dict = {}
+    if cameo_codes:
+        params["cameo"] = list(cameo_codes)
+        parts.append("(Actor1CountryCode IN %(cameo)s OR Actor2CountryCode IN %(cameo)s)")
+    if fips_codes:
+        params["fips"] = list(fips_codes)
+        parts.append(
+            "(ActionGeo_CountryCode IN %(fips)s "
+            "OR Actor1Geo_CountryCode IN %(fips)s "
+            "OR Actor2Geo_CountryCode IN %(fips)s)"
+        )
+    if not parts:
+        return "", {}
+    return "(" + " OR ".join(parts) + ")", params

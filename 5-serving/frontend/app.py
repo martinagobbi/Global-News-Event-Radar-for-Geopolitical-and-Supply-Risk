@@ -54,7 +54,7 @@ with col2:
 st.divider()
 st.subheader("Application flow")
 st.markdown("""
-- **Phase 1** — Register monitoring perimeter (countries, risk categories).
+- **Phase 1** — Register monitoring perimeter (territories, supply-chain keywords).
 - **Phase 2** — Processing pipeline queries GDELT, stores user-article associations in Oracle.
 - **Phase 3** — Dashboard reads from Oracle via backend API and renders event cards.
 """)

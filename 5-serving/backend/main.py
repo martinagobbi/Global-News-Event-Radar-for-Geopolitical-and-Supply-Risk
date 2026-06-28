@@ -6,7 +6,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 
 from mongo_store import (
-    ensure_demo_users,
+    cleanup_demo_users,
     get_all_profiles,
     get_profile,
     get_tags,
@@ -45,7 +45,8 @@ async def global_exception_handler(request, exc):
 
 @app.on_event("startup")
 def startup() -> None:
-    ensure_demo_users()
+    # Remove any demo profiles a previous (category-based) build seeded.
+    cleanup_demo_users()
 
 
 # ── Health ─────────────────────────────────────────────────────────────────
@@ -162,7 +163,6 @@ def events_summary(user_id: str) -> dict:
             "country":    e["country"],
             "latitude":   e["latitude"],
             "longitude":  e["longitude"],
-            "risk_score": e["risk_score"],
             "event_count": len(e.get("articles", [])),
         }
         for e in events

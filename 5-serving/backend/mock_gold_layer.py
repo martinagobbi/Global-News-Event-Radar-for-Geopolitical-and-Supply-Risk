@@ -19,7 +19,6 @@ _BASE_EVENTS = {
         "actor": "Rail workers",
         "risk_category": "Labour disputes involving worker associations",
         "goldstein": -5.2,
-        "risk_score": 86,
         "event_summary": "Local labour disruption is slowing freight flows across Northern Italy.",
         "articles": [
             {
@@ -41,7 +40,6 @@ _BASE_EVENTS = {
         "actor": "Industrial operators",
         "risk_category": "Supply-side financial instability",
         "goldstein": -2.0,
-        "risk_score": 63,
         "event_summary": "Energy cost pressure is affecting German intermodal logistics nodes.",
         "articles": [
             {
@@ -63,7 +61,6 @@ _BASE_EVENTS = {
         "actor": "Port operators",
         "risk_category": "Recent supply-side transit-related accidents",
         "goldstein": -3.1,
-        "risk_score": 72,
         "event_summary": "Port service disruption is raising operational risk for high-priority shipments.",
         "articles": [
             {
@@ -85,7 +82,6 @@ _BASE_EVENTS = {
         "actor": "Civil movements",
         "risk_category": "Civil movements",
         "goldstein": -4.7,
-        "risk_score": 78,
         "event_summary": "Protest activity near logistics routes may affect delivery reliability.",
         "articles": [
             {

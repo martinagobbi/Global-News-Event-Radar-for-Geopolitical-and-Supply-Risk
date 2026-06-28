@@ -35,6 +35,20 @@ without prior chat context.
 
 ## Remaining plan (in order)
 
+> **STATUS — updated 2026-06-28 (all four implemented; HELD FOR REVIEW, nothing committed):**
+> - **(a) risk scores removed** across `4-processing` + `5-serving/backend` (frontend was already done).
+> - **(b) country tables — done.** Vendored `4-processing/countries.py` (`COUNTRY_CODES` name→{cameo,fips} for 237 curated countries + `codes_for_names`); `5-serving/frontend/configuration/countries.py` regenerated to the same set. Reconciled from the GDELT FIPS+CAMEO lookups (divergent names merged; GDELT data errors corrected: Guinea/Equatorial-Guinea, Slovakia=LO, Congo). **Curated** set chosen (sovereign + key territories; non-countries + Netherlands Antilles dropped). Palestinian territories consolidated into one multi-code entry "Palestine (Gaza Strip & West Bank)" — a `cameo`/`fips` value may therefore be a string or a list, and `codes_for_names` normalises both.
+> - **(c) keyword form — done.** `configuration/keywords.py` + `components/keyword_form.py`; profile stores a `keywords` dict (keys sourcing/manufacturing/storage/delivery/companies; add one at a time, cap 100, strip/drop-empty). Risk categories removed from onboarding+dashboard (`sectors.py` left unused); demo-user seeding retired (`cleanup_demo_users` deletes the old demo ids at backend startup).
+> - **(d) triggers — done.** In-process daemon threads in `4-processing/triggers.py` (started on FastAPI startup): Mongo `radar.users` change stream → `recompute_user`; ClickHouse `max(DATEADDED)` watermark poll → `recompute_all`.
+>
+> **Key decisions / deviations to review:**
+> - **Per-user filter = Option B (SQL push-down)** in ClickHouse (`clickhouse_writer.query_user_documents` + `_build_geo_clause` + `processor.build_keyword_clause`), chosen over Python-side filtering for scale. `gold.select_document_ids_for_user` removed; `articles` now holds only rows some user references.
+> - **geo × keyword = AND** (event must match a country AND the mention a keyword; an empty side imposes no constraint, so a no-prefs user gets everything).
+> - **Validation→processing trigger polls ClickHouse `max(DATEADDED)`** instead of a validation-written marker file — keeps processing a pure reader (no `3-validation` edit). `ENABLE_TRIGGERS=0` disables the threads.
+> - No `docker-compose.yml` change needed (the `processing` service already has Mongo/ClickHouse/Oracle/STATUS env).
+>
+> **Still open:** untested against live Oracle/Mongo/ClickHouse; `cameo_label` still `""`; `country` still heuristic; `rs.initiate` one-time; ingestion→parsing transport absent from compose.
+
 ### (a) Remove risk scores — validation-onward only (NOT ingestion/parsing)
 - **DONE**: `5-serving/frontend` — `heatmap.py` (weight → `event_count`), `event_card.py`, `briefing.py`.
 - **TODO 4-processing**: `gold.py` (drop `"risk_score":0` + docstring bullet); `oracle_writer.py`

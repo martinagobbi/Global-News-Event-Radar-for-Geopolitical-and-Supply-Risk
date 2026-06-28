@@ -8,7 +8,7 @@ user radar). The three tables (assumed to already exist):
 
     articles(document_identifier PK, mention_identifier, global_event_id,
              in_raw_text, confidence, mention_doc_tone, country, risk_category,
-             goldstein, risk_score, cameo_code, cameo_label, actor,
+             goldstein, cameo_code, cameo_label, actor,
              latitude, longitude, event_date, age_days)
     user_articles(user_id, document_identifier)   PK (user_id, document_identifier)
     pipeline_status(status, timestamp_of_last_update)
@@ -45,16 +45,16 @@ WHEN MATCHED THEN UPDATE SET
     mention_identifier = :mention_identifier, global_event_id = :global_event_id,
     in_raw_text = :in_raw_text, confidence = :confidence, mention_doc_tone = :mention_doc_tone,
     country = :country, risk_category = :risk_category, goldstein = :goldstein,
-    risk_score = :risk_score, cameo_code = :cameo_code, cameo_label = :cameo_label,
+    cameo_code = :cameo_code, cameo_label = :cameo_label,
     actor = :actor, latitude = :latitude, longitude = :longitude,
     event_date = :event_date, age_days = :age_days
 WHEN NOT MATCHED THEN INSERT
     (document_identifier, mention_identifier, global_event_id, in_raw_text, confidence,
-     mention_doc_tone, country, risk_category, goldstein, risk_score, cameo_code,
+     mention_doc_tone, country, risk_category, goldstein, cameo_code,
      cameo_label, actor, latitude, longitude, event_date, age_days)
 VALUES
     (:document_identifier, :mention_identifier, :global_event_id, :in_raw_text, :confidence,
-     :mention_doc_tone, :country, :risk_category, :goldstein, :risk_score, :cameo_code,
+     :mention_doc_tone, :country, :risk_category, :goldstein, :cameo_code,
      :cameo_label, :actor, :latitude, :longitude, :event_date, :age_days)
 """
 

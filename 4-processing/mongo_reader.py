@@ -3,7 +3,7 @@
 ----------------------------
 
 Read per-user profiles from the MongoDB replica set (populated by the serving
-layer's backend). A profile holds the user's filter inputs — their countries
+layer's backend). A profile holds the user's filter inputs — their territories
 and keywords — which processing uses to build that user's slice of the data.
 
 Connection
@@ -70,3 +70,8 @@ def get_all_profiles() -> list[dict]:
     profiles, rather than one HTTP request per user).
     """
     return list(_get_collection().find({}))
+
+
+def users_collection():
+    """Return the user-profiles collection (used by the change-stream trigger)."""
+    return _get_collection()

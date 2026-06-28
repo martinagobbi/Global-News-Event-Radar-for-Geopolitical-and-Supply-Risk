@@ -11,8 +11,10 @@ placeholders here (see the loose ends):
     * country        — derived best-effort from ActionGeo_FullName
     * risk_category  — left "" (needs CAMEO-code -> 24-category classification)
     * cameo_label    — left "" (needs a CAMEO code -> label table)
-    * risk_score     — 0 (the team dropped risk scores)
-    * per-user filter (select_document_ids_for_user) — returns ALL for now
+
+The per-user filter no longer lives here: it is pushed down into ClickHouse
+(clickhouse_writer.query_user_documents). This module just shapes the rows the
+filter returns into the Oracle `articles` schema.
 """
 
 from datetime import date
@@ -71,7 +73,6 @@ def _article_row(m: dict, ev: dict) -> dict:
         "country":             _country_name(ev),
         "risk_category":       "",     # TODO: classify event -> one of the 24 categories
         "goldstein":           _f(ev.get("GoldsteinScale")),
-        "risk_score":          0,      # unused (team dropped risk scores)
         "cameo_code":          _s(ev.get("EventCode")),
         "cameo_label":         "",     # TODO: CAMEO code -> label
         "actor":               _s(ev.get("Actor1Name")),
@@ -101,15 +102,3 @@ def build_article_rows(events_df, mentions_df) -> list[dict]:
             continue  # no URL -> no primary key
         rows.append(_article_row(m, ev))
     return rows
-
-
-def select_document_ids_for_user(profile: dict, article_rows: list[dict]) -> list[str]:
-    """
-    Which articles a given user receives (-> user_articles).
-
-    PLACEHOLDER: returns every article. The real per-user filter is still WIP and
-    needs (a) country names -> CAMEO/FIPS codes matched against the event codes,
-    (b) risk_category classification matched against profile['risk_categories'],
-    and (c) any future keyword matching. Wire those into this one function.
-    """
-    return [r["document_identifier"] for r in article_rows]

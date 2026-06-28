@@ -260,31 +260,6 @@ def matches_geography(
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# USER-SPECIFIC RISK SCORE (optional)
-# ═══════════════════════════════════════════════════════════════════════════════
-
-def apply_country_weight(
-    base_score: float,
-    country_code: str,
-    country_weights: Optional[dict[str, float]] = None,
-) -> float:
-    """
-    Multiply the base risk_score by a country-specific weight,
-    if the user has defined critical countries for their supply chain.
-
-    Example:
-        country_weights = {"CN": 1.5, "RU": 2.0, "TW": 1.8}
-        → an event in China will have score × 1.5
-
-    The result is always clamped to [0.0, 10.0].
-    """
-    if not country_weights:
-        return base_score
-    weight = country_weights.get(country_code.upper(), 1.0)
-    return round(min(base_score * weight, 10.0), 2)
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
 # SILVER → GOLD
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -292,30 +267,23 @@ def silver_to_gold(
     silver_events: list[dict],
     cameo_codes: Optional[set[str]] = None,
     fips_codes: Optional[set[str]] = None,
-    country_weights: Optional[dict[str, float]] = None,
-    min_risk_score: float = 0.0,
 ) -> list[dict]:
     """
     Transform a list of silver events into the user-specific gold layer.
 
     Internal pipeline:
         1. Geographic filter (CAMEO country code AND/OR FIPS)
-        2. Apply country weights (optional)
-        3. Minimum risk score threshold (optional, default 0 = no filter)
-        4. Add "layer": "gold" field
+        2. Add "layer": "gold" field
 
     Parameters
     ----------
     silver_events   : list[dict] — parser output (to_silver_event)
     cameo_codes     : set[str]   — user's CAMEO country codes
     fips_codes      : set[str]   — user's FIPS country codes
-    country_weights : dict       — per-country multipliers (e.g. {"CN": 1.5})
-    min_risk_score  : float      — minimum risk score threshold [0-10]
 
     Returns
     -------
     list[dict] — gold events, each with "layer" = "gold"
-                 and a potentially re-weighted "risk_score"
     """
     gold: list[dict] = []
 
@@ -324,19 +292,8 @@ def silver_to_gold(
         if not matches_geography(event, cameo_codes, fips_codes):
             continue
 
-        # Step 2 — copy event and apply country weight
+        # Step 2 — copy event and mark the layer
         gold_event = dict(event)
-        gold_event["risk_score"] = apply_country_weight(
-            base_score=event.get("risk_score", 0.0),
-            country_code=event.get("country_code", ""),
-            country_weights=country_weights,
-        )
-
-        # Step 3 — minimum risk score threshold
-        if gold_event["risk_score"] < min_risk_score:
-            continue
-
-        # Step 4 — mark the layer
         gold_event["layer"] = "gold"
         gold.append(gold_event)
 

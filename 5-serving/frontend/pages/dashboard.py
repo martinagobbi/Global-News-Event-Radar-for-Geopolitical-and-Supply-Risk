@@ -4,8 +4,8 @@ import streamlit as st
 
 from components.briefing import render_briefing
 from components.heatmap import render_heatmap
+from components.keyword_form import render_keyword_questions
 from configuration.countries import COUNTRY_OPTIONS
-from configuration.sectors import RISK_CATEGORY_OPTIONS
 from data.gold_layer import (
     get_archived_events,
     get_events,
@@ -43,7 +43,7 @@ if system_status.get("status") == "ERROR":
 # ── Header ─────────────────────────────────────────────────────────────────
 header_left, header_right = st.columns([3, 1])
 with header_left:
-    st.caption("Events are filtered according to your registered countries and risk categories.")
+    st.caption("Events are filtered according to your registered territories and supply-chain keywords.")
 with header_right:
     manual_refresh = st.button("Refresh now")
 
@@ -56,26 +56,23 @@ st.info(
 pipeline_status = get_gold_layer_status(user_id)
 metrics = st.columns(4)
 metrics[0].metric("User", profile.get("display_name", user_id))
-metrics[1].metric("Monitored countries", len(profile.get("countries", [])))
-metrics[2].metric("Risk categories", len(profile.get("risk_categories", [])))
+metrics[1].metric("Monitored territories", len(profile.get("territories", [])))
+metrics[2].metric("Keywords", sum(len(v) for v in (profile.get("keywords") or {}).values()))
 metrics[3].metric("Data status", pipeline_status)
 
 # ── Profile update ─────────────────────────────────────────────────────────
 with st.expander("Update monitoring perimeter"):
-    with st.form("update_profile_form"):
-        updated_countries = st.multiselect(
-            "Countries to monitor",
-            options=COUNTRY_OPTIONS,
-            default=[c for c in profile.get("countries", []) if c in COUNTRY_OPTIONS],
-        )
-        updated_categories = st.multiselect(
-            "Relevant risk categories",
-            options=RISK_CATEGORY_OPTIONS,
-            default=[c for c in profile.get("risk_categories", []) if c in RISK_CATEGORY_OPTIONS],
-        )
-        update_submitted = st.form_submit_button("Save")
-    if update_submitted:
-        save_user_profile({**profile, "countries": updated_countries, "risk_categories": updated_categories})
+    updated_territories = st.multiselect(
+        "Territories to monitor",
+        options=COUNTRY_OPTIONS,
+        default=[c for c in profile.get("territories", []) if c in COUNTRY_OPTIONS],
+    )
+    st.markdown("**Your supply chain**")
+    updated_keywords = render_keyword_questions(profile, prefix="dash")
+    if st.button("Save", key="save_perimeter"):
+        payload = {k: v for k, v in profile.items() if k not in ("risk_categories", "countries")}
+        payload.update({"territories": updated_territories, "keywords": updated_keywords})
+        save_user_profile(payload)
         st.session_state.last_data_fetch = 0
         st.success("Monitoring perimeter updated.")
         st.rerun()
@@ -90,8 +87,8 @@ with col2:
 
 selected_countries = st.multiselect(
     "Geographic focus",
-    options=profile.get("countries", []),
-    default=profile.get("countries", []),
+    options=profile.get("territories", []),
+    default=profile.get("territories", []),
 )
 
 # ── Data fetch (rate-limited) ──────────────────────────────────────────────

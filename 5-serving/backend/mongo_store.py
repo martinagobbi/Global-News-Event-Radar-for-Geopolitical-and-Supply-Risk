@@ -69,52 +69,20 @@ def _with_retry(fn, retries: int = 3, backoff: float = 1.0):
     raise last_exc
 
 
-# ── Demo seed ──────────────────────────────────────────────────────────────
+# ── Demo users ─────────────────────────────────────────────────────────────
+# Demo seeding is retired: a profile is now defined by its territories + the five
+# supply-chain keyword questions (no risk categories). cleanup_demo_users()
+# removes any category-based demo profiles a previous build inserted.
 
-DEMO_USERS = {
-    "demo_logistics": {
-        "user_id": "demo_logistics",
-        "display_name": "Demo Logistics",
-        "countries": ["Italy", "Germany", "United States", "United Kingdom"],
-        "risk_categories": [
-            "Labour disputes involving worker associations",
-            "Supply-side financial instability",
-            "Recent supply-side transit-related accidents",
-            "Civil movements",
-        ],
-        "briefing_days": 30,
-        "older_news_days": 90,
-        "status": "registered",
-    },
-    "demo_energy": {
-        "user_id": "demo_energy",
-        "display_name": "Demo Energy",
-        "countries": ["Germany", "United States"],
-        "risk_categories": [
-            "Supply-side financial instability",
-            "Major supply-side accidents or breakdowns",
-            "Inflation in supply-side economy",
-        ],
-        "briefing_days": 30,
-        "older_news_days": 120,
-        "status": "registered",
-    },
-}
+_DEMO_USER_IDS = ["demo_logistics", "demo_energy"]
 
 
-def ensure_demo_users() -> None:
-    """Insert demo profiles on first boot (idempotent). Fails silently if MongoDB is down."""
+def cleanup_demo_users() -> None:
+    """Delete any demo profiles seeded by earlier builds. Silent on MongoDB error."""
     try:
-        def _seed():
-            for user_id, profile in DEMO_USERS.items():
-                _users().update_one(
-                    {"_id": user_id},
-                    {"$setOnInsert": {**profile, "_id": user_id}},
-                    upsert=True,
-                )
-        _with_retry(_seed)
+        _with_retry(lambda: _users().delete_many({"_id": {"$in": _DEMO_USER_IDS}}))
     except Exception as e:
-        logger.error("Could not seed demo users (MongoDB unavailable?): %s", e)
+        logger.error("Could not remove demo users (MongoDB unavailable?): %s", e)
 
 
 # ── Users / profiles ───────────────────────────────────────────────────────
@@ -133,8 +101,8 @@ def get_profile(user_id: str) -> dict:
     _default = {
         "user_id": user_id,
         "display_name": user_id,
-        "countries": [],
-        "risk_categories": [],
+        "territories": [],
+        "keywords": {},
         "briefing_days": 30,
         "older_news_days": 90,
         "status": "new",
