@@ -31,9 +31,30 @@ if is_first_login(user_id):
 
 profile = get_user_profile(user_id)
 
-# ── Pipeline status (always re-fetched, cheap) ─────────────────────────────
+# ── Pipeline / store status (always re-fetched, cheap) ─────────────────────
 system_status = get_system_status()
-if system_status.get("status") == "ERROR":
+status_code = system_status.get("code")
+
+if status_code == "503-ORACLE":
+    st.error(
+        "🔴 **503 — Database unavailable.** "
+        + system_status.get(
+            "message",
+            "The backend could not reach the Oracle database after multiple attempts.",
+        )
+        + " Event data cannot be loaded right now. Please try again shortly."
+    )
+elif status_code == "503-MONGO":
+    st.warning(
+        "🟠 **503 — Profile service unavailable.** "
+        + system_status.get(
+            "message",
+            "The backend could not reach the MongoDB database after multiple attempts.",
+        )
+        + " Events may still be visible, but your tags and saved preferences "
+        "might not load or save correctly until this is resolved."
+    )
+elif system_status.get("status") == "ERROR":
     last_update = system_status.get("timestamp_of_last_update", "an unknown time")
     st.error(
         "Due to technical difficulties, this dashboard has not been updated since "

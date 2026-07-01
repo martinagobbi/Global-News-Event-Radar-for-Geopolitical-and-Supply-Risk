@@ -290,10 +290,17 @@ def get_event_articles(user_id: str, global_event_id: str) -> dict:
 def get_pipeline_status() -> dict:
     """
     Read the pipeline status from Oracle.
-    Returns {"status": "OK", "timestamp_of_last_update": None} on any error
-    so the dashboard doesn't show a spurious error banner when Oracle is
-    temporarily unreachable (the banner would be misleading — we don't
-    actually know whether the data is stale or not).
+
+    Two distinct failure modes are surfaced separately to the frontend:
+      - The processing pipeline itself reports status=ERROR (data in Oracle
+        is known to be stale). This is the normal "technical difficulties"
+        banner with the last known timestamp.
+      - The backend cannot reach Oracle at all after exhausting retries.
+        This is a different, more urgent situation (503-ORACLE) — we don't
+        know if the data is stale, we simply can't read anything right now.
+
+    On connection failure, returns an explicit error payload (does not
+    silently fall back to "OK") so the frontend can tell the two apart.
     """
     sql = "SELECT status, timestamp_of_last_update FROM pipeline_status FETCH FIRST 1 ROWS ONLY"
     try:
@@ -308,7 +315,16 @@ def get_pipeline_status() -> dict:
                 "status": row[0],
                 "timestamp_of_last_update": str(row[1]) if row[1] else None,
             }
+        # Table reachable but empty — processing hasn't run yet, not an error.
+        return {"status": "OK", "timestamp_of_last_update": None}
     except Exception as e:
-        logger.error("get_pipeline_status failed: %s", e)
-
-    return {"status": "OK", "timestamp_of_last_update": None}
+        logger.error("get_pipeline_status failed (Oracle unreachable): %s", e)
+        return {
+            "status": "ERROR",
+            "timestamp_of_last_update": None,
+            "code": "503-ORACLE",
+            "message": (
+                "The backend could not reach the Oracle database after "
+                "multiple attempts. Event data may be temporarily unavailable."
+            ),
+        }

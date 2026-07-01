@@ -6,6 +6,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 
 from mongo_store import (
+    check_mongo_health,
     cleanup_demo_users,
     get_all_profiles,
     get_profile,
@@ -60,8 +61,32 @@ def health() -> dict:
 
 @app.get("/system/status")
 def system_status() -> dict:
-    # Never raises — get_pipeline_status() has its own fallback
-    return get_pipeline_status()
+    """
+    Combined health signal for the dashboard banner.
+
+    Priority order:
+      1. Oracle unreachable (503-ORACLE) — no event data can be shown at all,
+         this is the most severe case.
+      2. MongoDB unreachable (503-MONGO) — events can still be read from
+         Oracle, but profiles/tags can't be saved or read.
+      3. Pipeline-reported ERROR (processing layer issue, e.g. ingestion
+         stalled) — data is stale but the stores themselves are fine.
+      4. OK.
+    """
+    pipeline = get_pipeline_status()
+
+    if pipeline.get("code") == "503-ORACLE":
+        return pipeline   # already shaped as the error payload
+
+    mongo_error = check_mongo_health()
+    if mongo_error:
+        return {
+            "status": "ERROR",
+            "timestamp_of_last_update": pipeline.get("timestamp_of_last_update"),
+            **mongo_error,
+        }
+
+    return pipeline
 
 
 # ── User profiles (MongoDB) ────────────────────────────────────────────────

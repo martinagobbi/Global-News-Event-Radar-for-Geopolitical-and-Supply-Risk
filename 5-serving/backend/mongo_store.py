@@ -85,6 +85,27 @@ def cleanup_demo_users() -> None:
         logger.error("Could not remove demo users (MongoDB unavailable?): %s", e)
 
 
+def check_mongo_health() -> dict | None:
+    """
+    Lightweight MongoDB reachability check, used by /system/status.
+    Returns None if MongoDB is reachable, or an error payload if it is not
+    (after exhausting retries). This is intentionally cheap — a ping, not a
+    real query — so it can run on every dashboard poll without adding load.
+    """
+    try:
+        _with_retry(lambda: _db().command("ping"))
+        return None
+    except Exception as e:
+        logger.error("check_mongo_health failed (MongoDB unreachable): %s", e)
+        return {
+            "code": "503-MONGO",
+            "message": (
+                "The backend could not reach the MongoDB database after "
+                "multiple attempts. User profiles and tags may be temporarily unavailable."
+            ),
+        }
+
+
 # ── Users / profiles ───────────────────────────────────────────────────────
 
 def is_first_login(user_id: str) -> bool:
@@ -123,8 +144,23 @@ def save_profile(user_id: str, profile: dict) -> dict:
     Saves the profile. Raises on failure — the caller should surface this
     to the user rather than silently swallowing it (the user needs to know
     their preferences were not saved).
+
+    Sets "updated_at" to the current UTC timestamp on every save. This is
+    the signal the processing layer uses to detect that a user's profile
+    changed since its last run: it can store, per user, the updated_at it
+    last processed, and only re-run keyword matching for users whose
+    updated_at is newer. No separate notification channel is needed —
+    the processing layer already reads profiles directly from MongoDB on
+    its own schedule, so a changed updated_at field is enough.
     """
-    payload = {**profile, "user_id": user_id, "status": "registered"}
+    from datetime import datetime, timezone
+
+    payload = {
+        **profile,
+        "user_id": user_id,
+        "status": "registered",
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
     _with_retry(
         lambda: _users().replace_one(
             {"_id": user_id},
