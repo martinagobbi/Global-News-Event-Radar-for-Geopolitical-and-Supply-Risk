@@ -144,23 +144,8 @@ def save_profile(user_id: str, profile: dict) -> dict:
     Saves the profile. Raises on failure — the caller should surface this
     to the user rather than silently swallowing it (the user needs to know
     their preferences were not saved).
-
-    Sets "updated_at" to the current UTC timestamp on every save. This is
-    the signal the processing layer uses to detect that a user's profile
-    changed since its last run: it can store, per user, the updated_at it
-    last processed, and only re-run keyword matching for users whose
-    updated_at is newer. No separate notification channel is needed —
-    the processing layer already reads profiles directly from MongoDB on
-    its own schedule, so a changed updated_at field is enough.
     """
-    from datetime import datetime, timezone
-
-    payload = {
-        **profile,
-        "user_id": user_id,
-        "status": "registered",
-        "updated_at": datetime.now(timezone.utc).isoformat(),
-    }
+    payload = {**profile, "user_id": user_id, "status": "registered"}
     _with_retry(
         lambda: _users().replace_one(
             {"_id": user_id},
