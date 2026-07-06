@@ -124,21 +124,22 @@ def run_backfill(n_days: int = 30, workers: int = DEFAULT_WORKERS):
         n_days:  giorni di storico da scaricare
         workers: thread paralleli (default 4, max consigliato 6)
     """
-    total = count_urls(n_days, file_types=("events", "mentions"))
+    total = count_urls(n_days)
     log.info(f"Backfill avviato: ultimi {n_days} giorni")
     log.info(f"File stimati da scaricare: ~{total} ({workers} thread paralleli)")
     log.info(f"Output directory: {RAW_DATA_DIR.resolve()}")
 
-    # Genera tutti i task
+# Genera tutti i task
     tasks = []
-    for item in generate_urls_last_n_days(n_days, file_types=("events", "mentions")):
-        ts_str = item["timestamp"].strftime("%Y%m%d%H%M%S")
+    for item in generate_urls_last_n_days(n_days):
         file_type = item["file_type"]
 
-        # Determina la cartella di destinazione in base al tipo
-        subdir = "events" if file_type == "events" else "mentions"
-        ext = "export.CSV.zip" if file_type == "events" else "mentions.CSV.zip"
-        dest = RAW_DATA_DIR / subdir / f"{ts_str}.{ext}"
+        # events / events_translation -> events ; mentions / mentions_translation -> mentions.
+        # The filename is taken from the URL itself so the ".translation." infix is
+        # preserved (e.g. 20240315143000.translation.export.CSV.zip) and English
+        # and Translingual files coexist in the same folder without collisions.
+        subdir = "events" if file_type.startswith("events") else "mentions"
+        dest = RAW_DATA_DIR / subdir / Path(item["url"]).name
 
         tasks.append((item["url"], dest))
 
