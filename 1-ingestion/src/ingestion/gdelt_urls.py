@@ -11,11 +11,17 @@ from datetime import datetime, timedelta, timezone
 GDELT_BASE_URL = "http://data.gdeltproject.org/gdeltv2"
 LAST_UPDATE_URL = f"{GDELT_BASE_URL}/lastupdate.txt"
 
-# I tre tipi di file pubblicati ogni 15 minuti
+# File types published every 15 minutes. The "translation" pair is the GDELT
+# Translingual feed: non-English articles machine-translated into English,
 FILE_TYPES = {
     "events": "export.CSV.zip",
-    "mentions": "mentions.CSV.zip",  # <--- CAMBIATO DA GKG A MENTIONS
+    "mentions": "mentions.CSV.zip",
+    "events_translation": "translation.export.CSV.zip",
+    "mentions_translation": "translation.mentions.CSV.zip",
 }
+
+# Default set downloaded by the backfill (English + Translingual).
+DEFAULT_FILE_TYPES = ("events", "mentions", "events_translation", "mentions_translation")
 
 def round_to_15min(dt: datetime) -> datetime:
     """
@@ -77,7 +83,7 @@ def generate_timestamps_last_n_days(n_days: int, end_dt: datetime = None):
         current += timedelta(minutes=15)
 
 
-def generate_urls_last_n_days(n_days: int, file_types=("events", "mentions")):
+def generate_urls_last_n_days(n_days: int, file_types=DEFAULT_FILE_TYPES):
     """
     Genera tutti gli URL GDELT degli ultimi N giorni per i tipi richiesti.
 
@@ -97,7 +103,7 @@ def generate_urls_last_n_days(n_days: int, file_types=("events", "mentions")):
             }
 
 
-def count_urls(n_days: int, file_types=("events", "mentions")) -> int:
+def count_urls(n_days: int, file_types=DEFAULT_FILE_TYPES) -> int:
     """
     Stima quanti file verranno scaricati — utile per progress bar.
     Formula: n_days * 96 slot/giorno * len(file_types)
