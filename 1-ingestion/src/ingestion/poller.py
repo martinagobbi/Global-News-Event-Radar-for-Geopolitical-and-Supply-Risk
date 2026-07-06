@@ -11,6 +11,8 @@ import requests
 
 # Cambiato all'URL dei 15 minuti, specifico per lo streaming real-time
 LAST_15MIN_URL = "http://data.gdeltproject.org/gdeltv2/last15minutes.txt"
+# Formato identico, aggiunta la parte di articoli tradotti
+LAST_TRANSLATION_URL = "http://data.gdeltproject.org/gdeltv2/lastupdate-translation.txt"
 
 POLL_INTERVAL_SECONDS = 15 * 60
 
@@ -37,7 +39,7 @@ def save_state(state: dict) -> None:
     with STATE_FILE.open("w", encoding="utf-8") as f:
         json.dump(state, f, indent=2)
 
-def fetch_latest_urls(session: requests.Session) -> Dict[str, str]:
+def fetch_latest_urls(session: requests.Session, feed_url: str = LAST_15MIN_URL) -> Dict[str, str]:
     """
     Legge il file temporaneo di GDELT ed estrae gli ultimi URL di Events e Mentions.
     Include un meccanismo di retry in caso di 404 temporaneo del server.
@@ -47,7 +49,7 @@ def fetch_latest_urls(session: requests.Session) -> Dict[str, str]:
     
     for attempt in range(1, retries + 1):
         try:
-            response = session.get(LAST_15MIN_URL, timeout=30)
+            response = session.get(feed_url, timeout=30)
             response.raise_for_status()
             
             urls = {}
