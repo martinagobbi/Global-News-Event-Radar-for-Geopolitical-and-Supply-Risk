@@ -8,11 +8,13 @@ Struttura output:
     data/raw/
         events/
             20240315143000.export.CSV.zip
+            20240315143000.translation.export.CSV.zip
             ...
-        gkg/
-            20240315143000.gkg.csv.zip
+        mentions/
+            20240315143000.mentions.CSV.zip
+            20240315143000.translation.mentions.CSV.zip
             ...
-
+ 
 Uso:
     python -m ingestion.backfill              # ultimi 30 giorni
     python -m ingestion.backfill --days 7     # ultimi 7 giorni
