@@ -11,6 +11,8 @@ import requests
 
 # Cambiato all'URL dei 15 minuti, specifico per lo streaming real-time
 LAST_15MIN_URL = "http://data.gdeltproject.org/gdeltv2/last15minutes.txt"
+# Stessa cadenza, ma anche articoli non En, stesso formato
+LAST_TRANSLATION_URL = "http://data.gdeltproject.org/gdeltv2/lastupdate-translation.txt"
 
 POLL_INTERVAL_SECONDS = 15 * 60
 
@@ -37,7 +39,7 @@ def save_state(state: dict) -> None:
     with STATE_FILE.open("w", encoding="utf-8") as f:
         json.dump(state, f, indent=2)
 
-def fetch_latest_urls(session: requests.Session) -> Dict[str, str]:
+def fetch_latest_urls(session: requests.Session, feed_url: str = LAST_15MIN_URL) -> Dict[str, str]:
     """
     Legge il file temporaneo di GDELT ed estrae gli ultimi URL di Events e Mentions.
     Include un meccanismo di retry in caso di 404 temporaneo del server.
@@ -47,7 +49,7 @@ def fetch_latest_urls(session: requests.Session) -> Dict[str, str]:
     
     for attempt in range(1, retries + 1):
         try:
-            response = session.get(LAST_15MIN_URL, timeout=30)
+            response = session.get(feed_url, timeout=30)
             response.raise_for_status()
             
             urls = {}
@@ -106,40 +108,38 @@ def validate_and_cleanup(csv_path: Path, zip_path: Path) -> None:
     zip_path.unlink(missing_ok=True)
     print(f"[CLEANUP] Rimosso ZIP raw: {zip_path.name}")
 
+def sync_table(session: requests.Session, state: dict, state_key: str, file_url: str) -> None:
+    """Download+extract one table file unless the state says it was already fetched."""
+    if state.get(state_key) == file_url:
+        print(f"[SKIP] {state_key}: already up to date with the latest release.")
+        return
+    print(f"[INFO] New {state_key} file detected: {Path(file_url).name}")
+    csv_path, zip_path = download_and_extract(session, file_url)
+    validate_and_cleanup(csv_path, zip_path)
+    state[state_key] = file_url
+
 def process_pipeline(session: requests.Session) -> None:
-    """Esegue il ciclo completo per caricare sia gli Events che le Mentions"""
+    """One full cycle: fetch Events+Mentions from BOTH feeds (English + Translingual)."""
     ensure_directories()
     state = load_state()
 
-    # 1. Recupera gli ultimi URL disponibili
-    latest_urls = fetch_latest_urls(session)
-    
-    if not latest_urls.get("events") or not latest_urls.get("mentions"):
-        print("[WARNING] Impossibile trovare gli URL di Events o Mentions nel file di controllo.")
-        return
-
-    # 2. Gestione degli EVENTI
-    event_url = latest_urls["events"]
-    if state.get("events") == event_url:
-        print("[SKIP] Tabella Events già aggiornata all'ultimo rilascio.")
-    else:
-        print(f"[INFO] Nuovo file Events rilevato: {Path(event_url).name}")
-        csv_events, zip_events = download_and_extract(session, event_url)
-        validate_and_cleanup(csv_events, zip_events)
-        state["events"] = event_url
-
-    # 3. Gestione delle MENZIONI
-    mention_url = latest_urls["mentions"]
-    if state.get("mentions") == mention_url:
-        print("[SKIP] Tabella Mentions già aggiornata all'ultimo rilascio.")
-    else:
-        print(f"[INFO] Nuovo file Mentions rilevato: {Path(mention_url).name}")
-        csv_mentions, zip_mentions = download_and_extract(session, mention_url)
-        validate_and_cleanup(csv_mentions, zip_mentions)
-        state["mentions"] = mention_url
-
-    # 4. Salva lo stato aggiornato
-    save_state(state)
+    # Each feed has its own control file and its own state keys, so the two
+    # streams never overwrite each other. A failure on one feed does not block
+    # the other: partial state is saved in the finally block.
+    feeds = [
+        (LAST_15MIN_URL,       "events",             "mentions"),
+        (LAST_TRANSLATION_URL, "events_translation", "mentions_translation"),
+    ]
+    try:
+        for feed_url, events_key, mentions_key in feeds:
+            latest_urls = fetch_latest_urls(session, feed_url)
+            if not latest_urls.get("events") or not latest_urls.get("mentions"):
+                print(f"[WARNING] Events/Mentions URLs not found in control file: {feed_url}")
+                continue
+            sync_table(session, state, events_key,   latest_urls["events"])
+            sync_table(session, state, mentions_key, latest_urls["mentions"])
+    finally:
+        save_state(state)
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Poller GDELT (Events & Mentions)")
