@@ -85,6 +85,27 @@ def cleanup_demo_users() -> None:
         logger.error("Could not remove demo users (MongoDB unavailable?): %s", e)
 
 
+def check_mongo_health() -> dict | None:
+    """
+    Lightweight MongoDB reachability check, used by /system/status.
+    Returns None if MongoDB is reachable, or an error payload if it is not
+    (after exhausting retries). This is intentionally cheap — a ping, not a
+    real query — so it can run on every dashboard poll without adding load.
+    """
+    try:
+        _with_retry(lambda: _db().command("ping"))
+        return None
+    except Exception as e:
+        logger.error("check_mongo_health failed (MongoDB unreachable): %s", e)
+        return {
+            "code": "503-MONGO",
+            "message": (
+                "The backend could not reach the MongoDB database after "
+                "multiple attempts. User profiles and tags may be temporarily unavailable."
+            ),
+        }
+
+
 # ── Users / profiles ───────────────────────────────────────────────────────
 
 def is_first_login(user_id: str) -> bool:

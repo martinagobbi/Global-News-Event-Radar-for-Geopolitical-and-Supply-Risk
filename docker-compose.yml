@@ -56,8 +56,11 @@ services:
     depends_on:
       - parsing
     environment:
-      CLICKHOUSE_HOST: clickhouse-s1r1
-      CLICKHOUSE_PORT: "9000"
+      # Store addresses default to the stores tier's docker service names (same
+      # machine); export the variable before `docker compose up` to point at real
+      # off-host addresses, e.g. CLICKHOUSE_HOST=clickhouse.example.com.
+      CLICKHOUSE_HOST: ${CLICKHOUSE_HOST:-clickhouse-s1r1}
+      CLICKHOUSE_PORT: ${CLICKHOUSE_PORT:-9000}
       CLICKHOUSE_CLUSTER: gnews_cluster
       CLICKHOUSE_OP_TIMEOUT: "120"   # caps every ClickHouse op (lookup/insert/OPTIMIZE)
       LATEST_FILES_DIR: /data/latest_files
@@ -81,20 +84,23 @@ services:
     depends_on:
       - validation
     environment:
-      CLICKHOUSE_HOST: clickhouse-s1r1
-      CLICKHOUSE_PORT: "9000"
+      # Every store address is env-overridable: same defaults for a same-machine
+      # stack, but export MONGO_URI / CLICKHOUSE_HOST / ORACLE_HOST (etc.) before
+      # `docker compose up` to point this pipeline at stores on other machines.
+      CLICKHOUSE_HOST: ${CLICKHOUSE_HOST:-clickhouse-s1r1}
+      CLICKHOUSE_PORT: ${CLICKHOUSE_PORT:-9000}
       STATUS_DIR: /data/status
       # MongoDB replica set holding the per-user profiles (territories/keywords).
-      MONGO_URI: mongodb://mongo1:27017,mongo2:27017,mongo3:27017/?replicaSet=rs0
-      MONGO_DB: radar             # matches the serving backend's MONGO_DB
-      MONGO_COLLECTION: users     # the serving backend's profiles collection
+      MONGO_URI: ${MONGO_URI:-mongodb://mongo1:27017,mongo2:27017,mongo3:27017/?replicaSet=rs0}
+      MONGO_DB: ${MONGO_DB:-radar}
+      MONGO_COLLECTION: ${MONGO_COLLECTION:-users}
       # Oracle = the gold sink that serving reads. FREEPDB1 is the PDB shipped by
       # the gvenzl/oracle-free image in the stores tier.
-      ORACLE_HOST: pipeline_oracle
-      ORACLE_PORT: "1521"
-      ORACLE_SERVICE: FREEPDB1
-      ORACLE_USER: radar
-      ORACLE_PASSWORD: radar
+      ORACLE_HOST: ${ORACLE_HOST:-pipeline_oracle}
+      ORACLE_PORT: ${ORACLE_PORT:-1521}
+      ORACLE_SERVICE: ${ORACLE_SERVICE:-FREEPDB1}
+      ORACLE_USER: ${ORACLE_USER:-radar}
+      ORACLE_PASSWORD: ${ORACLE_PASSWORD:-radar}
     volumes:
       - shared_data:/data
     networks:
@@ -112,15 +118,18 @@ services:
     container_name: radar-backend
     restart: unless-stopped
     environment:
+      # Same override policy as processing (see comment above): defaults target
+      # the stores tier on the same machine; export the variables to point at
+      # real off-host addresses.
       USE_MOCK: "false"
-      MONGO_URI: mongodb://mongo1:27017,mongo2:27017,mongo3:27017/?replicaSet=rs0
-      MONGO_DB: radar
+      MONGO_URI: ${MONGO_URI:-mongodb://mongo1:27017,mongo2:27017,mongo3:27017/?replicaSet=rs0}
+      MONGO_DB: ${MONGO_DB:-radar}
       MONGO_TIMEOUT: "5"
-      ORACLE_HOST: pipeline_oracle
-      ORACLE_PORT: "1521"
-      ORACLE_SERVICE: FREEPDB1
-      ORACLE_USER: radar
-      ORACLE_PASSWORD: radar
+      ORACLE_HOST: ${ORACLE_HOST:-pipeline_oracle}
+      ORACLE_PORT: ${ORACLE_PORT:-1521}
+      ORACLE_SERVICE: ${ORACLE_SERVICE:-FREEPDB1}
+      ORACLE_USER: ${ORACLE_USER:-radar}
+      ORACLE_PASSWORD: ${ORACLE_PASSWORD:-radar}
       ORACLE_TIMEOUT: "10"
       ORACLE_RETRIES: "3"
     ports:
