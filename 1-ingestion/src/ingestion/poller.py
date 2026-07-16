@@ -19,7 +19,9 @@ BASE_DIR = Path(__file__).resolve().parent.parent.parent
 DATA_DIR = Path("/data") if Path("/data").exists() else BASE_DIR / "data"
 RAW_ZIP_DIR = DATA_DIR / "raw" / "zip"
 RAW_CSV_DIR = DATA_DIR / "raw" / "csv"
-STATE_DIR = BASE_DIR / "state"
+# Lo stato vive sul volume condiviso (/data) così sopravvive ai riavvii e a un
+# eventuale failover su un'altra macchina (se /data è su storage condiviso/in rete).
+STATE_DIR = DATA_DIR / "state"
 STATE_FILE = STATE_DIR / "last_seen.json"
 
 def ensure_directories() -> None:

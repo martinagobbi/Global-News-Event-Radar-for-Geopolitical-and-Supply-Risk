@@ -10,6 +10,7 @@ from mongo_store import (
     get_all_profiles,
     get_profile,
     get_tags,
+    get_territories,
     is_first_login,
     save_profile,
     set_tag,
@@ -96,6 +97,13 @@ def all_profiles() -> dict:
     # Used directly by the processing layer.
     # Returns empty list on MongoDB error — processing handles that gracefully.
     return {"profiles": get_all_profiles()}
+
+
+@app.get("/territories")
+def territories() -> dict:
+    # Territory picker options for the frontend onboarding/dashboard, read from
+    # Mongo (published there by the processing layer's startup seed).
+    return {"territories": get_territories()}
 
 
 # ── Tags (MongoDB) ─────────────────────────────────────────────────────────

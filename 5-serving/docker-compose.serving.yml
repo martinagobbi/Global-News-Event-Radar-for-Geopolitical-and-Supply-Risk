@@ -1,38 +1,23 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Serving FRONTEND — runs on each user's machine, separate from the operator
+# stack (ingestion -> parsing -> validation -> processing -> backend, brought up
+# by the root docker-compose.yml). It reaches the operator's backend over HTTP
+# via BACKEND_URL:
+#
+#   Normal (multi-machine):  BACKEND_URL=http://<operator-host>:8000
+#   Local all-in-one:        BACKEND_URL=http://host.docker.internal:8000
+#                            (Linux resolves it via the extra_hosts mapping below)
+#
+# Start it with:
+#   BACKEND_URL=http://<host>:8000 docker compose -f 5-serving/docker-compose.serving.yml up
+# ─────────────────────────────────────────────────────────────────────────────
 services:
   frontend:
     build: ./frontend
     container_name: radar-frontend
     environment:
-      BACKEND_URL: http://backend:8000
+      BACKEND_URL: ${BACKEND_URL:-http://host.docker.internal:8000}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "8501:8501"
-    depends_on:
-      - backend
-    networks:
-      - pipeline_network
-
-  backend:
-    build: ./backend
-    container_name: radar-backend
-    environment:
-      USE_MOCK: "false"
-      MONGO_URI: "mongodb://pipeline_mongo1:27017,pipeline_mongo2:27017,pipeline_mongo3:27017/?replicaSet=rs0"
-      MONGO_DB: "radar"
-      MONGO_TIMEOUT: "5"
-      ORACLE_HOST: "pipeline_oracle"
-      ORACLE_PORT: "1521"
-      ORACLE_SERVICE: "GDELT"
-      ORACLE_USER: "radar"
-      ORACLE_PASSWORD: "radar"
-      ORACLE_TIMEOUT: "10"
-      ORACLE_RETRIES: "3"
-    ports:
-      - "8000:8000"
-    depends_on:
-      - backend-ready
-    networks:
-      - pipeline_network
-
-networks:
-  pipeline_network:
-    external: true

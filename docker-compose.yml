@@ -1,154 +1,30 @@
+# ═════════════════════════════════════════════════════════════════════════════
+# PIPELINE TIER — ingestion → parsing → validation → processing → serving backend.
+#
+# This tier is DISPOSABLE and replaceable. It owns no database and no durable
+# data: the only volume is `shared_data`, a local scratch space holding the
+# in-flight raw/parsed slices. Everything persistent lives in the stores tier
+# (docker-compose.stores.yml), which this file merely connects to.
+#
+# Bring the stores up FIRST (they create `pipeline_network`), then this:
+#
+#     docker compose -f docker-compose.stores.yml up -d     # once, long-lived
+#     docker compose up -d                                  # the pipeline
+#
+# If this machine dies, a replacement just runs `docker compose up -d` again with
+# its own fresh `shared_data`: it re-polls the latest GDELT slice at startup and
+# reconnects to the SAME ClickHouse / Mongo / Oracle. Nothing is re-created and
+# no data is deleted.
+# ═════════════════════════════════════════════════════════════════════════════
 services:
 
-  # ── Coordination: 3-node ClickHouse Keeper ensemble (quorum) ──────────────
-  clickhouse-keeper-1:
-    image: clickhouse/clickhouse-keeper:24.3
-    container_name: pipeline_ch_keeper_1
-    volumes:
-      - ./clickhouse/keeper-1.xml:/etc/clickhouse-keeper/keeper_config.xml:ro
-      - keeper_1_data:/var/lib/clickhouse-keeper
-    networks:
-      - pipeline_network
-
-  clickhouse-keeper-2:
-    image: clickhouse/clickhouse-keeper:24.3
-    container_name: pipeline_ch_keeper_2
-    volumes:
-      - ./clickhouse/keeper-2.xml:/etc/clickhouse-keeper/keeper_config.xml:ro
-      - keeper_2_data:/var/lib/clickhouse-keeper
-    networks:
-      - pipeline_network
-
-  clickhouse-keeper-3:
-    image: clickhouse/clickhouse-keeper:24.3
-    container_name: pipeline_ch_keeper_3
-    volumes:
-      - ./clickhouse/keeper-3.xml:/etc/clickhouse-keeper/keeper_config.xml:ro
-      - keeper_3_data:/var/lib/clickhouse-keeper
-    networks:
-      - pipeline_network
-
-  # ── Long-term store: 2 shards × 3 replicas (6 ClickHouse nodes) ───────────
-  # Shard 1
-  clickhouse-s1r1:
-    image: clickhouse/clickhouse-server:24.3
-    container_name: pipeline_clickhouse_s1r1
-    depends_on: [clickhouse-keeper-1, clickhouse-keeper-2, clickhouse-keeper-3]
-    ulimits:
-      nofile: {soft: 262144, hard: 262144}
-    volumes:
-      - ./clickhouse/cluster.xml:/etc/clickhouse-server/config.d/cluster.xml:ro
-      - ./clickhouse/macros-s1r1.xml:/etc/clickhouse-server/config.d/macros.xml:ro
-      - ./clickhouse/users.xml:/etc/clickhouse-server/users.d/zz-network-access.xml:ro
-      - ch_s1r1_data:/var/lib/clickhouse
-    networks:
-      - pipeline_network
-
-  clickhouse-s1r2:
-    image: clickhouse/clickhouse-server:24.3
-    container_name: pipeline_clickhouse_s1r2
-    depends_on: [clickhouse-keeper-1, clickhouse-keeper-2, clickhouse-keeper-3]
-    ulimits:
-      nofile: {soft: 262144, hard: 262144}
-    volumes:
-      - ./clickhouse/cluster.xml:/etc/clickhouse-server/config.d/cluster.xml:ro
-      - ./clickhouse/macros-s1r2.xml:/etc/clickhouse-server/config.d/macros.xml:ro
-      - ./clickhouse/users.xml:/etc/clickhouse-server/users.d/zz-network-access.xml:ro
-      - ch_s1r2_data:/var/lib/clickhouse
-    networks:
-      - pipeline_network
-
-  clickhouse-s1r3:
-    image: clickhouse/clickhouse-server:24.3
-    container_name: pipeline_clickhouse_s1r3
-    depends_on: [clickhouse-keeper-1, clickhouse-keeper-2, clickhouse-keeper-3]
-    ulimits:
-      nofile: {soft: 262144, hard: 262144}
-    volumes:
-      - ./clickhouse/cluster.xml:/etc/clickhouse-server/config.d/cluster.xml:ro
-      - ./clickhouse/macros-s1r3.xml:/etc/clickhouse-server/config.d/macros.xml:ro
-      - ./clickhouse/users.xml:/etc/clickhouse-server/users.d/zz-network-access.xml:ro
-      - ch_s1r3_data:/var/lib/clickhouse
-    networks:
-      - pipeline_network
-
-  # Shard 2
-  clickhouse-s2r1:
-    image: clickhouse/clickhouse-server:24.3
-    container_name: pipeline_clickhouse_s2r1
-    depends_on: [clickhouse-keeper-1, clickhouse-keeper-2, clickhouse-keeper-3]
-    ulimits:
-      nofile: {soft: 262144, hard: 262144}
-    volumes:
-      - ./clickhouse/cluster.xml:/etc/clickhouse-server/config.d/cluster.xml:ro
-      - ./clickhouse/macros-s2r1.xml:/etc/clickhouse-server/config.d/macros.xml:ro
-      - ./clickhouse/users.xml:/etc/clickhouse-server/users.d/zz-network-access.xml:ro
-      - ch_s2r1_data:/var/lib/clickhouse
-    networks:
-      - pipeline_network
-
-  clickhouse-s2r2:
-    image: clickhouse/clickhouse-server:24.3
-    container_name: pipeline_clickhouse_s2r2
-    depends_on: [clickhouse-keeper-1, clickhouse-keeper-2, clickhouse-keeper-3]
-    ulimits:
-      nofile: {soft: 262144, hard: 262144}
-    volumes:
-      - ./clickhouse/cluster.xml:/etc/clickhouse-server/config.d/cluster.xml:ro
-      - ./clickhouse/macros-s2r2.xml:/etc/clickhouse-server/config.d/macros.xml:ro
-      - ./clickhouse/users.xml:/etc/clickhouse-server/users.d/zz-network-access.xml:ro
-      - ch_s2r2_data:/var/lib/clickhouse
-    networks:
-      - pipeline_network
-
-  clickhouse-s2r3:
-    image: clickhouse/clickhouse-server:24.3
-    container_name: pipeline_clickhouse_s2r3
-    depends_on: [clickhouse-keeper-1, clickhouse-keeper-2, clickhouse-keeper-3]
-    ulimits:
-      nofile: {soft: 262144, hard: 262144}
-    volumes:
-      - ./clickhouse/cluster.xml:/etc/clickhouse-server/config.d/cluster.xml:ro
-      - ./clickhouse/macros-s2r3.xml:/etc/clickhouse-server/config.d/macros.xml:ro
-      - ./clickhouse/users.xml:/etc/clickhouse-server/users.d/zz-network-access.xml:ro
-      - ch_s2r3_data:/var/lib/clickhouse
-    networks:
-      - pipeline_network
-
-   # ── MongoDB: replica set a 3 nodi (per i profili utente del serving) ───────
-  mongo1:
-    image: mongo:7
-    container_name: pipeline_mongo1
-    command: ["--replSet", "rs0", "--bind_ip_all"]
-    volumes:
-      - mongo1_data:/data/db
-    networks:
-      - pipeline_network
-
-  mongo2:
-    image: mongo:7
-    container_name: pipeline_mongo2
-    command: ["--replSet", "rs0", "--bind_ip_all"]
-    volumes:
-      - mongo2_data:/data/db
-    networks:
-      - pipeline_network
-
-  mongo3:
-    image: mongo:7
-    container_name: pipeline_mongo3
-    command: ["--replSet", "rs0", "--bind_ip_all"]
-    volumes:
-      - mongo3_data:/data/db
-    networks:
-      - pipeline_network
-
-  # Layer 1: Data ingestion
+  # Layer 1: Data ingestion — polls GDELT every 15 min (first poll at startup).
   ingestion:
     build:
       context: ./1-ingestion
       dockerfile: Dockerfile
     container_name: pipeline_ingestion
+    restart: unless-stopped
     volumes:
       - shared_data:/data
     networks:
@@ -160,6 +36,7 @@ services:
       context: ./2-parsing
       dockerfile: Dockerfile
     container_name: pipeline_parsing
+    restart: unless-stopped
     depends_on:
       - ingestion
     volumes:
@@ -167,20 +44,22 @@ services:
     networks:
       - pipeline_network
 
-  # Layer 3: Validation + storage owner (writes to the replicated cluster)
+  # Layer 3: Validation + storage owner (creates/owns the ClickHouse schema).
+  # It retries until ClickHouse is reachable, so no depends_on is needed for a
+  # store that lives in the other tier.
   validation:
     build:
       context: ./3-validation_and_storage
       dockerfile: Dockerfile
     container_name: pipeline_validation
+    restart: unless-stopped
     depends_on:
       - parsing
-      - clickhouse-s1r1   # write entry point for shard 1 (cluster handles the rest)
-      - clickhouse-s2r1   # write entry point for shard 2
     environment:
       CLICKHOUSE_HOST: clickhouse-s1r1
       CLICKHOUSE_PORT: "9000"
       CLICKHOUSE_CLUSTER: gnews_cluster
+      CLICKHOUSE_OP_TIMEOUT: "120"   # caps every ClickHouse op (lookup/insert/OPTIMIZE)
       LATEST_FILES_DIR: /data/latest_files
       STATUS_DIR: /data/status
       MENTION_ENRICH_WORKERS: "8"
@@ -191,31 +70,29 @@ services:
     networks:
       - pipeline_network
 
-  # Layer 4: Processing — pure reader
+  # Layer 4: Processing — pure reader of the silver store; writes the Oracle gold
+  # and publishes the territory table to Mongo on startup.
   processing:
     build:
       context: ./4-processing
       dockerfile: Dockerfile
     container_name: pipeline_processing
+    restart: unless-stopped
     depends_on:
       - validation
-      - clickhouse-s1r1
-      - clickhouse-s2r1
-      - mongo1
-      - mongo2
-      - mongo3
     environment:
       CLICKHOUSE_HOST: clickhouse-s1r1
       CLICKHOUSE_PORT: "9000"
       STATUS_DIR: /data/status
-      # MongoDB replica set holding the per-user profiles (countries/keywords).
+      # MongoDB replica set holding the per-user profiles (territories/keywords).
       MONGO_URI: mongodb://mongo1:27017,mongo2:27017,mongo3:27017/?replicaSet=rs0
       MONGO_DB: radar             # matches the serving backend's MONGO_DB
       MONGO_COLLECTION: users     # the serving backend's profiles collection
-      # Oracle = the gold sink that serving reads (matches 5-serving's settings).
+      # Oracle = the gold sink that serving reads. FREEPDB1 is the PDB shipped by
+      # the gvenzl/oracle-free image in the stores tier.
       ORACLE_HOST: pipeline_oracle
       ORACLE_PORT: "1521"
-      ORACLE_SERVICE: GDELT
+      ORACLE_SERVICE: FREEPDB1
       ORACLE_USER: radar
       ORACLE_PASSWORD: radar
     volumes:
@@ -223,27 +100,41 @@ services:
     networks:
       - pipeline_network
 
-  # Layer 5: Serving
-  # ── Serving: managed by the separate compose file in 5-serving/ ───────────
-  # Not defined here — the compose file in 5-serving/docker-compose.yml
-  # declares pipeline_network as an external network and attaches to it.
-  # To start the full stack:
-  #   1. docker compose up -d          (this file — creates pipeline_network)
-  #   2. docker compose -f 5-serving/docker-compose.yml up -d
+  # Layer 5 (operator side): serving BACKEND — a stateless reader of the stores
+  # (Mongo profiles + reference, Oracle gold). It mounts NO volume at all, so it
+  # can run on any machine / be replicated behind a load balancer. The FRONTEND is
+  # the only piece that runs on each user's machine — see
+  # 5-serving/docker-compose.serving.yml.
+  backend:
+    build:
+      context: ./5-serving/backend
+      dockerfile: Dockerfile
+    container_name: radar-backend
+    restart: unless-stopped
+    environment:
+      USE_MOCK: "false"
+      MONGO_URI: mongodb://mongo1:27017,mongo2:27017,mongo3:27017/?replicaSet=rs0
+      MONGO_DB: radar
+      MONGO_TIMEOUT: "5"
+      ORACLE_HOST: pipeline_oracle
+      ORACLE_PORT: "1521"
+      ORACLE_SERVICE: FREEPDB1
+      ORACLE_USER: radar
+      ORACLE_PASSWORD: radar
+      ORACLE_TIMEOUT: "10"
+      ORACLE_RETRIES: "3"
+    ports:
+      - "8000:8000"
+    networks:
+      - pipeline_network
 
 volumes:
+  # Disposable scratch for the in-flight slices. Local to whichever machine runs
+  # the pipeline; never shared, never replicated, safe to lose.
   shared_data:
-  keeper_1_data:
-  keeper_2_data:
-  keeper_3_data:
-  ch_s1r1_data:
-  ch_s1r2_data:
-  ch_s1r3_data:
-  ch_s2r1_data:
-  ch_s2r2_data:
-  ch_s2r3_data:
-  mongo1_data:
-  mongo2_data:
-  mongo3_data:
+
 networks:
+  # Created and owned by docker-compose.stores.yml — bring the stores up first.
   pipeline_network:
+    external: true
+    name: pipeline_network

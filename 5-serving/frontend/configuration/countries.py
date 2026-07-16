@@ -3,15 +3,24 @@ configuration/countries.py
 --------------------------
 Territory picker options for the onboarding / dashboard multiselect.
 
-Loaded from the single shared data file `country_codes.json` — the same artifact
-the processing layer uses for name -> CAMEO/FIPS codes, vendored into this build
-context. Deriving the options from that file means the picker can never offer a
-name the processing matcher (codes_for_names) doesn't recognise.
+The frontend runs on each user's machine and does NOT share the operator's
+volume, so the options are fetched from the serving backend (GET /territories),
+which reads them from Mongo (published there by the processing layer's startup
+seed). The result is cached for the session so it isn't re-fetched on every
+Streamlit rerun.
 """
-import json
-from pathlib import Path
+from __future__ import annotations
 
-_DATA_FILE = Path(__file__).with_name("country_codes.json")
-COUNTRY_OPTIONS = sorted(
-    json.loads(_DATA_FILE.read_text(encoding="utf-8"))["countries"]
-)
+import streamlit as st
+
+from data.api_client import get_json
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_territory_options() -> list[str]:
+    """Fetch the territory list from the backend; [] if the backend is unreachable."""
+    try:
+        payload = get_json("/territories")
+        return list(payload.get("territories", []))
+    except Exception:
+        return []

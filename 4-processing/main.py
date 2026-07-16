@@ -63,6 +63,22 @@ EVENTS_LIMIT = int(os.getenv("GOLD_EVENTS_LIMIT", "20000"))
 app = FastAPI(title="Supply Risk — Processing Layer")
 
 
+@app.on_event("startup")
+def _seed_reference_data() -> None:
+    """Publish the territory table to Mongo so the serving backend can serve it to
+    the (remote) frontend without mounting the processing layer's volume."""
+    try:
+        mongo_reader.seed_territories({
+            "options": countries.COUNTRY_OPTIONS,
+            "codes": countries.COUNTRY_CODES,
+            "count": len(countries.COUNTRY_OPTIONS),
+        })
+        logger.info("Seeded %d territories into Mongo (reference)",
+                    len(countries.COUNTRY_OPTIONS))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not seed territories into Mongo: %s", exc)
+
+
 def _ch() -> ClickHouseWriter:
     return ClickHouseWriter(
         host=CH_HOST, port=CH_PORT,

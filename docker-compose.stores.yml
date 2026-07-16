@@ -1,0 +1,230 @@
+# ═════════════════════════════════════════════════════════════════════════════
+# STORES TIER — ClickHouse (silver), MongoDB (profiles + reference), Oracle (gold).
+#
+# These are LONG-LIVED and completely detached from the pipeline's lifecycle.
+# Bring them up ONCE and leave them running:
+#
+#     docker compose -f docker-compose.stores.yml up -d
+#
+# They own their data volumes and the `pipeline_network`. The pipeline tier
+# (docker-compose.yml) attaches to that network as an EXTERNAL network and simply
+# connects to these services — so a pipeline machine can die and be replaced
+# without ever re-creating a store or touching its data.
+#
+# The two one-time setup steps live here (not in the pipeline), and both are
+# idempotent, so re-running this file is safe:
+#   * mongo-init      -> rs.initiate(rs0), guarded by rs.status()
+#   * oracle-init/    -> 01_schema.sql, run once at first DB creation
+# ═════════════════════════════════════════════════════════════════════════════
+services:
+
+  # ── Coordination: 3-node ClickHouse Keeper ensemble (quorum) ──────────────
+  clickhouse-keeper-1:
+    image: clickhouse/clickhouse-keeper:24.3
+    container_name: pipeline_ch_keeper_1
+    restart: unless-stopped
+    volumes:
+      - ./clickhouse/keeper-1.xml:/etc/clickhouse-keeper/keeper_config.xml:ro
+      - keeper_1_data:/var/lib/clickhouse-keeper
+    networks: [pipeline_network]
+
+  clickhouse-keeper-2:
+    image: clickhouse/clickhouse-keeper:24.3
+    container_name: pipeline_ch_keeper_2
+    restart: unless-stopped
+    volumes:
+      - ./clickhouse/keeper-2.xml:/etc/clickhouse-keeper/keeper_config.xml:ro
+      - keeper_2_data:/var/lib/clickhouse-keeper
+    networks: [pipeline_network]
+
+  clickhouse-keeper-3:
+    image: clickhouse/clickhouse-keeper:24.3
+    container_name: pipeline_ch_keeper_3
+    restart: unless-stopped
+    volumes:
+      - ./clickhouse/keeper-3.xml:/etc/clickhouse-keeper/keeper_config.xml:ro
+      - keeper_3_data:/var/lib/clickhouse-keeper
+    networks: [pipeline_network]
+
+  # ── Silver store: 2 shards × 3 replicas (6 ClickHouse nodes) ──────────────
+  clickhouse-s1r1:
+    image: clickhouse/clickhouse-server:24.3
+    container_name: pipeline_clickhouse_s1r1
+    restart: unless-stopped
+    depends_on: [clickhouse-keeper-1, clickhouse-keeper-2, clickhouse-keeper-3]
+    ulimits:
+      nofile: {soft: 262144, hard: 262144}
+    volumes:
+      - ./clickhouse/cluster.xml:/etc/clickhouse-server/config.d/cluster.xml:ro
+      - ./clickhouse/macros-s1r1.xml:/etc/clickhouse-server/config.d/macros.xml:ro
+      - ./clickhouse/users.xml:/etc/clickhouse-server/users.d/zz-network-access.xml:ro
+      - ch_s1r1_data:/var/lib/clickhouse
+    networks: [pipeline_network]
+
+  clickhouse-s1r2:
+    image: clickhouse/clickhouse-server:24.3
+    container_name: pipeline_clickhouse_s1r2
+    restart: unless-stopped
+    depends_on: [clickhouse-keeper-1, clickhouse-keeper-2, clickhouse-keeper-3]
+    ulimits:
+      nofile: {soft: 262144, hard: 262144}
+    volumes:
+      - ./clickhouse/cluster.xml:/etc/clickhouse-server/config.d/cluster.xml:ro
+      - ./clickhouse/macros-s1r2.xml:/etc/clickhouse-server/config.d/macros.xml:ro
+      - ./clickhouse/users.xml:/etc/clickhouse-server/users.d/zz-network-access.xml:ro
+      - ch_s1r2_data:/var/lib/clickhouse
+    networks: [pipeline_network]
+
+  clickhouse-s1r3:
+    image: clickhouse/clickhouse-server:24.3
+    container_name: pipeline_clickhouse_s1r3
+    restart: unless-stopped
+    depends_on: [clickhouse-keeper-1, clickhouse-keeper-2, clickhouse-keeper-3]
+    ulimits:
+      nofile: {soft: 262144, hard: 262144}
+    volumes:
+      - ./clickhouse/cluster.xml:/etc/clickhouse-server/config.d/cluster.xml:ro
+      - ./clickhouse/macros-s1r3.xml:/etc/clickhouse-server/config.d/macros.xml:ro
+      - ./clickhouse/users.xml:/etc/clickhouse-server/users.d/zz-network-access.xml:ro
+      - ch_s1r3_data:/var/lib/clickhouse
+    networks: [pipeline_network]
+
+  clickhouse-s2r1:
+    image: clickhouse/clickhouse-server:24.3
+    container_name: pipeline_clickhouse_s2r1
+    restart: unless-stopped
+    depends_on: [clickhouse-keeper-1, clickhouse-keeper-2, clickhouse-keeper-3]
+    ulimits:
+      nofile: {soft: 262144, hard: 262144}
+    volumes:
+      - ./clickhouse/cluster.xml:/etc/clickhouse-server/config.d/cluster.xml:ro
+      - ./clickhouse/macros-s2r1.xml:/etc/clickhouse-server/config.d/macros.xml:ro
+      - ./clickhouse/users.xml:/etc/clickhouse-server/users.d/zz-network-access.xml:ro
+      - ch_s2r1_data:/var/lib/clickhouse
+    networks: [pipeline_network]
+
+  clickhouse-s2r2:
+    image: clickhouse/clickhouse-server:24.3
+    container_name: pipeline_clickhouse_s2r2
+    restart: unless-stopped
+    depends_on: [clickhouse-keeper-1, clickhouse-keeper-2, clickhouse-keeper-3]
+    ulimits:
+      nofile: {soft: 262144, hard: 262144}
+    volumes:
+      - ./clickhouse/cluster.xml:/etc/clickhouse-server/config.d/cluster.xml:ro
+      - ./clickhouse/macros-s2r2.xml:/etc/clickhouse-server/config.d/macros.xml:ro
+      - ./clickhouse/users.xml:/etc/clickhouse-server/users.d/zz-network-access.xml:ro
+      - ch_s2r2_data:/var/lib/clickhouse
+    networks: [pipeline_network]
+
+  clickhouse-s2r3:
+    image: clickhouse/clickhouse-server:24.3
+    container_name: pipeline_clickhouse_s2r3
+    restart: unless-stopped
+    depends_on: [clickhouse-keeper-1, clickhouse-keeper-2, clickhouse-keeper-3]
+    ulimits:
+      nofile: {soft: 262144, hard: 262144}
+    volumes:
+      - ./clickhouse/cluster.xml:/etc/clickhouse-server/config.d/cluster.xml:ro
+      - ./clickhouse/macros-s2r3.xml:/etc/clickhouse-server/config.d/macros.xml:ro
+      - ./clickhouse/users.xml:/etc/clickhouse-server/users.d/zz-network-access.xml:ro
+      - ch_s2r3_data:/var/lib/clickhouse
+    networks: [pipeline_network]
+
+  # ── MongoDB: 3-node replica set (user profiles + territory reference) ──────
+  mongo1:
+    image: mongo:7
+    container_name: pipeline_mongo1
+    restart: unless-stopped
+    command: ["--replSet", "rs0", "--bind_ip_all"]
+    volumes:
+      - mongo1_data:/data/db
+    networks: [pipeline_network]
+
+  mongo2:
+    image: mongo:7
+    container_name: pipeline_mongo2
+    restart: unless-stopped
+    command: ["--replSet", "rs0", "--bind_ip_all"]
+    volumes:
+      - mongo2_data:/data/db
+    networks: [pipeline_network]
+
+  mongo3:
+    image: mongo:7
+    container_name: pipeline_mongo3
+    restart: unless-stopped
+    command: ["--replSet", "rs0", "--bind_ip_all"]
+    volumes:
+      - mongo3_data:/data/db
+    networks: [pipeline_network]
+
+  # One-shot, idempotent replica-set initiation. rs.status() succeeds once the
+  # set exists, so re-running this compose file is a no-op — a replacement
+  # pipeline machine never re-initiates or re-creates Mongo.
+  mongo-init:
+    image: mongo:7
+    container_name: pipeline_mongo_init
+    depends_on: [mongo1, mongo2, mongo3]
+    restart: "no"
+    networks: [pipeline_network]
+    entrypoint:
+      - bash
+      - -c
+      - |
+        until mongosh --host mongo1:27017 --quiet --eval 'db.runCommand({ping:1})' >/dev/null 2>&1; do
+          echo "waiting for mongo1..."; sleep 2;
+        done
+        mongosh --host mongo1:27017 --quiet --eval '
+          try {
+            rs.status();
+            print("replica set already initiated - nothing to do");
+          } catch (e) {
+            print("initiating replica set rs0...");
+            rs.initiate({_id: "rs0", members: [
+              {_id: 0, host: "mongo1:27017"},
+              {_id: 1, host: "mongo2:27017"},
+              {_id: 2, host: "mongo3:27017"}
+            ]});
+          }'
+
+  # ── Oracle: the gold sink the serving backend reads ───────────────────────
+  # gvenzl/oracle-free ships a CDB (FREE) with one PDB, FREEPDB1 — that PDB name
+  # is the service the pipeline connects to (ORACLE_SERVICE: FREEPDB1). APP_USER
+  # creates the `radar` user inside it; ./oracle-init/01_schema.sql then creates
+  # the three gold tables ONCE, at first database creation.
+  pipeline_oracle:
+    image: gvenzl/oracle-free:slim
+    container_name: pipeline_oracle
+    restart: unless-stopped
+    environment:
+      ORACLE_PASSWORD: radar_sys        # SYS / SYSTEM password — change for real use
+      APP_USER: radar
+      APP_USER_PASSWORD: radar
+    volumes:
+      - oracle_data:/opt/oracle/oradata
+      - ./oracle-init:/container-entrypoint-initdb.d:ro
+    ports:
+      - "1521:1521"
+    networks: [pipeline_network]
+
+volumes:
+  keeper_1_data:
+  keeper_2_data:
+  keeper_3_data:
+  ch_s1r1_data:
+  ch_s1r2_data:
+  ch_s1r3_data:
+  ch_s2r1_data:
+  ch_s2r2_data:
+  ch_s2r3_data:
+  mongo1_data:
+  mongo2_data:
+  mongo3_data:
+  oracle_data:
+
+networks:
+  # Explicit name (no compose project prefix) so the pipeline tier can attach to
+  # it as an external network by this exact name.
+  pipeline_network:
+    name: pipeline_network

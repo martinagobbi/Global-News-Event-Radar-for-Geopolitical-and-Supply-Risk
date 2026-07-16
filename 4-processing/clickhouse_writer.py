@@ -256,7 +256,7 @@ class ClickHouseWriter:
                 "SELECT * FROM gdelt_mentions LIMIT 0", with_column_types=True)
             return pd.DataFrame(data, columns=[c[0] for c in cols])
         data, cols = client.execute(
-            "SELECT * FROM gdelt_mentions WHERE GLOBALEVENTID IN %(ids)s LIMIT %(lim)s",
+            "SELECT * FROM gdelt_mentions FINAL WHERE GLOBALEVENTID IN %(ids)s LIMIT %(lim)s",
             {"ids": ids, "lim": int(limit)}, with_column_types=True,
         )
         return pd.DataFrame(data, columns=[c[0] for c in cols])
@@ -276,9 +276,9 @@ class ClickHouseWriter:
            Actor1/Actor2CountryCode is in the user's CAMEO set OR whose
            ActionGeo_/Actor1Geo_/Actor2Geo_CountryCode is in the FIPS set
            (match if EITHER standard hits). No geo codes -> all recent events.
-        2. Keyword filter on gdelt_mentions for those events via
-           build_keyword_clause (URL ngrambf LIKE / enriched position match).
-           No keywords -> every mention of the matched events.
+        2. Keyword filter on gdelt_mentions (FINAL, so re-ingested duplicates are
+           collapsed) for those events via build_keyword_clause (URL ngrambf LIKE
+           / enriched position match). No keywords -> every mention of the events.
 
         Returns (events_df, mentions_df), ready for gold.build_article_rows().
         """
@@ -307,7 +307,7 @@ class ClickHouseWriter:
         if kw_sql:
             m_where += f" AND {kw_sql}"
             m_params.update(kw_params)
-        m_sql = f"SELECT * FROM gdelt_mentions WHERE {m_where} LIMIT %(mlim)s"
+        m_sql = f"SELECT * FROM gdelt_mentions FINAL WHERE {m_where} LIMIT %(mlim)s"
         mdata, mcols = client.execute(m_sql, m_params, with_column_types=True)
         return events_df, pd.DataFrame(mdata, columns=[c[0] for c in mcols])
 

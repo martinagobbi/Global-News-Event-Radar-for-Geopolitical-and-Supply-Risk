@@ -1,6 +1,6 @@
 import streamlit as st
 
-from configuration.countries import COUNTRY_OPTIONS
+from configuration.countries import get_territory_options
 # from configuration.sectors import RISK_CATEGORY_OPTIONS  # replaced by the keyword form
 from components.keyword_form import render_keyword_questions
 from data.user_store import get_current_user, get_user_profile, is_first_login, save_user_profile
@@ -26,6 +26,7 @@ st.write(
 )
 
 profile = get_user_profile(user_id)
+territory_options = get_territory_options()
 
 display_name = st.text_input("Display name", value=profile.get("display_name", ""))
 # The list includes sovereign countries AND autonomous territories. Stored under
@@ -33,8 +34,8 @@ display_name = st.text_input("Display name", value=profile.get("display_name", "
 # reads via codes_for_names().
 monitored_territories = st.multiselect(
     "Territories to monitor",
-    options=COUNTRY_OPTIONS,
-    default=[c for c in profile.get("territories", []) if c in COUNTRY_OPTIONS],
+    options=territory_options,
+    default=[c for c in profile.get("territories", []) if c in territory_options],
 )
 
 st.subheader("Your supply chain")

@@ -5,7 +5,7 @@ import streamlit as st
 from components.briefing import render_briefing
 from components.heatmap import render_heatmap
 from components.keyword_form import render_keyword_questions
-from configuration.countries import COUNTRY_OPTIONS
+from configuration.countries import get_territory_options
 from data.gold_layer import (
     get_archived_events,
     get_events,
@@ -30,6 +30,7 @@ if is_first_login(user_id):
     st.stop()
 
 profile = get_user_profile(user_id)
+territory_options = get_territory_options()
 
 # ── Pipeline status (always re-fetched, cheap) ─────────────────────────────
 system_status = get_system_status()
@@ -64,8 +65,8 @@ metrics[3].metric("Data status", pipeline_status)
 with st.expander("Update monitoring perimeter"):
     updated_territories = st.multiselect(
         "Territories to monitor",
-        options=COUNTRY_OPTIONS,
-        default=[c for c in profile.get("territories", []) if c in COUNTRY_OPTIONS],
+        options=territory_options,
+        default=[c for c in profile.get("territories", []) if c in territory_options],
     )
     st.markdown("**Your supply chain**")
     updated_keywords = render_keyword_questions(profile, prefix="dash")

@@ -33,6 +33,11 @@ from gdelt import EVENT_COLUMNS, MENTION_COLUMNS
 
 logger = logging.getLogger("validation.storage")
 
+# Per-operation ClickHouse time cap (seconds). Bounds the referential-integrity
+# lookup, the two appends, and the dedup OPTIMIZE so a validation cycle can't run
+# away. Total cycle time ~ enrichment budget (ENRICH_TIMEOUT_SECONDS) + these ops.
+_OP_TIMEOUT = int(os.getenv("CLICKHOUSE_OP_TIMEOUT", "120"))
+
 # ── Column + skip-index bodies (shared by the LOCAL tables) ───────────────────
 # Sorting key is set per-table in the ENGINE clause below, not here.
 _EVENTS_BODY = """(
@@ -167,10 +172,15 @@ class Storage:
             self._client = Client(
                 host=self.host, port=self.port, database=self.database,
                 user=self.user, password=self.password,
+                # Socket timeout sits just above the server-side cap below.
+                send_receive_timeout=_OP_TIMEOUT + 10,
                 # insert_distributed_sync: an INSERT into a Distributed table
                 # returns only once the rows have reached their target shards,
                 # so the dedup / lookups below see them immediately.
-                settings={"use_numpy": False, "insert_distributed_sync": 1},
+                # max_execution_time: server-side cap on every query (lookup,
+                # appends, OPTIMIZE) so a validation cycle stays bounded.
+                settings={"use_numpy": False, "insert_distributed_sync": 1,
+                          "max_execution_time": _OP_TIMEOUT},
             )
             logger.info("ClickHouse connected: %s:%d/%s (cluster=%s)",
                         self.host, self.port, self.database, self.cluster)
@@ -202,12 +212,15 @@ class Storage:
             f"ENGINE = Distributed({c}, {db}, gdelt_events_local, cityHash64(GLOBALEVENTID))"
         )
 
-        # Mentions: local ReplicatedMergeTree (3 replicas/shard, no dedup) + router.
+        # Mentions: local ReplicatedReplacingMergeTree (3 replicas/shard) — dedups
+        # by the sort key (GLOBALEVENTID, MentionIdentifier), the `enriched` row
+        # winning, so re-ingesting a slice (e.g. after a failover re-poll) is
+        # idempotent. Readers use FINAL to collapse duplicates at query time.
         client.execute(
             f"CREATE TABLE IF NOT EXISTS gdelt_mentions_local ON CLUSTER {c} "
             f"{_MENTIONS_BODY} "
-            f"ENGINE = ReplicatedMergeTree("
-            f"'/clickhouse/tables/{{shard}}/gdelt_mentions_local', '{{replica}}') "
+            f"ENGINE = ReplicatedReplacingMergeTree("
+            f"'/clickhouse/tables/{{shard}}/gdelt_mentions_local', '{{replica}}', enriched) "
             f"PARTITION BY substring(MentionTimeDate, 1, 6) "
             f"ORDER BY (GLOBALEVENTID, MentionIdentifier) "
             f"SETTINGS index_granularity = 8192"

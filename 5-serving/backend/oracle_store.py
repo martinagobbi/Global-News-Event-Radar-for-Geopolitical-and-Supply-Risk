@@ -7,16 +7,20 @@ The processing layer writes to Oracle; the serving layer only reads.
 Connection is configured via environment variables:
     ORACLE_HOST      — e.g. "oracle-db"
     ORACLE_PORT      — default 1521
-    ORACLE_SERVICE   — Oracle service name, e.g. "GDELT"
+    ORACLE_SERVICE   — Oracle service (PDB) name, e.g. "FREEPDB1"
     ORACLE_USER      — DB user
     ORACLE_PASSWORD  — DB password
     ORACLE_TIMEOUT   — query timeout in seconds (default 10)
     ORACLE_RETRIES   — number of retry attempts on transient errors (default 3)
 
-Oracle schema (written by processing, read here):
+Oracle schema (created by oracle-init/01_schema.sql, written by processing, read
+here). doc_id = SHA-256(document_identifier), a fixed 32-byte key: the URL itself
+is too long to index as a primary key (ORA-01450). The URL is still carried as
+ordinary data, and the user_articles -> articles join runs on doc_id:
 -------------------------------------------------------
 TABLE articles (
-    document_identifier  VARCHAR2(2000) PRIMARY KEY,
+    doc_id               RAW(32) PRIMARY KEY,
+    document_identifier  VARCHAR2(2000),
     mention_identifier   VARCHAR2(2000),
     global_event_id      VARCHAR2(50),
     in_raw_text          NUMBER(1),
@@ -36,8 +40,8 @@ TABLE articles (
 
 TABLE user_articles (
     user_id              VARCHAR2(200),
-    document_identifier  VARCHAR2(2000),
-    PRIMARY KEY (user_id, document_identifier)
+    doc_id               RAW(32),
+    PRIMARY KEY (user_id, doc_id)
 )
 
 TABLE pipeline_status (
@@ -60,7 +64,7 @@ logger = logging.getLogger(__name__)
 
 _HOST     = os.getenv("ORACLE_HOST", "localhost")
 _PORT     = int(os.getenv("ORACLE_PORT", "1521"))
-_SERVICE  = os.getenv("ORACLE_SERVICE", "GDELT")
+_SERVICE  = os.getenv("ORACLE_SERVICE", "FREEPDB1")
 _USER     = os.getenv("ORACLE_USER", "radar")
 _PASSWORD = os.getenv("ORACLE_PASSWORD", "radar")
 _TIMEOUT  = int(os.getenv("ORACLE_TIMEOUT", "10"))
@@ -208,7 +212,7 @@ _EVENTS_SQL = """
         a.event_date,
         a.age_days
     FROM user_articles ua
-    JOIN articles a ON ua.document_identifier = a.document_identifier
+    JOIN articles a ON ua.doc_id = a.doc_id
     WHERE ua.user_id = :user_id
       AND a.age_days <= :max_age_days
     ORDER BY a.global_event_id, a.confidence DESC, ABS(a.mention_doc_tone) ASC
@@ -233,7 +237,7 @@ _SINGLE_EVENT_SQL = """
         a.event_date,
         a.age_days
     FROM user_articles ua
-    JOIN articles a ON ua.document_identifier = a.document_identifier
+    JOIN articles a ON ua.doc_id = a.doc_id
     WHERE ua.user_id = :user_id
       AND a.global_event_id = :global_event_id
 """

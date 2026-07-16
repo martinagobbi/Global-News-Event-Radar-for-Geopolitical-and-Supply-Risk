@@ -35,20 +35,39 @@ MONGO_URI = os.getenv(
 MONGO_DB = os.getenv("MONGO_DB", "radar")
 MONGO_COLLECTION = os.getenv("MONGO_COLLECTION", "users")
 MONGO_USER_KEY = os.getenv("MONGO_USER_KEY", "_id")
+REFERENCE_COLLECTION = os.getenv("MONGO_REFERENCE_COLLECTION", "reference")
 MONGO_TIMEOUT_MS = int(os.getenv("MONGO_TIMEOUT_MS", "5000"))
 
 _client = None
 
 
-def _get_collection():
-    """Return the user-profiles collection, connecting lazily on first use."""
+def _get_db():
+    """Return the radar database handle, connecting lazily on first use."""
     global _client
     if _client is None:
         from pymongo import MongoClient  # lazy import
         _client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=MONGO_TIMEOUT_MS)
         logger.info("Mongo client created for %s (db=%s, coll=%s)",
                     MONGO_URI, MONGO_DB, MONGO_COLLECTION)
-    return _client[MONGO_DB][MONGO_COLLECTION]
+    return _client[MONGO_DB]
+
+
+def _get_collection():
+    """Return the user-profiles collection."""
+    return _get_db()[MONGO_COLLECTION]
+
+
+def seed_territories(payload: dict) -> None:
+    """
+    Publish the territory table to Mongo so the (stateless, possibly multi-host)
+    serving backend can read it without sharing the processing layer's volume.
+    Stored as a single document `_id == "territories"` in the reference collection.
+    """
+    _get_db()[REFERENCE_COLLECTION].replace_one(
+        {"_id": "territories"},
+        {**payload, "_id": "territories"},
+        upsert=True,
+    )
 
 
 def get_user_profile(user_id: str) -> dict | None:

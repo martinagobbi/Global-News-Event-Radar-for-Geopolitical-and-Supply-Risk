@@ -150,6 +150,21 @@ def get_all_profiles() -> list[dict]:
         return []
 
 
+# ── Reference data (territory picker options) ───────────────────────────────
+
+def get_territories() -> list[str]:
+    """
+    Territory picker options, published to Mongo by the processing layer. Returns
+    [] on any error so the frontend shows an empty picker rather than crashing.
+    """
+    try:
+        doc = _with_retry(lambda: _db()["reference"].find_one({"_id": "territories"}))
+        return list(doc.get("options", [])) if doc else []
+    except Exception as e:
+        logger.error("get_territories failed: %s", e)
+        return []
+
+
 # ── Tags ───────────────────────────────────────────────────────────────────
 
 def get_tags(user_id: str) -> dict[str, str]:
