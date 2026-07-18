@@ -43,3 +43,8 @@ def get_events_summary(user_id: str) -> list[dict]:
 def get_gold_layer_status(user_id: str) -> str:
     status = get_system_status()
     return status.get("status", "unknown")
+
+
+def get_events_version(user_id: str) -> str | None:
+    """Cheap fingerprint of the user's gold set (None if Oracle is unreachable)."""
+    return get_json(f"/users/{user_id}/events-version").get("version")

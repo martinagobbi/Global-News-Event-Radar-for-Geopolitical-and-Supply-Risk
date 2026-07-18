@@ -18,6 +18,7 @@ from mongo_store import (
 from oracle_store import (
     get_event_articles,
     get_events_for_user,
+    get_events_version,
     get_pipeline_status,
 )
 
@@ -122,6 +123,13 @@ def territories() -> dict:
     # Territory picker options for the frontend onboarding/dashboard, read from
     # Mongo (published there by the processing layer's startup seed).
     return {"territories": get_territories()}
+
+
+@app.get("/users/{user_id}/events-version")
+def events_version(user_id: str) -> dict:
+    # Cheap fingerprint of the user's gold set; the dashboard polls it to show a
+    # "your articles changed — refresh" nudge without re-fetching all events.
+    return {"version": get_events_version(user_id)}
 
 
 # ── Tags (MongoDB) ─────────────────────────────────────────────────────────

@@ -3,6 +3,7 @@ import streamlit as st
 from configuration.countries import get_territory_options
 # from configuration.sectors import RISK_CATEGORY_OPTIONS  # replaced by the keyword form
 from components.keyword_form import render_keyword_questions
+from data.api_client import BackendUnavailable
 from data.user_store import get_current_user, get_user_profile, is_first_login, save_user_profile
 
 
@@ -11,7 +12,15 @@ st.caption("Configure your supply chain monitoring perimeter.")
 
 user_id = get_current_user()
 
-if not is_first_login(user_id):
+try:
+    already_registered = not is_first_login(user_id)
+    profile = get_user_profile(user_id)
+    territory_options = get_territory_options()
+except BackendUnavailable:
+    st.error("🔴 The backend is unreachable. Please try again shortly.")
+    st.stop()
+
+if already_registered:
     st.info("This user is already registered. You can update the monitoring perimeter below.")
 
 st.write(
@@ -24,9 +33,6 @@ st.write(
     "supply chain. "
     "As well as other territories, there exists one entry per country."
 )
-
-profile = get_user_profile(user_id)
-territory_options = get_territory_options()
 
 display_name = st.text_input("Display name", value=profile.get("display_name", ""))
 # The list includes sovereign countries AND autonomous territories. Stored under
@@ -50,14 +56,21 @@ older_news_days = st.slider(
 )
 
 if st.button("Save profile", type="primary"):
-    save_user_profile({
-        "user_id":         user_id,
-        "display_name":    display_name,
-        "territories":     monitored_territories,
-        "keywords":        keywords,
-        "briefing_days":   briefing_days,
-        "older_news_days": older_news_days,
-        "status":          "registered",
-    })
+    try:
+        save_user_profile({
+            "user_id":         user_id,
+            "display_name":    display_name,
+            "territories":     monitored_territories,
+            "keywords":        keywords,
+            "briefing_days":   briefing_days,
+            "older_news_days": older_news_days,
+            "status":          "registered",
+        })
+    except BackendUnavailable:
+        st.error(
+            "🔴 Couldn't save — the profile database is temporarily unavailable. "
+            "Your account was not created. Please try again shortly."
+        )
+        st.stop()
     st.success("Profile saved.")
     st.page_link("pages/dashboard.py", label="Open dashboard", icon="📊")

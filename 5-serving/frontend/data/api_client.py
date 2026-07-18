@@ -9,12 +9,18 @@ import requests
 BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000").rstrip("/")
 
 
+class BackendUnavailable(Exception):
+    """Raised when the serving backend can't be reached or returns an error —
+    so pages can show a banner instead of a raw Streamlit traceback."""
+
+
 def _request(method: str, path: str, **kwargs: Any) -> Any:
-    response = requests.request(method, f"{BACKEND_URL}{path}", timeout=20, **kwargs)
-    response.raise_for_status()
-    if not response.content:
-        return None
-    return response.json()
+    try:
+        response = requests.request(method, f"{BACKEND_URL}{path}", timeout=20, **kwargs)
+        response.raise_for_status()
+        return response.json() if response.content else None
+    except requests.RequestException as e:
+        raise BackendUnavailable(str(e)) from e
 
 
 def get_json(path: str) -> Any:

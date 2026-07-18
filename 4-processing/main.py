@@ -31,6 +31,8 @@ Environment
 import json
 import logging
 import os
+import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -66,17 +68,25 @@ app = FastAPI(title="Supply Risk — Processing Layer")
 @app.on_event("startup")
 def _seed_reference_data() -> None:
     """Publish the territory table to Mongo so the serving backend can serve it to
-    the (remote) frontend without mounting the processing layer's volume."""
-    try:
-        mongo_reader.seed_territories({
-            "options": countries.COUNTRY_OPTIONS,
-            "codes": countries.COUNTRY_CODES,
-            "count": len(countries.COUNTRY_OPTIONS),
-        })
-        logger.info("Seeded %d territories into Mongo (reference)",
-                    len(countries.COUNTRY_OPTIONS))
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Could not seed territories into Mongo: %s", exc)
+    the (remote) frontend. Runs in a background thread that RETRIES until Mongo is
+    ready: the replica set can take a while to elect a primary after startup, so a
+    single attempt would often lose the race and leave the onboarding picker empty.
+    """
+    def _loop() -> None:
+        while True:
+            try:
+                mongo_reader.seed_territories({
+                    "options": countries.COUNTRY_OPTIONS,
+                    "codes": countries.COUNTRY_CODES,
+                    "count": len(countries.COUNTRY_OPTIONS),
+                })
+                logger.info("Seeded %d territories into Mongo (reference)",
+                            len(countries.COUNTRY_OPTIONS))
+                return  # success → stop retrying
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("territory seed failed, retrying in 5s: %s", exc)
+                time.sleep(5)
+    threading.Thread(target=_loop, name="seed-territories", daemon=True).start()
 
 
 def _ch() -> ClickHouseWriter:

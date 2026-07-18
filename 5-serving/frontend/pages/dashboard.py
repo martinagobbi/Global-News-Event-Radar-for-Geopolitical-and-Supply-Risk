@@ -6,10 +6,12 @@ from components.briefing import render_briefing
 from components.heatmap import render_heatmap
 from components.keyword_form import render_keyword_questions
 from configuration.countries import get_territory_options
+from data.api_client import BackendUnavailable
 from data.gold_layer import (
     get_archived_events,
     get_events,
     get_events_summary,
+    get_events_version,
     get_gold_layer_status,
     get_system_status,
 )
@@ -24,16 +26,22 @@ st.title("Dashboard")
 
 user_id = get_current_user()
 
-if is_first_login(user_id):
-    st.warning("First-time access detected. Complete the initial setup before opening the dashboard.")
-    st.page_link("pages/onboarding.py", label="Open setup", icon="🧭")
+try:
+    if is_first_login(user_id):
+        st.warning("First-time access detected. Complete the initial setup before opening the dashboard.")
+        st.page_link("pages/onboarding.py", label="Open setup", icon="🧭")
+        st.stop()
+
+    profile = get_user_profile(user_id)
+    territory_options = get_territory_options()
+
+    # ── Pipeline / store status (always re-fetched, cheap) ─────────────────────
+    system_status = get_system_status()
+    live_gold_version = get_events_version(user_id)
+except BackendUnavailable:
+    st.error("🔴 The backend is unreachable. Please try again shortly.")
     st.stop()
 
-profile = get_user_profile(user_id)
-territory_options = get_territory_options()
-
-# ── Pipeline / store status (always re-fetched, cheap) ─────────────────────
-system_status = get_system_status()
 status_code = system_status.get("code")
 
 if status_code == "503-ORACLE":
@@ -60,6 +68,19 @@ elif system_status.get("status") == "ERROR":
     st.error(
         "Due to technical difficulties, this dashboard has not been updated since "
         f"{last_update}."
+    )
+
+# ── "Your articles changed" nudge (green = good news) ──────────────────────
+# live_gold_version is polled cheaply every rerun; st.session_state.gold_version
+# is the version the currently-shown events were rendered against (set in the
+# data-fetch block below). If they differ, new gold has arrived for this user.
+if (
+    live_gold_version is not None
+    and st.session_state.get("gold_version") not in (None, live_gold_version)
+):
+    st.success(
+        "The set of articles that might interest you has been updated! "
+        "Please refresh the page."
     )
 
 # ── Header ─────────────────────────────────────────────────────────────────
@@ -125,6 +146,7 @@ if should_refresh:
     st.session_state.cached_older_events = get_events(user_id, max_age_days=profile.get("older_news_days", 90), exclude_archived=True) if show_older else []
     st.session_state.cached_summary      = get_events_summary(user_id)
     st.session_state.last_data_fetch     = now
+    st.session_state.gold_version        = live_gold_version   # events now match this version
     if manual_refresh:
         st.success("Data refreshed.")
 

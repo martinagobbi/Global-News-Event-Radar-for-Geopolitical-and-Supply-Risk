@@ -1,0 +1,139 @@
+# ═════════════════════════════════════════════════════════════════════════════
+# DOCKER SWARM stack for the PIPELINE tier (auto-restart / auto-reschedule on
+# node failure). This REPLACES hand-rolled failover (the Redis idea) with Swarm's
+# built-in orchestration.
+#
+# ── Prerequisites (Swarm differs from plain compose) ─────────────────────────
+#   1. Swarm needs PRE-BUILT, PUSHED images — it can't `build:`. On a build host:
+#        docker build -t <registry>/radar-ingestion:latest ./1-ingestion   (etc.)
+#        docker push  <registry>/radar-ingestion:latest
+#      Replace <registry> below with your registry (Docker Hub user, a private
+#      registry, or a local registry:2). The four layer images + the backend.
+#   2. Form the cluster (once):
+#        docker swarm init --advertise-addr <manager-ip>          # on the manager
+#        docker swarm join --token <...> <manager-ip>:2377        # on each worker
+#   3. Label the node(s) allowed to run the file-based pipeline (layers 1-4 share
+#      a LOCAL volume, so they must be CO-LOCATED on one node):
+#        docker node update --label-add role=pipeline <node-name>
+#      Label exactly ONE node to keep 1-4 together. Label a second node too if you
+#      want Swarm to be ABLE to move the whole unit there on failure.
+#   4. The STORES stay OUT of Swarm — run docker-compose.stores.yml on their own
+#      machine(s). Set the store addresses via the environment (MONGO_URI, etc.).
+#
+# ── Deploy ───────────────────────────────────────────────────────────────────
+#      docker stack deploy -c docker-stack.pipeline.yml radar
+#      docker stack services radar          # watch replicas
+#      docker service logs radar_processing -f
+#
+# ── What failover looks like ─────────────────────────────────────────────────
+# Each service is replicas:1 with restart_policy:any. If its task (or the whole
+# node) dies, Swarm re-creates it on a node matching the placement constraint —
+# with a FRESH local `shared_data`, so ingestion re-polls the latest GDELT slice
+# and reconnects to the same (external) stores. Nothing is re-created downstream;
+# the stores are untouched. The backend is stateless -> replicas:3 across nodes.
+#
+# CAVEAT: layers 1-4 must land on the SAME node (shared local volume). Swarm does
+# not guarantee that just from a shared label if several nodes carry it — for a
+# hard guarantee, keep the `role=pipeline` label on ONE node at a time (moving it
+# on failure), or replace the local volume with a network volume (NFS) so 1-4 can
+# be scheduled independently. This stack takes the "one labelled node" approach.
+# ═════════════════════════════════════════════════════════════════════════════
+version: "3.8"
+
+x-store-env: &store-env
+  MONGO_URI: ${MONGO_URI:-mongodb://mongo1:27017,mongo2:27017,mongo3:27017/?replicaSet=rs0}
+  MONGO_DB: ${MONGO_DB:-radar}
+  CLICKHOUSE_HOST: ${CLICKHOUSE_HOST:-clickhouse-s1r1}
+  CLICKHOUSE_PORT: ${CLICKHOUSE_PORT:-9000}
+  ORACLE_HOST: ${ORACLE_HOST:-pipeline_oracle}
+  ORACLE_PORT: ${ORACLE_PORT:-1521}
+  ORACLE_SERVICE: ${ORACLE_SERVICE:-FREEPDB1}
+  ORACLE_USER: ${ORACLE_USER:-radar}
+  ORACLE_PASSWORD: ${ORACLE_PASSWORD:-radar}
+
+services:
+
+  ingestion:
+    image: ${REGISTRY:-localhost:5000}/radar-ingestion:latest
+    volumes:
+      - shared_data:/data
+    networks: [pipeline_net]
+    deploy:
+      replicas: 1
+      placement:
+        constraints: ["node.labels.role == pipeline"]
+      restart_policy:
+        condition: any
+        delay: 5s
+
+  parsing:
+    image: ${REGISTRY:-localhost:5000}/radar-parsing:latest
+    volumes:
+      - shared_data:/data
+    networks: [pipeline_net]
+    deploy:
+      replicas: 1
+      placement:
+        constraints: ["node.labels.role == pipeline"]
+      restart_policy: { condition: any, delay: 5s }
+
+  validation:
+    image: ${REGISTRY:-localhost:5000}/radar-validation:latest
+    environment:
+      <<: *store-env
+      CLICKHOUSE_CLUSTER: gnews_cluster
+      CLICKHOUSE_OP_TIMEOUT: "120"
+      LATEST_FILES_DIR: /data/latest_files
+      STATUS_DIR: /data/status
+      MENTION_ENRICH_WORKERS: "8"
+      MENTION_ENRICH_NLP: "1"
+      ENRICH_TIMEOUT_SECONDS: "600"
+    volumes:
+      - shared_data:/data
+    networks: [pipeline_net]
+    deploy:
+      replicas: 1
+      placement:
+        constraints: ["node.labels.role == pipeline"]
+      restart_policy: { condition: any, delay: 5s }
+
+  processing:
+    image: ${REGISTRY:-localhost:5000}/radar-processing:latest
+    environment:
+      <<: *store-env
+      STATUS_DIR: /data/status
+      MONGO_COLLECTION: ${MONGO_COLLECTION:-users}
+    volumes:
+      - shared_data:/data
+    networks: [pipeline_net]
+    deploy:
+      replicas: 1
+      placement:
+        constraints: ["node.labels.role == pipeline"]
+      restart_policy: { condition: any, delay: 5s }
+
+  # Stateless -> run several, spread across the swarm, behind Swarm's routing mesh
+  # (any node's :8000 reaches a healthy replica).
+  backend:
+    image: ${REGISTRY:-localhost:5000}/radar-backend:latest
+    environment:
+      <<: *store-env
+      USE_MOCK: "false"
+      MONGO_TIMEOUT: "5"
+      ORACLE_TIMEOUT: "10"
+      ORACLE_RETRIES: "3"
+    ports:
+      - "8000:8000"
+    networks: [pipeline_net]
+    deploy:
+      replicas: 3
+      restart_policy: { condition: any, delay: 5s }
+
+volumes:
+  # Local per-node scratch — a rescheduled task gets a fresh, empty one (fine:
+  # the in-flight slice is disposable and re-pollable).
+  shared_data:
+
+networks:
+  pipeline_net:
+    driver: overlay

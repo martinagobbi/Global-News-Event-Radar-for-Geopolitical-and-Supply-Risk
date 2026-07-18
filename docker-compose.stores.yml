@@ -59,6 +59,11 @@ services:
       - ./clickhouse/macros-s1r1.xml:/etc/clickhouse-server/config.d/macros.xml:ro
       - ./clickhouse/users.xml:/etc/clickhouse-server/users.d/zz-network-access.xml:ro
       - ch_s1r1_data:/var/lib/clickhouse
+    # Published so a pipeline on ANOTHER machine can reach the cluster via this
+    # entry node (set CLICKHOUSE_HOST=<this-host> on the pipeline). Same-host use
+    # ignores it and resolves `clickhouse-s1r1` over the Docker network instead.
+    ports:
+      - "${CLICKHOUSE_PUBLISH:-9000}:9000"
     networks: [pipeline_network]
 
   clickhouse-s1r2:
@@ -132,6 +137,9 @@ services:
     networks: [pipeline_network]
 
   # ── MongoDB: 3-node replica set (user profiles + territory reference) ──────
+  # Each node publishes a DISTINCT host port so a pipeline on another machine can
+  # reach all three (a replica set client must reach every member). Same-host use
+  # ignores these and resolves mongo1/2/3 over the Docker network.
   mongo1:
     image: mongo:7
     container_name: pipeline_mongo1
@@ -139,6 +147,8 @@ services:
     command: ["--replSet", "rs0", "--bind_ip_all"]
     volumes:
       - mongo1_data:/data/db
+    ports:
+      - "${MONGO1_PUBLISH:-27017}:27017"
     networks: [pipeline_network]
 
   mongo2:
@@ -148,6 +158,8 @@ services:
     command: ["--replSet", "rs0", "--bind_ip_all"]
     volumes:
       - mongo2_data:/data/db
+    ports:
+      - "${MONGO2_PUBLISH:-27018}:27017"
     networks: [pipeline_network]
 
   mongo3:
@@ -157,17 +169,32 @@ services:
     command: ["--replSet", "rs0", "--bind_ip_all"]
     volumes:
       - mongo3_data:/data/db
+    ports:
+      - "${MONGO3_PUBLISH:-27019}:27017"
     networks: [pipeline_network]
 
   # One-shot, idempotent replica-set initiation. rs.status() succeeds once the
-  # set exists, so re-running this compose file is a no-op — a replacement
-  # pipeline machine never re-initiates or re-creates Mongo.
+  # set exists, so re-running this compose file is a no-op.
+  #
+  # MONGO_MEMBER_0/1/2 are the addresses the replica set ADVERTISES to clients —
+  # they must be reachable from wherever the pipeline runs. Defaults are the
+  # Docker service names (same-host). For a SEPARATE stores host, set them in a
+  # `.env` to that host's real address + the published ports above, e.g.
+  #   MONGO_MEMBER_0=10.0.0.5:27017
+  #   MONGO_MEMBER_1=10.0.0.5:27018
+  #   MONGO_MEMBER_2=10.0.0.5:27019
+  # The init container still CONNECTS internally over the Docker network
+  # (mongo1:27017); only the advertised member addresses change.
   mongo-init:
     image: mongo:7
     container_name: pipeline_mongo_init
     depends_on: [mongo1, mongo2, mongo3]
     restart: "no"
     networks: [pipeline_network]
+    environment:
+      MONGO_MEMBER_0: ${MONGO_MEMBER_0:-mongo1:27017}
+      MONGO_MEMBER_1: ${MONGO_MEMBER_1:-mongo2:27017}
+      MONGO_MEMBER_2: ${MONGO_MEMBER_2:-mongo3:27017}
     entrypoint:
       - bash
       - -c
@@ -175,18 +202,15 @@ services:
         until mongosh --host mongo1:27017 --quiet --eval 'db.runCommand({ping:1})' >/dev/null 2>&1; do
           echo "waiting for mongo1..."; sleep 2;
         done
-        mongosh --host mongo1:27017 --quiet --eval '
+        MEMBERS="[{_id:0,host:'$$MONGO_MEMBER_0'},{_id:1,host:'$$MONGO_MEMBER_1'},{_id:2,host:'$$MONGO_MEMBER_2'}]"
+        mongosh --host mongo1:27017 --quiet --eval "
           try {
             rs.status();
-            print("replica set already initiated - nothing to do");
+            print('replica set already initiated - nothing to do');
           } catch (e) {
-            print("initiating replica set rs0...");
-            rs.initiate({_id: "rs0", members: [
-              {_id: 0, host: "mongo1:27017"},
-              {_id: 1, host: "mongo2:27017"},
-              {_id: 2, host: "mongo3:27017"}
-            ]});
-          }'
+            print('initiating replica set rs0 with members $$MEMBERS');
+            rs.initiate({_id: 'rs0', members: $$MEMBERS});
+          }"
 
   # ── Oracle: the gold sink the serving backend reads ───────────────────────
   # gvenzl/oracle-free ships a CDB (FREE) with one PDB, FREEPDB1 — that PDB name

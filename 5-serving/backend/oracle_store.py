@@ -291,6 +291,28 @@ def get_event_articles(user_id: str, global_event_id: str) -> dict:
     return _build_event_card(global_event_id, rows)
 
 
+def get_events_version(user_id: str) -> str | None:
+    """
+    An order-independent fingerprint of a user's gold set: it changes if and only
+    if the set of doc_ids in user_articles for this user changes. COUNT + SUM of a
+    per-row hash, index-backed on user_id, so it's cheap to poll. Returns None on
+    Oracle error — the dashboard treats None as "unknown" and skips the compare.
+    """
+    sql = ("SELECT COUNT(*), NVL(SUM(ORA_HASH(doc_id)), 0) "
+           "FROM user_articles WHERE user_id = :user_id")
+    try:
+        def _run():
+            with _connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(sql, user_id=user_id)
+                    return cur.fetchone()
+        row = _with_retry(_run)
+        return f"{row[0]}:{row[1]}" if row else "0:0"
+    except Exception as e:
+        logger.error("get_events_version failed for %s: %s", user_id, e)
+        return None
+
+
 def get_pipeline_status() -> dict:
     """
     Read the pipeline status from Oracle.
