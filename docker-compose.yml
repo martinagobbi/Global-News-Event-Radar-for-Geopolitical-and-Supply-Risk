@@ -145,5 +145,8 @@ volumes:
 networks:
   # Created and owned by docker-compose.stores.yml — bring the stores up first.
   pipeline_network:
-    external: true   # <--- COMMENT THIS OUT IF THE STORES AND THE PIPELINE ARE ON THE SAME MACHINE
+    external: true   # <--- KEEP THIS when stores + pipeline are on the SAME machine:
+                     #      the stores compose CREATES pipeline_network, and we join it.
+                     #      COMMENT IT OUT only when the pipeline runs on its OWN machine
+                     #      (no stores there to create it, so it makes its own network).
     name: pipeline_network
