@@ -38,6 +38,12 @@ logger = logging.getLogger("validation.storage")
 # away. Total cycle time ~ enrichment budget (ENRICH_TIMEOUT_SECONDS) + these ops.
 _OP_TIMEOUT = int(os.getenv("CLICKHOUSE_OP_TIMEOUT", "120"))
 
+# Insert quorum: an append is confirmed only once it has reached this many
+# replicas of the target shard (the cluster has 3 per shard). Requires at least
+# this many replicas up; set CLICKHOUSE_INSERT_QUORUM=1 for a single-replica dev
+# setup, or 0 to disable.
+_INSERT_QUORUM = int(os.getenv("CLICKHOUSE_INSERT_QUORUM", "2"))
+
 # ── Column + skip-index bodies (shared by the LOCAL tables) ───────────────────
 # Sorting key is set per-table in the ENGINE clause below, not here.
 _EVENTS_BODY = """(
@@ -180,7 +186,8 @@ class Storage:
                 # max_execution_time: server-side cap on every query (lookup,
                 # appends, OPTIMIZE) so a validation cycle stays bounded.
                 settings={"use_numpy": False, "insert_distributed_sync": 1,
-                          "max_execution_time": _OP_TIMEOUT},
+                          "max_execution_time": _OP_TIMEOUT,
+                          "insert_quorum": _INSERT_QUORUM},
             )
             logger.info("ClickHouse connected: %s:%d/%s (cluster=%s)",
                         self.host, self.port, self.database, self.cluster)

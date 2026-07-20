@@ -182,6 +182,10 @@ def list_events(
 def get_event(user_id: str, global_event_id: str) -> dict:
     event = get_event_articles(user_id, global_event_id)
     if not event:
+        # An empty result can mean "no such event" OR "Oracle unreachable". Only
+        # call it 404 when Oracle is actually up; otherwise surface 503.
+        if get_pipeline_status().get("code") == "503-ORACLE":
+            raise HTTPException(status_code=503, detail="Database temporarily unavailable. Please try again shortly.")
         raise HTTPException(status_code=404, detail="Event not found for this user.")
     tags = get_tags(user_id)
     event["user_tag"] = tags.get(str(global_event_id))

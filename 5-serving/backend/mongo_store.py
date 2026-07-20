@@ -25,6 +25,7 @@ def _db():
         _client = MongoClient(
             _MONGO_URI,
             serverSelectionTimeoutMS=_SERVER_SELECTION_TIMEOUT * 1000,
+            w="majority",   # confirm writes on a majority of replica-set members
             # If using a replica set, PyMongo handles primary failover automatically.
             # The connection string should list all nodes:
             #   mongodb://mongo1:27017,mongo2:27017,mongo3:27017/?replicaSet=rs0
@@ -135,8 +136,12 @@ def get_profile(user_id: str) -> dict:
         doc.pop("_id", None)
         return doc
     except Exception as e:
+        # Do NOT fall back to an empty default on error: that made a Mongo blip
+        # look identical to a brand-new user, so a later Save could overwrite a
+        # real profile with blanks. Raise instead -> the endpoint returns 503 and
+        # the frontend shows a banner rather than a saveable empty form.
         logger.error("get_profile failed for %s: %s", user_id, e)
-        return _default
+        raise
 
 
 def save_profile(user_id: str, profile: dict) -> dict:
@@ -146,13 +151,15 @@ def save_profile(user_id: str, profile: dict) -> dict:
     their preferences were not saved).
     """
     payload = {**profile, "user_id": user_id, "status": "registered"}
-    _with_retry(
+    result = _with_retry(
         lambda: _users().replace_one(
             {"_id": user_id},
             {**payload, "_id": user_id},
             upsert=True,
         )
     )
+    if not result.acknowledged:
+        raise RuntimeError("MongoDB did not acknowledge the profile write")
     return payload
 
 

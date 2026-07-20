@@ -46,7 +46,7 @@ def _get_db():
     global _client
     if _client is None:
         from pymongo import MongoClient  # lazy import
-        _client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=MONGO_TIMEOUT_MS)
+        _client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=MONGO_TIMEOUT_MS, w="majority")
         logger.info("Mongo client created for %s (db=%s, coll=%s)",
                     MONGO_URI, MONGO_DB, MONGO_COLLECTION)
     return _client[MONGO_DB]

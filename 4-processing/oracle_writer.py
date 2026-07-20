@@ -99,9 +99,12 @@ def write_articles(rows: list[dict]) -> int:
             event_date=oracledb.DB_TYPE_DATE,
         )
         cur.executemany(_MERGE_ARTICLES, rows)
+        affected = cur.rowcount
         conn.commit()
-    logger.info("Upserted %d rows into Oracle articles", len(rows))
-    return len(rows)
+    if affected != len(rows):
+        logger.warning("Oracle articles: sent %d rows but %d were affected", len(rows), affected)
+    logger.info("Upserted %d rows into Oracle articles (%d affected)", len(rows), affected)
+    return affected
 
 
 def write_user_articles(user_id: str, document_identifiers: list[str]) -> int:
@@ -113,15 +116,20 @@ def write_user_articles(user_id: str, document_identifiers: list[str]) -> int:
     with _connect() as conn:
         cur = conn.cursor()
         cur.execute("DELETE FROM user_articles WHERE user_id = :u", u=user_id)
+        inserted = 0
         if document_identifiers:
             cur.setinputsizes(d=oracledb.DB_TYPE_RAW)
             cur.executemany(
                 "INSERT INTO user_articles (user_id, doc_id) VALUES (:u, :d)",
                 [{"u": user_id, "d": _doc_id(d)} for d in document_identifiers],
             )
+            inserted = cur.rowcount
         conn.commit()
-    logger.info("Wrote %d user_articles for user %s", len(document_identifiers), user_id)
-    return len(document_identifiers)
+    if inserted != len(document_identifiers):
+        logger.warning("user_articles for %s: sent %d but %d were inserted",
+                       user_id, len(document_identifiers), inserted)
+    logger.info("Wrote %d user_articles for user %s", inserted, user_id)
+    return inserted
 
 
 def write_pipeline_status(status: str, ts: datetime | None = None) -> None:
