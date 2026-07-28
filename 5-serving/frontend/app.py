@@ -8,6 +8,7 @@ ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
+from components.branding import use_neutral_spinner
 from data.user_store import get_current_user, is_first_login
 
 
@@ -17,6 +18,8 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+use_neutral_spinner()
 
 
 def bootstrap() -> None:

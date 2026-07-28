@@ -208,7 +208,7 @@ services:
             rs.status();
             print('replica set already initiated - nothing to do');
           } catch (e) {
-            print('initiating replica set rs0 with members $$MEMBERS');
+            print('initiating replica set rs0...');
             rs.initiate({_id: 'rs0', members: $$MEMBERS});
           }"
 

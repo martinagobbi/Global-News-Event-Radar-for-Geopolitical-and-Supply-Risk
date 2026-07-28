@@ -2,11 +2,13 @@ import streamlit as st
 
 from configuration.countries import get_territory_options
 # from configuration.sectors import RISK_CATEGORY_OPTIONS  # replaced by the keyword form
+from components.branding import use_neutral_spinner
 from components.keyword_form import render_keyword_questions
 from data.api_client import BackendUnavailable
 from data.user_store import get_current_user, get_user_profile, is_first_login, save_user_profile
 
 
+use_neutral_spinner()
 st.title("User setup")
 st.caption("Configure your supply chain monitoring perimeter.")
 

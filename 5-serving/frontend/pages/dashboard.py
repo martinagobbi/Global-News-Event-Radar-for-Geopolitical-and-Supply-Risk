@@ -2,6 +2,7 @@ import time
 
 import streamlit as st
 
+from components.branding import use_neutral_spinner
 from components.briefing import render_briefing
 from components.heatmap import render_heatmap
 from components.keyword_form import render_keyword_questions
@@ -22,6 +23,7 @@ STATUS_POLL_SECONDS  = 30
 DATA_REFRESH_SECONDS = 900   # 15 minutes — aligned with ingestion cadence
 
 
+use_neutral_spinner()
 st.title("Dashboard")
 
 user_id = get_current_user()

@@ -1,0 +1,10 @@
+# Streamlit config for the radar frontend.
+[client]
+# "viewer" = end-user toolbar: keeps only the non-developer ⋮ options (Print,
+# Record a screencast, About) and REMOVES the Deploy button plus the developer
+# items (Rerun, Settings, Clear cache, developer options).
+#   auto      -> developer tools when running locally (the current default)
+#   developer -> always show developer tools
+#   viewer    -> non-developer options only  <-- what we want
+#   minimal   -> hide the toolbar entirely
+toolbarMode = "viewer"
