@@ -10,6 +10,7 @@ COPY . .
 # MODE=poller (default): avvia il loop di polling ogni 15 minuti
 # MODE=backfill: scarica lo storico degli ultimi N giorni (passa --days e --workers come CMD)
 ENV MODE=poller
+ENV PYTHONUNBUFFERED=1
 
 ENTRYPOINT ["sh", "-c", "\
   if [ \"$MODE\" = 'backfill' ]; then \

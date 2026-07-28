@@ -21,8 +21,8 @@ Uso:
 
 import argparse
 import logging
-import os
 import time
+import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -30,6 +30,7 @@ import requests
 from tqdm import tqdm
 
 from src.ingestion.gdelt_urls import generate_urls_last_n_days, count_urls
+from src.ingestion.paths import RAW_ZIP_DIR, RAW_CSV_DIR, ensure_ingestion_dirs
 
 
 # ---------------------------------------------------------------------------
@@ -46,7 +47,6 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Costanti
 # ---------------------------------------------------------------------------
-RAW_DATA_DIR = Path("data/raw")
 MAX_RETRIES = 3
 RETRY_DELAY_SEC = 5
 REQUEST_TIMEOUT_SEC = 60
@@ -58,6 +58,17 @@ DEFAULT_WORKERS = 4
 # ---------------------------------------------------------------------------
 # Download singolo file
 # ---------------------------------------------------------------------------
+def _extract_csv(zip_path: Path) -> Path:
+    with zipfile.ZipFile(zip_path, "r") as archive:
+        first_member = archive.namelist()[0]
+        csv_path = RAW_CSV_DIR / Path(first_member).name
+        if not csv_path.exists():
+            tmp_path = csv_path.with_name(f".{csv_path.name}.tmp")
+            tmp_path.write_bytes(archive.read(first_member))
+            tmp_path.rename(csv_path)
+        return csv_path
+
+
 def download_file(url: str, dest_path: Path, retries: int = MAX_RETRIES) -> bool:
     """
     Scarica un singolo file GDELT e lo salva su disco.
@@ -73,6 +84,7 @@ def download_file(url: str, dest_path: Path, retries: int = MAX_RETRIES) -> bool
     """
     # Salta se già scaricato (resume-friendly)
     if dest_path.exists():
+        _extract_csv(dest_path)
         return True
 
     dest_path.parent.mkdir(parents=True, exist_ok=True)
@@ -95,6 +107,7 @@ def download_file(url: str, dest_path: Path, retries: int = MAX_RETRIES) -> bool
                 for chunk in response.iter_content(chunk_size=8192):
                     f.write(chunk)
             tmp_path.rename(dest_path)
+            _extract_csv(dest_path)
 
             return True
 
@@ -127,7 +140,9 @@ def run_backfill(n_days: int = 30, workers: int = DEFAULT_WORKERS):
     total = count_urls(n_days, file_types=("events", "mentions"))
     log.info(f"Backfill avviato: ultimi {n_days} giorni")
     log.info(f"File stimati da scaricare: ~{total} ({workers} thread paralleli)")
-    log.info(f"Output directory: {RAW_DATA_DIR.resolve()}")
+    ensure_ingestion_dirs()
+    log.info(f"ZIP directory: {RAW_ZIP_DIR.resolve()}")
+    log.info(f"CSV hand-off directory: {RAW_CSV_DIR.resolve()}")
 
     # Genera tutti i task
     tasks = []
@@ -135,16 +150,13 @@ def run_backfill(n_days: int = 30, workers: int = DEFAULT_WORKERS):
         ts_str = item["timestamp"].strftime("%Y%m%d%H%M%S")
         file_type = item["file_type"]
 
-        # Determina la cartella di destinazione in base al tipo
-        subdir = "events" if file_type == "events" else "mentions"
         ext = "export.CSV.zip" if file_type == "events" else "mentions.CSV.zip"
-        dest = RAW_DATA_DIR / subdir / f"{ts_str}.{ext}"
+        dest = RAW_ZIP_DIR / f"{ts_str}.{ext}"
 
         tasks.append((item["url"], dest))
 
     # Scarica in parallelo con progress bar
     success_count = 0
-    skip_count = 0
     fail_count = 0
 
     with ThreadPoolExecutor(max_workers=workers) as executor:
@@ -181,7 +193,8 @@ def run_backfill(n_days: int = 30, workers: int = DEFAULT_WORKERS):
     log.info(f"Backfill completato.")
     log.info(f"  Successi:    {success_count}")
     log.info(f"  Falliti:     {fail_count} (principalmente 404 normali)")
-    log.info(f"  Directory:   {RAW_DATA_DIR.resolve()}")
+    log.info(f"  ZIP dir:     {RAW_ZIP_DIR.resolve()}")
+    log.info(f"  CSV dir:     {RAW_CSV_DIR.resolve()}")
     log.info("=" * 50)
 
 

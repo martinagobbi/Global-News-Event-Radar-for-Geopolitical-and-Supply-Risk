@@ -196,17 +196,28 @@ def get_event(user_id: str, global_event_id: str) -> dict:
 def events_summary(user_id: str) -> dict:
     events = get_events_for_user(user_id, max_age_days=90)
     tags = get_tags(user_id)
-    rows = [
-        {
-            "country":    e["country"],
-            "latitude":   e["latitude"],
-            "longitude":  e["longitude"],
-            "event_count": len(e.get("articles", [])),
-        }
-        for e in events
-        if tags.get(str(e["global_event_id"])) != "archive"
-    ]
-    return {"summary": rows}
+
+    # Aggrega per coordinata: somma event_count e filtra null
+    aggregated: dict[tuple, dict] = {}
+    for e in events:
+        if tags.get(str(e["global_event_id"])) == "archive":
+            continue
+        lat = e.get("latitude")
+        lon = e.get("longitude")
+        country = e.get("country")
+        if lat is None or lon is None or country is None:
+            continue   # salta righe con coordinate null
+        key = (country, round(lat, 4), round(lon, 4))
+        if key not in aggregated:
+            aggregated[key] = {
+                "country": country,
+                "latitude": lat,
+                "longitude": lon,
+                "event_count": 0,
+            }
+        aggregated[key]["event_count"] += len(e.get("articles", [])) or 1
+
+    return {"summary": list(aggregated.values())}
 
 
 @app.get("/users/{user_id}/archived-events")

@@ -34,6 +34,7 @@ Hand-off rules to layer 3 (validation):
 Environment variables
 ---------------------
     RAW_CSV_DIR              input dir   (default /data/raw/csv)
+    INGESTION_CSV_DIR        alias for RAW_CSV_DIR, used by layer 1
     LATEST_FILES_DIR         output dir  (default /data/latest_files)
     FILTER_EVENTS            keep only relevant events 1/0 (default 1)
     SCAN_INTERVAL_SECONDS    directory poll interval       (default 5)
@@ -57,7 +58,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("parsing")
  
-RAW_CSV_DIR      = Path(os.getenv("RAW_CSV_DIR",      "/data/raw/csv"))
+RAW_CSV_DIR      = Path(os.getenv("RAW_CSV_DIR", os.getenv("INGESTION_CSV_DIR", "/data/raw/csv")))
 LATEST_FILES_DIR = Path(os.getenv("LATEST_FILES_DIR", "/data/latest_files"))
 FILTER_EVENTS    = os.getenv("FILTER_EVENTS", "1") == "1"
 SCAN_INTERVAL    = int(os.getenv("SCAN_INTERVAL_SECONDS", "5"))

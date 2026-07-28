@@ -2,32 +2,21 @@ import argparse
 import json
 import time
 import zipfile
-from io import BytesIO
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict
 
 import pandas as pd
 import requests
 
-# Cambiato all'URL dei 15 minuti, specifico per lo streaming real-time
-LAST_15MIN_URL = "http://data.gdeltproject.org/gdeltv2/last15minutes.txt"
+from src.ingestion.paths import RAW_ZIP_DIR, RAW_CSV_DIR, STATE_FILE, ensure_ingestion_dirs
+
+# GDELT v2 publishes the latest 15-minute file list here.
+LAST_15MIN_URL = "http://data.gdeltproject.org/gdeltv2/lastupdate.txt"
 
 POLL_INTERVAL_SECONDS = 15 * 60
 
-BASE_DIR = Path(__file__).resolve().parent.parent.parent
-# In Docker, /data è il volume condiviso (shared_data). In locale, si usa data/ relativo alla root.
-DATA_DIR = Path("/data") if Path("/data").exists() else BASE_DIR / "data"
-RAW_ZIP_DIR = DATA_DIR / "raw" / "zip"
-RAW_CSV_DIR = DATA_DIR / "raw" / "csv"
-# Lo stato vive sul volume condiviso (/data) così sopravvive ai riavvii e a un
-# eventuale failover su un'altra macchina (se /data è su storage condiviso/in rete).
-STATE_DIR = DATA_DIR / "state"
-STATE_FILE = STATE_DIR / "last_seen.json"
-
 def ensure_directories() -> None:
-    RAW_ZIP_DIR.mkdir(parents=True, exist_ok=True)
-    RAW_CSV_DIR.mkdir(parents=True, exist_ok=True)
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    ensure_ingestion_dirs()
 
 def load_state() -> dict:
     if not STATE_FILE.exists():
