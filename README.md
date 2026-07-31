@@ -35,7 +35,10 @@ The system is split into three independently-deployable tiers, each with its own
 **Operator** — bring the stores up once, then the pipeline:
 
 ``` bash
+git clone https://github.com/martinagobbi/Global-News-Event-Radar-for-Geopolitical-and-Supply-Risk
+cd Global-News-Event-Radar-for-Geopolitical-and-Supply-Risk
 docker compose -f docker-compose.stores.yml up -d   # once; long-lived
+./download-backfill.sh                              # Load 30-day backfill so the dashboard has data immediately (optional)
 docker compose up -d                                # layers 1–4 + backend
 ```
 
@@ -65,7 +68,10 @@ The frontend (port **8501**) talks to the operator's backend over HTTP; it ships
 To try everything on a single machine (e.g. cloned from GitHub):
 
 ``` bash
+git clone https://github.com/martinagobbi/Global-News-Event-Radar-for-Geopolitical-and-Supply-Risk
+cd Global-News-Event-Radar-for-Geopolitical-and-Supply-Risk
 docker compose -f docker-compose.stores.yml up -d           # stores (once)
+./download-backfill.sh                                      # Load 30-day backfill so the dashboard has data immediately (optional)
 docker compose up -d                                        # pipeline + backend
 docker compose -f 5-serving/docker-compose.serving.yml up   # frontend
 ```
