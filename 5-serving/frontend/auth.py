@@ -1,31 +1,9 @@
 """
-frontend/auth.py
-----------------
-Demo-grade login gate for the radar frontend.
-
-SCOPE — read this before trusting it
-------------------------------------
-This gates the *UI* only. The serving backend has no authentication of its own,
-so anyone who can reach it directly can still query any user's data. That is
-acceptable for a test deployment with published credentials; it is NOT
-production authentication, and should not be described as such.
+This gates the UI only. The serving backend has no authentication of its own,
+so anyone who can reach it directly can still query any user's data.
 
 The three accounts are fixed and their passwords are published in the README by
-design (test accounts, no real data). Passwords are stored here as salted
-SHA-256 digests rather than plaintext: with public passwords this is a
-formality, but it keeps the plaintext out of the repository and the comparison
-constant-time.
-
-Session model
--------------
-    st.session_state["auth_user"]      -> user_id, or None when logged out
-    st.session_state["auth_last_seen"] -> epoch seconds of the last interaction
-
-Idle timeout: IDLE_TIMEOUT_SECONDS since the last interaction. Streamlit only
-reruns the script when the browser interacts, so an abandoned tab is logged out
-on its NEXT interaction, not exactly on the 15-minute mark. The check is
-therefore "you cannot keep using a stale session", not "the session is
-destroyed at 15:00".
+design.
 """
 from __future__ import annotations
 
