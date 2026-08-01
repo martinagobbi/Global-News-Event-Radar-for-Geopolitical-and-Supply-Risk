@@ -1,7 +1,5 @@
 #!/usr/bin/env python
 """
-5-serving/seed_test_users.py
-----------------------------
 Seed the three fixed test accounts into MongoDB through the serving backend.
 
 Run once, after the stores and the backend are up:
@@ -12,25 +10,12 @@ Run once, after the stores and the backend are up:
 Idempotent: PUT /users/{id}/profile replaces the profile, so re-running resets
 the three accounts to this known state. Nothing else in Mongo is touched.
 
-Why the data looks like this
-----------------------------
-The brief requires the three accounts to be *mutually exclusive*: no territory
-and no keyword may appear in more than one profile, so a briefing can be
-attributed to exactly one account on sight. Each profile therefore models a
+Accounts are mutually exclusive. Each profile models a
 different supply chain in a different part of the world:
 
     radar_electronics — semiconductors / electronics, Asia-Pacific
     radar_pharma      — pharmaceuticals / biologics, Europe
     radar_agrifood    — agri-food commodities, Americas + Africa
-
-Each of the five supply-chain questions carries at least MIN_ANSWERS answers,
-and disjointness is asserted at run time (see _check_mutually_exclusive) so a
-careless edit fails loudly instead of silently overlapping.
-
-Territory names must match the picker options the backend serves
-(GET /territories, published to Mongo by the processing layer). The script
-verifies its territories against that list and reports any it doesn't
-recognise rather than writing a profile the processing layer can't map.
 """
 from __future__ import annotations
 
