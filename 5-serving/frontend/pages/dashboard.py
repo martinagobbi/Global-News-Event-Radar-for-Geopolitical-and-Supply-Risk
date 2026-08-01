@@ -5,7 +5,6 @@ import streamlit as st
 from components.branding import use_neutral_spinner
 from components.briefing import render_briefing
 from components.heatmap import render_heatmap
-from components.keyword_form import render_keyword_questions
 from configuration.countries import get_territory_options
 from data.api_client import BackendUnavailable
 from data.gold_layer import (
@@ -16,7 +15,7 @@ from data.gold_layer import (
     get_gold_layer_status,
     get_system_status,
 )
-from data.user_store import get_current_user, get_user_profile, is_first_login, save_user_profile
+from data.user_store import get_current_user, get_user_profile, is_first_login
 
 
 STATUS_POLL_SECONDS  = 30
@@ -106,21 +105,9 @@ metrics[2].metric("Keywords", sum(len(v) for v in (profile.get("keywords") or {}
 metrics[3].metric("Data status", pipeline_status)
 
 # ── Profile update ─────────────────────────────────────────────────────────
-with st.expander("Update monitoring perimeter"):
-    updated_territories = st.multiselect(
-        "Territories to monitor",
-        options=territory_options,
-        default=[c for c in profile.get("territories", []) if c in territory_options],
-    )
-    st.markdown("**Your supply chain**")
-    updated_keywords = render_keyword_questions(profile, prefix="dash")
-    if st.button("Save", key="save_perimeter"):
-        payload = {k: v for k, v in profile.items() if k not in ("risk_categories", "countries")}
-        payload.update({"territories": updated_territories, "keywords": updated_keywords})
-        save_user_profile(payload)
-        st.session_state.last_data_fetch = 0
-        st.success("Monitoring perimeter updated.")
-        st.rerun()
+# Preferences live on a single page (Preferences); editing them here as well
+# meant two forms writing the same profile.
+st.page_link("pages/onboarding.py", label="Edit monitoring perimeter", icon="🧭")
 
 # ── Briefing controls ──────────────────────────────────────────────────────
 st.subheader("Briefing controls")
