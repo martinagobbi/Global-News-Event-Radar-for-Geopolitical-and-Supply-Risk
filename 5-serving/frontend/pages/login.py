@@ -1,10 +1,3 @@
-"""
-frontend/pages/login.py
------------------------
-The only page reachable while logged out. app.py registers it as the sole
-entry in st.navigation for anonymous sessions, so there is no sidebar link to
-any other page and a hand-typed URL for one lands back here.
-"""
 import streamlit as st
 
 from auth import IDLE_TIMEOUT_SECONDS, login, verify
