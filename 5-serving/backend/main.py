@@ -17,6 +17,7 @@ from mongo_store import (
 )
 from oracle_store import (
     get_event_articles,
+    get_events_by_ids,
     get_events_for_user,
     get_events_version,
     get_pipeline_status,
@@ -173,6 +174,8 @@ def list_events(
         events = [e for e in events if int(e.get("age_days", 0)) <= briefing_days]
 
     if exclude_archived:
+        # Only archived events leave the Radar View. Events tagged "needs action"
+        # or "monitoring" stay visible here as well as on their own page.
         events = [e for e in events if e.get("user_tag") != "archive"]
 
     return {"events": events}
@@ -222,11 +225,21 @@ def events_summary(user_id: str) -> dict:
 
 @app.get("/users/{user_id}/archived-events")
 def archived_events(user_id: str) -> dict:
-    events = get_events_for_user(user_id, max_age_days=90)
+    return tagged_events(user_id, "archive")
+
+
+@app.get("/users/{user_id}/tagged-events/{tag}")
+def tagged_events(user_id: str, tag: str) -> dict:
+    """
+    Events this user filed under one tag — 'requires_action', 'monitor' or
+    'archive'. Backs the per-triage pages in the frontend.
+
+    Read by GLOBALEVENTID straight from `articles`, NOT through user_articles, so
+    a triaged card survives the user later dropping the territory that first
+    brought it in. Tags live in Mongo keyed by user_id, so one user's triage
+    never affects another's.
+    """
     tags = get_tags(user_id)
-    archived = [
-        {**e, "user_tag": "archive"}
-        for e in events
-        if tags.get(str(e["global_event_id"])) == "archive"
-    ]
-    return {"events": archived}
+    event_ids = [eid for eid, t in tags.items() if t == tag]
+    events = get_events_by_ids(event_ids)
+    return {"events": [{**e, "user_tag": tag} for e in events]}

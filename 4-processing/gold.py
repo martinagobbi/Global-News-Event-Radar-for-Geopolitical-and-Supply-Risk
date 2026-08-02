@@ -94,11 +94,25 @@ def build_article_rows(events_df, mentions_df) -> list[dict]:
     events_by_id = {str(r.get("GLOBALEVENTID")): r for r in events_df.to_dict("records")}
 
     rows: list[dict] = []
+    seen_urls: set[str] = set()
+    seen_titles: set[tuple[str, str]] = set()
     for m in mentions_df.to_dict("records"):
         ev = events_by_id.get(str(m.get("GLOBALEVENTID")))
         if ev is None:
             continue
-        if not _s(m.get("MentionIdentifier")).strip():
+        url = _s(m.get("MentionIdentifier")).strip()
+        if not url:
             continue  # no URL -> no primary key
-        rows.append(_article_row(m, ev))
+        if url in seen_urls:
+            continue  # same article mentioned several times -> keep one row
+        row = _article_row(m, ev)
+        # Syndication: the same story is republished under different URLs, so a
+        # card would show the same headline several times. Keep one article per
+        # (event, headline) — compared case/space-insensitively.
+        title_key = (row["global_event_id"], " ".join(row["mention_identifier"].lower().split()))
+        if title_key in seen_titles:
+            continue
+        seen_urls.add(url)
+        seen_titles.add(title_key)
+        rows.append(row)
     return rows

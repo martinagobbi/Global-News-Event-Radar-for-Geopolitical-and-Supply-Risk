@@ -23,14 +23,13 @@ DATA_REFRESH_SECONDS = 900   # 15 minutes — aligned with ingestion cadence
 
 
 use_neutral_spinner()
-st.title("Dashboard")
+st.title("Radar View")
 
 user_id = get_current_user()
 
 try:
     if is_first_login(user_id):
         st.warning("First-time access detected. Complete the initial setup before opening the dashboard.")
-        st.page_link("pages/onboarding.py", label="Open setup", icon="🧭")
         st.stop()
 
     profile = get_user_profile(user_id)
@@ -99,15 +98,14 @@ st.info(
 # ── Metrics ────────────────────────────────────────────────────────────────
 pipeline_status = get_gold_layer_status(user_id)
 metrics = st.columns(4)
-metrics[0].metric("User", profile.get("display_name", user_id))
+metrics[0].metric("User", profile.get("display_name") or user_id)
 metrics[1].metric("Monitored territories", len(profile.get("territories", [])))
 metrics[2].metric("Keywords", sum(len(v) for v in (profile.get("keywords") or {}).values()))
 metrics[3].metric("Data status", pipeline_status)
 
 # ── Profile update ─────────────────────────────────────────────────────────
-# Preferences live on a single page (Preferences); editing them here as well
-# meant two forms writing the same profile.
-st.page_link("pages/onboarding.py", label="Edit monitoring perimeter", icon="🧭")
+# NOTE: the setup page is only routable until a profile exists, so there is no
+# link to it here. See the note in the reply — preference editing needs a home.
 
 # ── Briefing controls ──────────────────────────────────────────────────────
 st.subheader("Briefing controls")

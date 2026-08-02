@@ -36,7 +36,12 @@ st.write(
     "As well as other territories, there exists one entry per country."
 )
 
-display_name = st.text_input("Display name", value=profile.get("display_name", ""))
+st.markdown("**Territories to monitor**")
+st.caption(
+    "If any part of your supply chain is in or is affected by any one of these "
+    "territories, feel free to include it. Please remember that in “Radar View”, "
+    "you will only see news regarding events on these territories"
+)
 # The list includes sovereign countries AND autonomous territories. Stored under
 # the "territories" profile key — the contract that 4-processing/countries.py
 # reads via codes_for_names().
@@ -44,6 +49,7 @@ monitored_territories = st.multiselect(
     "Territories to monitor",
     options=territory_options,
     default=[c for c in profile.get("territories", []) if c in territory_options],
+    label_visibility="collapsed",
 )
 
 st.subheader("Your supply chain")
@@ -61,7 +67,6 @@ if st.button("Save profile", type="primary"):
     try:
         save_user_profile({
             "user_id":         user_id,
-            "display_name":    display_name,
             "territories":     monitored_territories,
             "keywords":        keywords,
             "briefing_days":   briefing_days,

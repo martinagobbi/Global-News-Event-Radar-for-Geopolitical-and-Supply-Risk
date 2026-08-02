@@ -147,10 +147,30 @@ def _apply_inrawtext_filter(articles: list[dict]) -> tuple[list[dict], bool]:
     return articles, False
 
 
+def _dedupe_by_title(articles: list[dict]) -> list[dict]:
+    """
+    Drop repeats of the same headline within an event. Syndicated stories are
+    republished under different URLs, so the same title can arrive as several
+    distinct articles; a card should list it once. Compared case/space-
+    insensitively. Order-preserving, so the sort below still decides ranking.
+    (Processing also de-duplicates when building the gold; this covers rows
+    already written by an earlier build.)
+    """
+    seen: set[str] = set()
+    out: list[dict] = []
+    for a in articles:
+        key = " ".join(str(a.get("mention_identifier", "")).lower().split())
+        if key and key in seen:
+            continue
+        seen.add(key)
+        out.append(a)
+    return out
+
+
 def _sort_and_cap(articles: list[dict], limit: int = 20) -> list[dict]:
     """Confidence DESC, abs(MentionDocTone) ASC, capped at limit."""
     articles.sort(key=lambda a: (-a["confidence"], abs(a["mention_doc_tone"])))
-    return articles[:limit]
+    return _dedupe_by_title(articles)[:limit]
 
 
 def _build_event_card(global_event_id: str, raw_articles: list[dict]) -> dict:
@@ -289,6 +309,48 @@ def get_event_articles(user_id: str, global_event_id: str) -> dict:
         row["url"] = row["document_identifier"]
 
     return _build_event_card(global_event_id, rows)
+
+
+def get_events_by_ids(global_event_ids: list[str]) -> list[dict]:
+    """
+    Event cards for the given GLOBALEVENTIDs, read straight from `articles`.
+
+    Deliberately does NOT join user_articles. A user's triaged events (needs
+    action / monitoring / archive) must survive changes to their perimeter: when
+    a territory is removed, processing rewrites user_articles and those documents
+    disappear from it — but the article rows themselves are only ever upserted,
+    never deleted, so the triaged cards remain readable here.
+
+    Returns [] on Oracle error.
+    """
+    ids = [str(i) for i in global_event_ids if str(i).strip()]
+    if not ids:
+        return []
+    # Oracle has no list binding: generate one placeholder per id.
+    binds = {f"id{n}": v for n, v in enumerate(ids)}
+    placeholders = ", ".join(f":{k}" for k in binds)
+    sql = f"""
+        SELECT
+            a.global_event_id, a.document_identifier, a.mention_identifier,
+            a.in_raw_text, a.confidence, a.mention_doc_tone, a.country,
+            a.risk_category, a.goldstein, a.cameo_code, a.cameo_label,
+            a.actor, a.latitude, a.longitude, a.event_date, a.age_days
+        FROM articles a
+        WHERE a.global_event_id IN ({placeholders})
+        ORDER BY a.global_event_id, a.confidence DESC, ABS(a.mention_doc_tone) ASC
+    """
+    try:
+        rows = _fetch_rows(sql, **binds)
+    except Exception as e:
+        logger.error("get_events_by_ids failed: %s", e)
+        return []
+
+    groups: dict[str, list[dict]] = {}
+    for row in rows:
+        eid = str(row["global_event_id"])
+        row["url"] = row["document_identifier"]
+        groups.setdefault(eid, []).append(row)
+    return [_build_event_card(eid, arts) for eid, arts in groups.items()]
 
 
 def get_events_version(user_id: str) -> str | None:

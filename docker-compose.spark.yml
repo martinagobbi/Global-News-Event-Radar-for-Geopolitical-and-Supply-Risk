@@ -1,0 +1,85 @@
+# ═════════════════════════════════════════════════════════════════════════════
+# SPARK STANDALONE CLUSTER — runs 4-processing/spark_gold.py distributed.
+#
+# This is the "delegates to multiple nodes" path for silver -> gold. It is a
+# SEPARATE, OPTIONAL stack: the normal pipeline (docker-compose.yml) keeps using
+# the in-process pandas path. Nothing here changes that.
+#
+#   docker compose -f docker-compose.spark.yml up -d            # master + 2 workers
+#   docker compose -f docker-compose.spark.yml run --rm spark-submit
+#   open http://localhost:8080                                   # Spark master UI
+#
+# Scale the compute out (this is the point of the exercise):
+#   docker compose -f docker-compose.spark.yml up -d --scale spark-worker=4
+# On several MACHINES, run the workers on those machines with
+# SPARK_MASTER_URL=spark://<master-host>:7077 and open ports 7077/8080.
+#
+# It joins `pipeline_network`, so it reaches ClickHouse and Oracle by the same
+# service names the pipeline uses (override with the usual env vars otherwise).
+# ═════════════════════════════════════════════════════════════════════════════
+services:
+
+  spark-master:
+    image: bitnami/spark:3.5
+    container_name: radar_spark_master
+    environment:
+      SPARK_MODE: master
+    ports:
+      - "8080:8080"    # master web UI — watch partitions/executors here
+      - "7077:7077"    # cluster submit port
+    networks: [pipeline_network]
+
+  spark-worker:
+    image: bitnami/spark:3.5
+    depends_on: [spark-master]
+    environment:
+      SPARK_MODE: worker
+      SPARK_MASTER_URL: spark://spark-master:7077
+      SPARK_WORKER_CORES: "2"
+      SPARK_WORKER_MEMORY: 2G
+    deploy:
+      replicas: 2      # `--scale spark-worker=N` to add more
+    networks: [pipeline_network]
+
+  # One-shot submitter: builds an image with pyspark + the job + the two JDBC
+  # drivers, then submits to the master. `run --rm` it whenever you want a pass.
+  spark-submit:
+    build:
+      context: ./4-processing
+      dockerfile: Dockerfile.spark
+    depends_on: [spark-master]
+    environment:
+      SPARK_MASTER: spark://spark-master:7077
+      SPARK_READ_PARTITIONS: "8"
+      SPARK_WRITE_PARTITIONS: "4"
+      # ClickHouse JDBC speaks HTTP (8123), not the native 9000 port.
+      CLICKHOUSE_HOST: ${CLICKHOUSE_HOST:-clickhouse-s1r1}
+      CLICKHOUSE_PORT: "8123"
+      ORACLE_HOST: ${ORACLE_HOST:-pipeline_oracle}
+      ORACLE_PORT: ${ORACLE_PORT:-1521}
+      ORACLE_SERVICE: ${ORACLE_SERVICE:-FREEPDB1}
+      ORACLE_USER: ${ORACLE_USER:-radar}
+      ORACLE_PASSWORD: ${ORACLE_PASSWORD:-radar}
+      MONGO_URI: ${MONGO_URI:-mongodb://mongo1:27017,mongo2:27017,mongo3:27017/?replicaSet=rs0}
+      MONGO_DB: ${MONGO_DB:-radar}
+      MONGO_COLLECTION: ${MONGO_COLLECTION:-users}
+      STATUS_DIR: /data/status
+    volumes:
+      # Read-only view of the pipeline's scratch volume, purely so the job can
+      # read /data/status/pipeline_status.json and mirror it into Oracle — the
+      # last thing recompute_all does. Nothing is written to the volume.
+      - shared_data:/data:ro
+    networks: [pipeline_network]
+
+volumes:
+  # The volume belongs to the pipeline compose project, so it is external here.
+  # Compose prefixes volume names with the project (= the repo folder name); set
+  # SHARED_DATA_VOLUME if yours differs — `docker volume ls | grep shared_data`.
+  shared_data:
+    external: true
+    name: ${SHARED_DATA_VOLUME:-global-news-event-radar-for-geopolitical-and-supply-risk_shared_data}
+
+networks:
+  pipeline_network:
+    external: true
+    name: pipeline_network

@@ -34,6 +34,12 @@ def get_archived_events(user_id: str) -> list[dict]:
     return payload["events"]
 
 
+def get_tagged_events(user_id: str, tag: str) -> list[dict]:
+    """Events this user filed under one tag: requires_action / monitor / archive."""
+    payload = get_json(f"/users/{user_id}/tagged-events/{tag}")
+    return payload["events"]
+
+
 def get_events_summary(user_id: str) -> list[dict]:
     """Lightweight data for the heatmap."""
     payload = get_json(f"/users/{user_id}/events-summary")

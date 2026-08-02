@@ -42,10 +42,15 @@ else:
         f"Inactive users are logged out after {IDLE_TIMEOUT_SECONDS // 60} minutes."
     )
 
+    # Preferences stays in the sidebar: it is the single place where the
+    # perimeter (territories + keywords) is edited, for first-time setup and for
+    # later changes alike. Pages not listed here are not routable at all.
     page = st.navigation([
-        st.Page("pages/dashboard.py",   title="Radar view", icon="📊", default=True),
-        st.Page("pages/onboarding.py",  title="Preferences", icon="🧭"),
-        st.Page("pages/archive.py",     title="Archive",     icon="🗂️"),
+        st.Page("pages/dashboard.py",     title="Radar View", icon="📊", default=True),
+        st.Page("pages/needs_action.py",  title="Needs action", icon="🔴"),
+        st.Page("pages/monitoring.py",    title="Looking out for developments", icon="🟡"),
+        st.Page("pages/archive.py",       title="Archive", icon="🗂️"),
+        st.Page("pages/onboarding.py",    title="Preferences", icon="🧭"),
     ])
  
 page.run()
