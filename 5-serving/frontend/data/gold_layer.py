@@ -11,15 +11,21 @@ def get_events(
     user_id: str,
     briefing_days: int | None = None,
     max_age_days: int = 90,
+    min_age_days: int | None = None,
     exclude_archived: bool = True,
 ) -> list[dict]:
     """
     Fetch event cards for a user.
     The backend already applied InRawText filter, ordering, and 20-article cap.
+
+    min_age_days keeps only events OLDER than that many days — used by the
+    "Older news" tab so it does not repeat what the main briefing already shows.
     """
     params = f"max_age_days={max_age_days}&exclude_archived={str(exclude_archived).lower()}"
     if briefing_days is not None:
         params += f"&briefing_days={briefing_days}"
+    if min_age_days is not None:
+        params += f"&min_age_days={min_age_days}"
     payload = get_json(f"/users/{user_id}/events?{params}")
     return payload["events"]
 

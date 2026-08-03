@@ -111,7 +111,8 @@ metrics[3].metric("Data status", pipeline_status)
 st.subheader("Briefing controls")
 col1, col2 = st.columns([2, 1])
 with col1:
-    briefing_days = st.slider("Show risks from the last N days", 1, 30, min(profile.get("briefing_days", 30), 30))
+    briefing_days = st.slider("Show risks from the last N days", 1, 90,
+                              min(profile.get("briefing_days", 90), 90))
 with col2:
     show_older = st.toggle("Include older-risk section", value=False)
 
@@ -130,7 +131,14 @@ should_refresh = manual_refresh or (now - st.session_state.last_data_fetch >= DA
 
 if should_refresh:
     st.session_state.cached_events       = get_events(user_id, briefing_days=briefing_days)
-    st.session_state.cached_older_events = get_events(user_id, max_age_days=profile.get("older_news_days", 90), exclude_archived=True) if show_older else []
+    # A true band: older than the main briefing window, up to the lookback limit,
+    # so the "Older news" tab never repeats what the main briefing already lists.
+    st.session_state.cached_older_events = get_events(
+        user_id,
+        max_age_days=profile.get("older_news_days", 180),
+        min_age_days=briefing_days,
+        exclude_archived=True,
+    ) if show_older else []
     st.session_state.cached_summary      = get_events_summary(user_id)
     st.session_state.last_data_fetch     = now
     st.session_state.gold_version        = live_gold_version   # events now match this version
@@ -148,7 +156,9 @@ with map_col:
 with sidebar_col:
     st.subheader("Radar status")
     st.write(f"Main briefing: last `{briefing_days}` days")
-    st.write(f"Older-risk lookback: `{profile.get('older_news_days', 90)}` days")
+    st.write(
+        f"Older-risk lookback: `{briefing_days}`–`{profile.get('older_news_days', 180)}` days"
+    )
     st.write(f"Briefing events: `{len(events)}`")
     st.write("Red window → `Needs action from us`")
     st.write("Yellow window → `Look out for developments`")

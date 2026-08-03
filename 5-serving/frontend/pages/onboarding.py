@@ -57,10 +57,20 @@ st.caption("Add one item at a time. Leave a question empty to ignore it.")
 keywords = render_keyword_questions(profile, prefix="onboard")
 
 briefing_days = st.slider(
-    "Default briefing window (days)", 1, 30, profile.get("briefing_days", 30)
+    "Default briefing window (days)", 1, 90, min(profile.get("briefing_days", 90), 90)
+)
+st.caption(
+    "How far back the Radar View reaches by default. 90 days keeps a freshly "
+    "loaded 30-day backfill visible for months."
 )
 older_news_days = st.slider(
-    "Optional older-risk lookback (days)", 31, 180, profile.get("older_news_days", 90)
+    "Optional older-risk lookback (days)", 31, 365,
+    max(profile.get("older_news_days", 180), 31)
+)
+st.caption(
+    "Upper limit of the separate “Older news” tab. That tab shows events OLDER "
+    "than the briefing window above, up to this limit — so keep it larger than "
+    "the briefing window, or the tab will be empty."
 )
 
 if st.button("Save profile", type="primary"):

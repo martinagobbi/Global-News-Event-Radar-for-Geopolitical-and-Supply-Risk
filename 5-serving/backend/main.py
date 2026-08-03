@@ -160,8 +160,11 @@ def list_events(
     user_id: str,
     max_age_days: int = 90,
     briefing_days: int | None = None,
+    min_age_days: int | None = None,
     exclude_archived: bool = True,
 ) -> dict:
+    # min_age_days makes the window a true BAND: the "Older news" tab asks for
+    # events older than the main briefing window, so the two never overlap.
     # get_events_for_user() returns [] on Oracle error.
     events = get_events_for_user(user_id, max_age_days=max_age_days)
 
@@ -172,6 +175,9 @@ def list_events(
 
     if briefing_days is not None:
         events = [e for e in events if int(e.get("age_days", 0)) <= briefing_days]
+
+    if min_age_days is not None:
+        events = [e for e in events if int(e.get("age_days", 0)) > min_age_days]
 
     if exclude_archived:
         # Only archived events leave the Radar View. Events tagged "needs action"
