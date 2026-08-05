@@ -45,6 +45,10 @@ x-store-env: &store-env
   MONGO_DB: ${MONGO_DB:-radar}
   CLICKHOUSE_HOST: ${CLICKHOUSE_HOST:-clickhouse-s1r1}
   CLICKHOUSE_PORT: ${CLICKHOUSE_PORT:-9000}
+  # Must match the deployed topology. A Swarm deployment is the full
+  # 2x3 cluster, so 2 is correct here; a single-replica cluster would
+  # reject every insert with error 285 (alive replicas < requested quorum).
+  CLICKHOUSE_INSERT_QUORUM: ${CLICKHOUSE_INSERT_QUORUM:-2}
   ORACLE_HOST: ${ORACLE_HOST:-pipeline_oracle}
   ORACLE_PORT: ${ORACLE_PORT:-1521}
   ORACLE_SERVICE: ${ORACLE_SERVICE:-FREEPDB1}

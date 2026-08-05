@@ -24,13 +24,14 @@ services:
     container_name: pipeline_ch_keeper_1
     restart: unless-stopped
     volumes:
-      - ./clickhouse/keeper-1.xml:/etc/clickhouse-keeper/keeper_config.xml:ro
+      - ./clickhouse/${CH_KEEPER1_CONFIG:-keeper-1.local.xml}:/etc/clickhouse-keeper/keeper_config.xml:ro
       - keeper_1_data:/var/lib/clickhouse-keeper
     networks: [pipeline_network]
 
   clickhouse-keeper-2:
     image: clickhouse/clickhouse-keeper:24.3
     container_name: pipeline_ch_keeper_2
+    profiles: ["full"]
     restart: unless-stopped
     volumes:
       - ./clickhouse/keeper-2.xml:/etc/clickhouse-keeper/keeper_config.xml:ro
@@ -40,6 +41,7 @@ services:
   clickhouse-keeper-3:
     image: clickhouse/clickhouse-keeper:24.3
     container_name: pipeline_ch_keeper_3
+    profiles: ["full"]
     restart: unless-stopped
     volumes:
       - ./clickhouse/keeper-3.xml:/etc/clickhouse-keeper/keeper_config.xml:ro
@@ -51,11 +53,12 @@ services:
     image: clickhouse/clickhouse-server:24.3
     container_name: pipeline_clickhouse_s1r1
     restart: unless-stopped
-    depends_on: [clickhouse-keeper-1, clickhouse-keeper-2, clickhouse-keeper-3]
+    depends_on: [clickhouse-keeper-1]
     ulimits:
       nofile: {soft: 262144, hard: 262144}
     volumes:
-      - ./clickhouse/cluster.xml:/etc/clickhouse-server/config.d/cluster.xml:ro
+      - ./clickhouse/${CH_CLUSTER_CONFIG:-cluster.local.xml}:/etc/clickhouse-server/config.d/cluster.xml:ro
+      - ./clickhouse/${CH_MEMORY_CONFIG:-memory.local.xml}:/etc/clickhouse-server/config.d/memory.xml:ro
       - ./clickhouse/macros-s1r1.xml:/etc/clickhouse-server/config.d/macros.xml:ro
       - ./clickhouse/users.xml:/etc/clickhouse-server/users.d/zz-network-access.xml:ro
       - ch_s1r1_data:/var/lib/clickhouse
@@ -69,12 +72,14 @@ services:
   clickhouse-s1r2:
     image: clickhouse/clickhouse-server:24.3
     container_name: pipeline_clickhouse_s1r2
+    profiles: ["full"]
     restart: unless-stopped
-    depends_on: [clickhouse-keeper-1, clickhouse-keeper-2, clickhouse-keeper-3]
+    depends_on: [clickhouse-keeper-1]
     ulimits:
       nofile: {soft: 262144, hard: 262144}
     volumes:
-      - ./clickhouse/cluster.xml:/etc/clickhouse-server/config.d/cluster.xml:ro
+      - ./clickhouse/${CH_CLUSTER_CONFIG:-cluster.local.xml}:/etc/clickhouse-server/config.d/cluster.xml:ro
+      - ./clickhouse/${CH_MEMORY_CONFIG:-memory.local.xml}:/etc/clickhouse-server/config.d/memory.xml:ro
       - ./clickhouse/macros-s1r2.xml:/etc/clickhouse-server/config.d/macros.xml:ro
       - ./clickhouse/users.xml:/etc/clickhouse-server/users.d/zz-network-access.xml:ro
       - ch_s1r2_data:/var/lib/clickhouse
@@ -83,12 +88,14 @@ services:
   clickhouse-s1r3:
     image: clickhouse/clickhouse-server:24.3
     container_name: pipeline_clickhouse_s1r3
+    profiles: ["full"]
     restart: unless-stopped
-    depends_on: [clickhouse-keeper-1, clickhouse-keeper-2, clickhouse-keeper-3]
+    depends_on: [clickhouse-keeper-1]
     ulimits:
       nofile: {soft: 262144, hard: 262144}
     volumes:
-      - ./clickhouse/cluster.xml:/etc/clickhouse-server/config.d/cluster.xml:ro
+      - ./clickhouse/${CH_CLUSTER_CONFIG:-cluster.local.xml}:/etc/clickhouse-server/config.d/cluster.xml:ro
+      - ./clickhouse/${CH_MEMORY_CONFIG:-memory.local.xml}:/etc/clickhouse-server/config.d/memory.xml:ro
       - ./clickhouse/macros-s1r3.xml:/etc/clickhouse-server/config.d/macros.xml:ro
       - ./clickhouse/users.xml:/etc/clickhouse-server/users.d/zz-network-access.xml:ro
       - ch_s1r3_data:/var/lib/clickhouse
@@ -97,12 +104,14 @@ services:
   clickhouse-s2r1:
     image: clickhouse/clickhouse-server:24.3
     container_name: pipeline_clickhouse_s2r1
+    profiles: ["full"]
     restart: unless-stopped
-    depends_on: [clickhouse-keeper-1, clickhouse-keeper-2, clickhouse-keeper-3]
+    depends_on: [clickhouse-keeper-1]
     ulimits:
       nofile: {soft: 262144, hard: 262144}
     volumes:
-      - ./clickhouse/cluster.xml:/etc/clickhouse-server/config.d/cluster.xml:ro
+      - ./clickhouse/${CH_CLUSTER_CONFIG:-cluster.local.xml}:/etc/clickhouse-server/config.d/cluster.xml:ro
+      - ./clickhouse/${CH_MEMORY_CONFIG:-memory.local.xml}:/etc/clickhouse-server/config.d/memory.xml:ro
       - ./clickhouse/macros-s2r1.xml:/etc/clickhouse-server/config.d/macros.xml:ro
       - ./clickhouse/users.xml:/etc/clickhouse-server/users.d/zz-network-access.xml:ro
       - ch_s2r1_data:/var/lib/clickhouse
@@ -111,12 +120,14 @@ services:
   clickhouse-s2r2:
     image: clickhouse/clickhouse-server:24.3
     container_name: pipeline_clickhouse_s2r2
+    profiles: ["full"]
     restart: unless-stopped
-    depends_on: [clickhouse-keeper-1, clickhouse-keeper-2, clickhouse-keeper-3]
+    depends_on: [clickhouse-keeper-1]
     ulimits:
       nofile: {soft: 262144, hard: 262144}
     volumes:
-      - ./clickhouse/cluster.xml:/etc/clickhouse-server/config.d/cluster.xml:ro
+      - ./clickhouse/${CH_CLUSTER_CONFIG:-cluster.local.xml}:/etc/clickhouse-server/config.d/cluster.xml:ro
+      - ./clickhouse/${CH_MEMORY_CONFIG:-memory.local.xml}:/etc/clickhouse-server/config.d/memory.xml:ro
       - ./clickhouse/macros-s2r2.xml:/etc/clickhouse-server/config.d/macros.xml:ro
       - ./clickhouse/users.xml:/etc/clickhouse-server/users.d/zz-network-access.xml:ro
       - ch_s2r2_data:/var/lib/clickhouse
@@ -125,12 +136,14 @@ services:
   clickhouse-s2r3:
     image: clickhouse/clickhouse-server:24.3
     container_name: pipeline_clickhouse_s2r3
+    profiles: ["full"]
     restart: unless-stopped
-    depends_on: [clickhouse-keeper-1, clickhouse-keeper-2, clickhouse-keeper-3]
+    depends_on: [clickhouse-keeper-1]
     ulimits:
       nofile: {soft: 262144, hard: 262144}
     volumes:
-      - ./clickhouse/cluster.xml:/etc/clickhouse-server/config.d/cluster.xml:ro
+      - ./clickhouse/${CH_CLUSTER_CONFIG:-cluster.local.xml}:/etc/clickhouse-server/config.d/cluster.xml:ro
+      - ./clickhouse/${CH_MEMORY_CONFIG:-memory.local.xml}:/etc/clickhouse-server/config.d/memory.xml:ro
       - ./clickhouse/macros-s2r3.xml:/etc/clickhouse-server/config.d/macros.xml:ro
       - ./clickhouse/users.xml:/etc/clickhouse-server/users.d/zz-network-access.xml:ro
       - ch_s2r3_data:/var/lib/clickhouse
@@ -154,6 +167,7 @@ services:
   mongo2:
     image: mongo:7
     container_name: pipeline_mongo2
+    profiles: ["full"]
     restart: unless-stopped
     command: ["--replSet", "rs0", "--bind_ip_all"]
     volumes:
@@ -165,6 +179,7 @@ services:
   mongo3:
     image: mongo:7
     container_name: pipeline_mongo3
+    profiles: ["full"]
     restart: unless-stopped
     command: ["--replSet", "rs0", "--bind_ip_all"]
     volumes:
@@ -188,10 +203,11 @@ services:
   mongo-init:
     image: mongo:7
     container_name: pipeline_mongo_init
-    depends_on: [mongo1, mongo2, mongo3]
+    depends_on: [mongo1]
     restart: "no"
     networks: [pipeline_network]
     environment:
+      MONGO_MEMBERS: ${MONGO_MEMBERS:-1}
       MONGO_MEMBER_0: ${MONGO_MEMBER_0:-mongo1:27017}
       MONGO_MEMBER_1: ${MONGO_MEMBER_1:-mongo2:27017}
       MONGO_MEMBER_2: ${MONGO_MEMBER_2:-mongo3:27017}
@@ -202,14 +218,32 @@ services:
         until mongosh --host mongo1:27017 --quiet --eval 'db.runCommand({ping:1})' >/dev/null 2>&1; do
           echo "waiting for mongo1..."; sleep 2;
         done
-        MEMBERS="[{_id:0,host:'$$MONGO_MEMBER_0'},{_id:1,host:'$$MONGO_MEMBER_1'},{_id:2,host:'$$MONGO_MEMBER_2'}]"
+        if [ "$$MONGO_MEMBERS" = "1" ]; then
+          MEMBERS="[{_id:0,host:'$$MONGO_MEMBER_0'}]"
+        else
+          MEMBERS="[{_id:0,host:'$$MONGO_MEMBER_0'},{_id:1,host:'$$MONGO_MEMBER_1'},{_id:2,host:'$$MONGO_MEMBER_2'}]"
+        fi
         mongosh --host mongo1:27017 --quiet --eval "
+          var want = $$MONGO_MEMBERS;
+          var members = $$MEMBERS;
           try {
-            rs.status();
-            print('replica set already initiated - nothing to do');
+            var st = rs.status();
+            if (st.members.length != want) {
+              // Switching between testing (1 node) and full (3 nodes): a set
+              // still configured for 3 members with only 1 running has no
+              // majority, so no primary is elected and every write fails.
+              // force:true is required precisely because there is no primary.
+              print('reconfiguring rs0: ' + st.members.length + ' -> ' + want + ' member(s)');
+              var cfg = rs.conf();
+              cfg.members = members;
+              cfg.version = cfg.version + 1;
+              rs.reconfig(cfg, {force: true});
+            } else {
+              print('replica set already has ' + want + ' member(s) - nothing to do');
+            }
           } catch (e) {
-            print('initiating replica set rs0...');
-            rs.initiate({_id: 'rs0', members: $$MEMBERS});
+            print('initiating replica set rs0 with ' + want + ' member(s)...');
+            rs.initiate({_id: 'rs0', members: members});
           }"
 
   # ── Oracle: the gold sink the serving backend reads ───────────────────────

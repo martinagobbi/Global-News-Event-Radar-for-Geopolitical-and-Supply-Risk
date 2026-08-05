@@ -1,0 +1,28 @@
+<clickhouse>
+    <!--
+        TESTING topology: 1 shard × 1 replica, coordinated by a single Keeper.
+
+        Selected by CH_CLUSTER_CONFIG=cluster.local.xml (the default). The full
+        2 × 3 topology lives in cluster.xml and is selected by .env.full.
+
+        The cluster keeps the name `gnews_cluster` in both modes, so every
+        `ON CLUSTER gnews_cluster` statement in the validation layer works
+        unchanged — there is simply one node to coordinate instead of six.
+
+        With a single replica there is no redundancy, so the pipeline must run
+        with CLICKHOUSE_INSERT_QUORUM=1 (set in .env.testing): a quorum of 2
+        could never be reached and every insert would block.
+    -->
+    <remote_servers>
+        <gnews_cluster>
+            <shard>
+                <internal_replication>true</internal_replication>
+                <replica><host>clickhouse-s1r1</host><port>9000</port></replica>
+            </shard>
+        </gnews_cluster>
+    </remote_servers>
+
+    <zookeeper>
+        <node><host>clickhouse-keeper-1</host><port>9181</port></node>
+    </zookeeper>
+</clickhouse>

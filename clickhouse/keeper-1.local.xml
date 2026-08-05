@@ -1,0 +1,30 @@
+<clickhouse>
+    <!--
+        TESTING topology: a single-node Keeper ensemble.
+
+        Selected by CH_KEEPER1_CONFIG=keeper-1.local.xml (the default). Identical
+        to keeper-1.xml except that <raft_configuration> lists only this server,
+        so it forms a quorum of one and elects itself leader. The three-node
+        ensemble (keeper-1/2/3.xml) is selected by .env.full.
+    -->
+    <logger>
+        <level>warning</level>
+        <console>true</console>
+    </logger>
+    <listen_host>0.0.0.0</listen_host>
+
+    <keeper_server>
+        <tcp_port>9181</tcp_port>
+        <server_id>1</server_id>
+        <log_storage_path>/var/lib/clickhouse-keeper/coordination/log</log_storage_path>
+        <snapshot_storage_path>/var/lib/clickhouse-keeper/coordination/snapshots</snapshot_storage_path>
+        <coordination_settings>
+            <operation_timeout_ms>10000</operation_timeout_ms>
+            <session_timeout_ms>30000</session_timeout_ms>
+            <raft_logs_level>warning</raft_logs_level>
+        </coordination_settings>
+        <raft_configuration>
+            <server><id>1</id><hostname>clickhouse-keeper-1</hostname><port>9234</port></server>
+        </raft_configuration>
+    </keeper_server>
+</clickhouse>

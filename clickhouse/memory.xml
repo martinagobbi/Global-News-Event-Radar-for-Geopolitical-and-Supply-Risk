@@ -1,0 +1,25 @@
+<clickhouse>
+    <!--
+        Per-node memory ceiling.
+
+        By default a ClickHouse server assumes it is alone on the machine and
+        allows itself roughly 90% of the host's RAM. Six servers each making that
+        assumption on one host oversubscribe memory several times over, and the
+        kernel then kills them (exit code 137). That is what caused the repeated
+        restarts on this project.
+
+        Each node is capped explicitly here. Six nodes at 700 MB total about
+        4.2 GB, leaving room for Oracle (~1 GB), the three MongoDB nodes, the
+        three Keeper nodes and the pipeline within a 6 GB Docker allocation.
+        Raise these values if the Docker memory limit is raised.
+
+        NOTE: only SERVER-level settings belong in this file. Per-query limits
+        such as max_memory_usage are profile settings and live in users.xml;
+        placing them here prevents the server from starting.
+    -->
+    <max_server_memory_usage>1100000000</max_server_memory_usage>
+
+    <!-- Caches are per-node too, so keep them modest. -->
+    <mark_cache_size>134217728</mark_cache_size>
+    <uncompressed_cache_size>0</uncompressed_cache_size>
+</clickhouse>

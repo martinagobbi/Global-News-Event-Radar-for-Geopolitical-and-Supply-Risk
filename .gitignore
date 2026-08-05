@@ -56,3 +56,11 @@ Thumbs.db
 .env.local
 .env.stores
 .env.pipeline
+
+# 8. LARGE / DERIVED DATA
+# Raw GDELT caches are never committed: they are re-downloadable from GDELT and
+# from the project's GitHub Release. The SILVER snapshot in data/silver_seed IS
+# committed — it is small, already filtered, and is what fills the silver volume
+# at startup.
+**/data/raw/mentions/*
+**/data/release/*

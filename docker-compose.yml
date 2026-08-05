@@ -63,6 +63,10 @@ services:
       CLICKHOUSE_PORT: ${CLICKHOUSE_PORT:-9000}
       CLICKHOUSE_CLUSTER: gnews_cluster
       CLICKHOUSE_OP_TIMEOUT: "120"   # caps every ClickHouse op (lookup/insert/OPTIMIZE)
+      # How many replicas must acknowledge an append. 2 suits the six-node
+      # cluster; .env.testing sets 1, because a single replica can never satisfy
+      # a quorum of 2 and every insert would fail with error 285.
+      CLICKHOUSE_INSERT_QUORUM: ${CLICKHOUSE_INSERT_QUORUM:-2}
       LATEST_FILES_DIR: /data/latest_files
       STATUS_DIR: /data/status
       MENTION_ENRICH_WORKERS: "8"
@@ -143,10 +147,16 @@ volumes:
   shared_data:
 
 networks:
-  # Created and owned by docker-compose.stores.yml — bring the stores up first.
+  # PIPELINE_NET_EXTERNAL decides whether this tier JOINS the stores' network or
+  # CREATES its own, and is the only thing that differs between the two modes.
+  #
+  #   true  (default, and .env.testing)  — the stores run on this machine and have
+  #         already created `pipeline_network`; the pipeline attaches to it.
+  #   false (.env.full)                  — this machine runs only the pipeline, so
+  #         no such network exists and Compose must create one. Setting the
+  #         variable to false makes the `external` key vanish entirely, which is
+  #         what Compose needs; an override file could not achieve this, because
+  #         Compose MERGES files and can add or change a key but never remove one.
   pipeline_network:
-    external: true   # <--- KEEP THIS when stores + pipeline are on the SAME machine:
-                     #      the stores compose CREATES pipeline_network, and we join it.
-                     #      COMMENT IT OUT only when the pipeline runs on its OWN machine
-                     #      (no stores there to create it, so it makes its own network).
+    external: ${PIPELINE_NET_EXTERNAL:-true}
     name: pipeline_network

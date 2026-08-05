@@ -1,0 +1,17 @@
+<clickhouse>
+    <!--
+        TESTING topology: a SINGLE ClickHouse node, so it may take a far larger
+        share than any one node of the six-node cluster.
+
+        Selected by CH_MEMORY_CONFIG=memory.local.xml (the default). The
+        six-node cap lives in memory.xml and is selected by .env.full.
+
+        2.5 GB leaves room for Oracle (~1.1 GB), MongoDB, Keeper and the pipeline
+        within a 6 GB Docker allocation. With the 1.1 GB cluster cap in place a
+        single node ran out of memory (error 241) as soon as it handled the whole
+        workload alone.
+    -->
+    <max_server_memory_usage>2500000000</max_server_memory_usage>
+    <mark_cache_size>268435456</mark_cache_size>
+    <uncompressed_cache_size>0</uncompressed_cache_size>
+</clickhouse>
