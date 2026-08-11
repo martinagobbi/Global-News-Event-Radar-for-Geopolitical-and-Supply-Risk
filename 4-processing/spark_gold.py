@@ -160,6 +160,7 @@ def build_catalogue(events, mentions):
     mn = mentions.select(
         "GLOBALEVENTID", "MentionIdentifier", "InRawText", "Confidence",
         "MentionDocTone", "article_title", "article_keywords", "enriched",
+        "MentionTimeDate",
     ).filter(F.col("MentionIdentifier").isNotNull() & (F.trim("MentionIdentifier") != ""))
 
     df = mn.join(ev, on="GLOBALEVENTID", how="inner")
@@ -189,6 +190,11 @@ def build_catalogue(events, mentions):
           .withColumn("longitude", F.col("ActionGeo_Long").cast("double"))
           .withColumn("event_date", event_date)
           .withColumn("age_days", F.datediff(F.current_date(), event_date))
+          # The ARTICLE's own timestamp; event_date above is per-EVENT and so
+          # identical across a card. Mirrors gold._mention_time().
+          .withColumn("mention_time",
+                      F.to_timestamp(F.col("MentionTimeDate").cast("string"),
+                                     "yyyyMMddHHmmss"))
     )
 
     # De-duplicate: one row per URL, then one per (event, normalised headline).
@@ -277,7 +283,7 @@ ARTICLE_COLUMNS = [
     "doc_id", "document_identifier", "mention_identifier", "global_event_id",
     "in_raw_text", "confidence", "mention_doc_tone", "country", "risk_category",
     "goldstein", "cameo_code", "cameo_label", "actor", "latitude", "longitude",
-    "event_date", "age_days",
+    "event_date", "age_days", "mention_time",
 ]
 
 
@@ -324,16 +330,17 @@ WHEN MATCHED THEN UPDATE SET
     t.latitude            = s.latitude,
     t.longitude           = s.longitude,
     t.event_date          = s.event_date,
-    t.age_days            = s.age_days
+    t.age_days            = s.age_days,
+    t.mention_time        = s.mention_time
 WHEN NOT MATCHED THEN INSERT
     (doc_id, document_identifier, mention_identifier, global_event_id, in_raw_text,
      confidence, mention_doc_tone, country, risk_category, goldstein, cameo_code,
-     cameo_label, actor, latitude, longitude, event_date, age_days)
+     cameo_label, actor, latitude, longitude, event_date, age_days, mention_time)
 VALUES
     (s.doc_id, s.document_identifier, s.mention_identifier, s.global_event_id,
      s.in_raw_text, s.confidence, s.mention_doc_tone, s.country, s.risk_category,
      s.goldstein, s.cameo_code, s.cameo_label, s.actor, s.latitude, s.longitude,
-     s.event_date, s.age_days)
+     s.event_date, s.age_days, s.mention_time)
 """
 
 
@@ -370,7 +377,8 @@ _STAGE_DDL = {
           in_raw_text NUMBER(1), confidence NUMBER(3), mention_doc_tone FLOAT,
           country VARCHAR2(200), risk_category VARCHAR2(500), goldstein FLOAT,
           cameo_code VARCHAR2(10), cameo_label VARCHAR2(200), actor VARCHAR2(500),
-          latitude FLOAT, longitude FLOAT, event_date DATE, age_days NUMBER(4))
+          latitude FLOAT, longitude FLOAT, event_date DATE, age_days NUMBER(4),
+          mention_time DATE)
     """,
     "user_articles_stage": """
         CREATE TABLE user_articles_stage (
@@ -459,11 +467,39 @@ def publish(processed_uids: list[str]) -> None:
         # Purge orphans AFTER user_articles has been rebuilt, so the anti-join
         # sees the new sets. Mirrors oracle_writer.delete_orphan_articles(), and
         # is inside the same transaction as everything else here.
-        cur.execute(
-            "DELETE FROM articles a WHERE NOT EXISTS "
-            "(SELECT 1 FROM user_articles ua WHERE ua.doc_id = a.doc_id)")
-        if cur.rowcount:
-            logger.info("articles: removed %d orphaned rows", cur.rowcount)
+        #
+        # Triaged events are protected for the same reason as in the pandas path:
+        # the serving layer reads needs-action / monitoring / archive cards from
+        # `articles` WITHOUT joining user_articles, so those rows are legitimately
+        # unreferenced and must survive. Skipping the sweep is the safe failure.
+        sweep = ("DELETE FROM articles a WHERE NOT EXISTS "
+                 "(SELECT 1 FROM user_articles ua WHERE ua.doc_id = a.doc_id)")
+        binds: dict = {}
+        try:
+            import mongo_reader
+            protected = sorted(mongo_reader.get_all_tagged_event_ids())
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Skipping orphan sweep: could not read tags (%s)", exc)
+            protected = None
+
+        if protected is None:
+            pass                                    # sweep skipped entirely
+        else:
+            if protected:
+                chunks = [protected[i:i + 900] for i in range(0, len(protected), 900)]
+                clauses = []
+                for ci, chunk in enumerate(chunks):
+                    names = []
+                    for vi, value in enumerate(chunk):
+                        key = f"p{ci}_{vi}"
+                        binds[key] = value
+                        names.append(f":{key}")
+                    clauses.append(f"a.global_event_id IN ({', '.join(names)})")
+                sweep += " AND NOT (" + " OR ".join(clauses) + ")"
+            cur.execute(sweep, binds)
+            if cur.rowcount:
+                logger.info("articles: removed %d orphaned rows (%d triaged "
+                            "events protected)", cur.rowcount, len(protected))
 
         state = read_pipeline_status()
         cur.execute("DELETE FROM pipeline_status")

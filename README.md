@@ -939,6 +939,77 @@ The two published lookups do not cover an identical set of places. Reconciling t
 
 Reconciliation also required correcting errors in the published data — the FIPS list mislabels Guinea's code as Equatorial Guinea, and labels Slovakia's code as Czechoslovakia — and merging divergent spellings of the same place, such as `Cote dIvoire` against `Ivory Coast`, and `Columbia` against `Colombia`. The Palestinian territories are consolidated into a single entry carrying all five related codes, so that selecting it matches both actor and location.
 
+## Retention: the ten-year rule
+
+Everything else in the pipeline either appends or rebuilds. Silver is
+append-only, gold's `articles` is upserted, and until this rule existed **nothing
+in either store ever aged out** — both grew for as long as the pipeline ran, and
+the only removal was the manual `silver_snapshot.sh trim`.
+
+A daily job now deletes events that have gone quiet for a decade, together with
+everything hanging off them:
+
+| Store | What is removed |
+|----|----|
+| ClickHouse | the event from `gdelt_events`, and all of its `gdelt_mentions` |
+| Oracle | its rows in `user_articles`, then in `articles` |
+| MongoDB | any user's tag pointing at it |
+
+**Ten years is a starting point, not a fixed constant.** It is set by
+`RETENTION_YEARS`, so shortening it is a one-line change requiring no migration
+and no code edit — set the variable on the processing service and the next run
+uses the new cutoff. A shorter window is likely to be wanted once the store has
+real volume behind it; ten years was chosen simply because it cannot delete
+anything the project currently holds, which makes it a safe default to ship.
+
+**The clock read is `MentionTimeDate`, the article's own timestamp.** Expiry is
+`max(MentionTimeDate)` over an event's mentions — the newest article about it.
+
+**Measured from the newest article, not the event date.** A long-running story
+keeps attracting coverage: the event row is stamped once, but articles arrive for
+as long as anyone is still writing. Measuring from the event date would delete a
+story that is still being reported. Measuring from its most recent article means
+an event survives exactly as long as the world keeps talking about it, and ages
+out ten years after the last word. An event that never had a mention at all has
+no "most recent article", so it falls back to its own `DATEADDED` — otherwise
+such rows could never expire.
+
+**Why deleting mentions by `GLOBALEVENTID` is the same thing as checking each
+one's own `MentionTimeDate`.** Once an event is condemned, its mentions are
+removed by event id rather than re-tested individually. That is not a shortcut
+with different behaviour: if the *maximum* `MentionTimeDate` for an event is below
+the cutoff, then every one of its mentions is below it too, because the maximum
+is the largest. **No mention younger than the cutoff can be deleted.**
+
+The converse is deliberate: an old article belonging to a *still-active* event is
+**kept**. A 2015 report on a story that received fresh coverage last week survives
+with its event. Pruning it independently would also corrupt the card ordering,
+which is keyed on the oldest article a card holds — that key would drift forwards
+as a story's earliest coverage aged out from under it.
+
+**Order matters in both stores.** Mentions are deleted before events, so a crash
+between the two statements leaves a harmless mention-less event rather than
+mentions whose event has vanished — the state the referential-integrity check
+assumes cannot happen. In Oracle, `user_articles` goes before `articles`, so the
+join never briefly points at rows that are already gone.
+
+**Schedule.** Daily at 00:00, plus a catch-up on startup when a midnight was
+missed — a laptop that sleeps overnight would otherwise never clean up at all.
+The last run is recorded in `/data/state/retention.json`, written atomically, so
+a restart cannot lose or repeat it. `ENABLE_RETENTION=0` disables the job
+entirely; it is gated separately from the other triggers precisely because it is
+the only thing in the pipeline that deletes data.
+
+**On the shipped seed it deletes nothing.** The seed spans June–July 2026, so a
+ten-year cutoff lands in 2016 and nothing qualifies. That is expected: the rule is
+forward-looking. `RETENTION_YEARS` exists so the behaviour can be exercised
+without waiting — moving the cutoff to 2026-06-30 expired 8,939 events and 9,571
+mentions, left no survivor past the cutoff, and left no mention orphaned from its
+event.
+
+Every page that lists event cards says so in small print, because a card
+disappearing is normal behaviour rather than a fault.
+
 ## Orphaned gold rows, and why they can be removed safely
 
 The gold layer is normalised into `articles` (one row per document) and
@@ -968,6 +1039,30 @@ recompute: user A dropping an article that user B still holds does not remove it
 layer. No volume has to be recreated — an earlier version of this document
 claimed otherwise, and was wrong.
 
+**An orphan is never removed if any user has tagged it.** This is the one
+exception to the rule above, and it is not optional. If a user has filed an event
+as **red** (*Needs action from us*), **yellow** (*Look out for developments*) or
+archived it, every article of that event is kept — whether or not it still
+appears in anyone's `user_articles`, and whether the tag belongs to the user
+whose recompute triggered the sweep or to somebody else entirely.
+
+The reason is how the triage pages read. They fetch cards **straight from
+`articles`, deliberately without joining `user_articles`**, so that a filed card
+survives the user later dropping the territory that first brought it in. Such a
+row is legitimately unreferenced — precisely what the anti-join targets. Without
+this guard the sweep would delete it and leave the tag in MongoDB pointing at
+nothing: the card would vanish from the red or yellow page while still counted as
+tagged. The query therefore also excludes any article whose `global_event_id`
+appears in any user's tag set.
+
+Measured: narrowing one account's perimeter until its pool was empty removed 126
+rows and kept the 1 belonging to its tagged event, and the card stayed on the
+Needs action page.
+
+If the tag list cannot be read, the sweep is **skipped entirely** rather than run
+unguarded. Leaving a few unreachable rows costs a little space; deleting a card
+someone filed loses their work.
+
 `NOT EXISTS` rather than `NOT IN`: Oracle optimises the anti-join, and `NOT IN`
 would silently match nothing at all if any `doc_id` were ever NULL.
 
@@ -986,6 +1081,32 @@ residue either.
 
 The same sweep runs in the PySpark path, inside the publish transaction and after
 `user_articles` has been rebuilt, so both paths leave the same state.
+
+## How event cards are ordered
+
+Cards are ordered by **the timestamp of their oldest article, most recent first**
+— so the story that *started* most recently leads. The key answers "when did this
+begin?", which for supply-chain risk distinguishes a situation that emerged this
+morning from one that has been developing for a fortnight.
+
+The oldest article is taken across a card's **whole** article list, not the three
+shown before it is opened, so the ordering does not shift with the preview length.
+
+This needs a per-**article** timestamp, which the gold layer originally lacked:
+`event_date` comes from the event and is therefore identical for every article on
+a card. `articles.mention_time` carries silver's `MentionTimeDate` across to make
+the ordering possible. Rows written before that column existed hold `NULL` until
+the next recompute refills them, and cards with no timestamp at all sort last
+rather than breaking the comparison.
+
+Ordering is applied in the backend, in both `get_events_for_user()` and
+`get_events_by_ids()`, which between them feed the Radar View, Archive, Needs
+action and Looking out for developments pages — the frontend sorts nothing.
+
+*Previously* the order was `global_event_id` ascending: GDELT's internal
+allocation order, arbitrary to a reader. The confidence and tone keys that used to
+sit beside it still order the articles **within** a card, which is why the top
+article is the highest-confidence one.
 
 ## Why an article never appears twice in the gold layer
 

@@ -1,6 +1,7 @@
 import streamlit as st
 
 from components.event_card import render_event_card
+from components.retention_notice import render_retention_notice
 from data.api_client import BackendUnavailable
 from data.gold_layer import get_tagged_events
 from data.user_store import get_current_user, is_first_login
@@ -19,6 +20,7 @@ try:
         "Events you flagged with 'Look out for developments' in the Radar View. "
         "This list is yours alone."
     )
+    render_retention_notice()
     events = get_tagged_events(user_id, "monitor")
 except BackendUnavailable:
     st.error("🔴 The backend is unreachable. Please try again shortly.")

@@ -9,7 +9,7 @@ user radar). The three tables (created once by oracle-init/01_schema.sql):
     articles(doc_id RAW(32) PK, document_identifier, mention_identifier,
              global_event_id, in_raw_text, confidence, mention_doc_tone, country,
              risk_category, goldstein, cameo_code, cameo_label, actor,
-             latitude, longitude, event_date, age_days)
+             latitude, longitude, event_date, age_days, mention_time)
     user_articles(user_id, doc_id)   PK (user_id, doc_id)
     pipeline_status(status, timestamp_of_last_update)
 
@@ -67,22 +67,67 @@ WHEN MATCHED THEN UPDATE SET
     country = :country, risk_category = :risk_category, goldstein = :goldstein,
     cameo_code = :cameo_code, cameo_label = :cameo_label,
     actor = :actor, latitude = :latitude, longitude = :longitude,
-    event_date = :event_date, age_days = :age_days
+    event_date = :event_date, age_days = :age_days, mention_time = :mention_time
 WHEN NOT MATCHED THEN INSERT
     (doc_id, document_identifier, mention_identifier, global_event_id, in_raw_text,
      confidence, mention_doc_tone, country, risk_category, goldstein, cameo_code,
-     cameo_label, actor, latitude, longitude, event_date, age_days)
+     cameo_label, actor, latitude, longitude, event_date, age_days, mention_time)
 VALUES
     (:doc_id, :document_identifier, :mention_identifier, :global_event_id, :in_raw_text,
      :confidence, :mention_doc_tone, :country, :risk_category, :goldstein, :cameo_code,
-     :cameo_label, :actor, :latitude, :longitude, :event_date, :age_days)
+     :cameo_label, :actor, :latitude, :longitude, :event_date, :age_days, :mention_time)
 """
+
+
+# Columns added after the original schema shipped. oracle-init/01_schema.sql runs
+# ONCE, at first database creation, so an installation whose volume predates a
+# column would never get it — and the project has no migration mechanism. Each
+# entry is applied idempotently before the first write.
+_ADDED_COLUMNS = [
+    # (column, DDL type) — mention_time is the article's own MentionTimeDate from
+    # silver, which the card ordering needs; event_date is per-EVENT and so is the
+    # same for every article on a card.
+    ("mention_time", "DATE"),
+]
+
+_schema_checked = False
+
+
+def ensure_schema() -> None:
+    """
+    Add any post-launch columns that this database is missing.
+
+    Idempotent and safe to call repeatedly: ORA-01430 ("column being added already
+    exists in table") is the expected outcome on an up-to-date database and is
+    swallowed. Runs lazily before the first write rather than at import or
+    container start, so Oracle does not have to be reachable the instant the
+    processing layer boots.
+    """
+    global _schema_checked
+    if _schema_checked:
+        return
+    try:
+        with _connect() as conn:
+            cur = conn.cursor()
+            for column, ddl_type in _ADDED_COLUMNS:
+                try:
+                    cur.execute(f"ALTER TABLE articles ADD ({column} {ddl_type})")
+                    logger.info("Added missing column articles.%s", column)
+                except oracledb.DatabaseError as exc:
+                    (error,) = exc.args
+                    if error.code != 1430:      # ORA-01430: column already exists
+                        raise
+            conn.commit()
+        _schema_checked = True
+    except Exception as exc:  # noqa: BLE001 — retried on the next write
+        logger.warning("Could not verify the articles schema (%s); will retry", exc)
 
 
 def write_articles(rows: list[dict]) -> int:
     """Upsert article rows into the Oracle `articles` table (keyed on doc_id)."""
     if not rows:
         return 0
+    ensure_schema()
     # Derive the 32-byte key from the URL; callers only ever pass the URL.
     rows = [{**r, "doc_id": _doc_id(r["document_identifier"])} for r in rows]
     with _connect() as conn:
@@ -97,6 +142,7 @@ def write_articles(rows: list[dict]) -> int:
             longitude=oracledb.DB_TYPE_NUMBER,
             age_days=oracledb.DB_TYPE_NUMBER,
             event_date=oracledb.DB_TYPE_DATE,
+            mention_time=oracledb.DB_TYPE_DATE,
         )
         cur.executemany(_MERGE_ARTICLES, rows)
         affected = cur.rowcount
@@ -132,9 +178,10 @@ def write_user_articles(user_id: str, document_identifiers: list[str]) -> int:
     return inserted
 
 
-def delete_orphan_articles() -> int:
+def delete_orphan_articles(protected_event_ids=()) -> int:
     """
-    Remove rows from `articles` that no `user_articles` row references.
+    Remove rows from `articles` that no `user_articles` row references AND whose
+    event nobody has triaged.
 
     `articles` is written with MERGE (upsert) and never deleted from, so it only
     ever grows. `user_articles`, by contrast, is rebuilt per user, so an article
@@ -142,25 +189,49 @@ def delete_orphan_articles() -> int:
     silver it came from is trimmed away. Those rows are unreachable — serving
     joins user_articles -> articles — but they accumulate indefinitely.
 
-    Deleting them is precise and destroys nothing else: rows still referenced by
-    ANY user are kept by the NOT EXISTS, `user_articles` is untouched, and so are
-    MongoDB (profiles, tags) and the silver layer. This is why the cleanup does
-    not require recreating the Oracle volume.
+    `protected_event_ids` is what stops that cleanup eating triaged cards. The
+    serving layer reads needs-action / monitoring / archive events straight from
+    `articles`, without joining `user_articles`, precisely so a filed card
+    survives the user dropping the territory that first brought it in. Such a row
+    IS unreferenced, and without this guard the sweep would delete it — the tag
+    would survive in MongoDB pointing at an article that no longer exists.
+
+    Deleting the rest is precise and destroys nothing else: rows still referenced
+    by ANY user are kept by the NOT EXISTS, `user_articles` is untouched, and so
+    are MongoDB and the silver layer. This is why the cleanup does not require
+    recreating the Oracle volume.
 
     NOT EXISTS rather than NOT IN: an anti-join is what Oracle optimises for here,
     and NOT IN would return nothing at all if any doc_id were ever NULL.
     """
+    ids = [str(e) for e in protected_event_ids if str(e).strip()]
     sql = (
         "DELETE FROM articles a WHERE NOT EXISTS "
         "(SELECT 1 FROM user_articles ua WHERE ua.doc_id = a.doc_id)"
     )
+    binds: dict = {}
+    if ids:
+        # Oracle has no list binding, and its IN list caps at 1000 entries, so
+        # long tag sets are split into OR-ed chunks.
+        chunks = [ids[i:i + 900] for i in range(0, len(ids), 900)]
+        clauses = []
+        for ci, chunk in enumerate(chunks):
+            names = []
+            for vi, value in enumerate(chunk):
+                key = f"p{ci}_{vi}"
+                binds[key] = value
+                names.append(f":{key}")
+            clauses.append(f"a.global_event_id IN ({', '.join(names)})")
+        sql += " AND NOT (" + " OR ".join(clauses) + ")"
+
     with _connect() as conn:
         cur = conn.cursor()
-        cur.execute(sql)
+        cur.execute(sql, binds)
         removed = cur.rowcount
         conn.commit()
     if removed:
-        logger.info("Removed %d orphaned rows from Oracle articles", removed)
+        logger.info("Removed %d orphaned rows from Oracle articles "
+                    "(%d triaged events protected)", removed, len(ids))
     return removed
 
 

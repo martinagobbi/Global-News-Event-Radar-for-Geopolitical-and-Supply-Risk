@@ -17,7 +17,7 @@ The per-user filter no longer lives here: it is pushed down into ClickHouse
 filter returns into the Oracle `articles` schema.
 """
 
-from datetime import date
+from datetime import date, datetime
 
 
 def _f(v):
@@ -44,6 +44,25 @@ def _event_date(day):
     if len(d) == 8 and d.isdigit():
         try:
             return date(int(d[:4]), int(d[4:6]), int(d[6:8]))
+        except ValueError:
+            return None
+    return None
+
+
+def _mention_time(value):
+    """
+    GDELT's 14-digit YYYYMMDDHHMMSS -> datetime, or None if unparseable.
+
+    This is the ARTICLE's own timestamp, taken from silver's MentionTimeDate. It
+    is distinct from event_date, which comes from the event and is therefore the
+    same for every article on a card — so only this column can order cards by the
+    oldest article they carry.
+    """
+    t = _s(value).strip()
+    if len(t) == 14 and t.isdigit():
+        try:
+            return datetime(int(t[:4]), int(t[4:6]), int(t[6:8]),
+                            int(t[8:10]), int(t[10:12]), int(t[12:14]))
         except ValueError:
             return None
     return None
@@ -80,6 +99,7 @@ def _article_row(m: dict, ev: dict) -> dict:
         "longitude":           _f(ev.get("ActionGeo_Long")),
         "event_date":          ed,
         "age_days":            age,
+        "mention_time":        _mention_time(m.get("MentionTimeDate")),
     }
 
 

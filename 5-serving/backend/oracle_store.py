@@ -35,7 +35,9 @@ TABLE articles (
     latitude             FLOAT,
     longitude            FLOAT,
     event_date           DATE,
-    age_days             NUMBER(4)
+    age_days             NUMBER(4),
+    mention_time         DATE     -- the ARTICLE's own timestamp; event_date is
+                                  -- per-EVENT and so identical across a card
 )
 
 TABLE user_articles (
@@ -178,6 +180,34 @@ def _sort_and_cap(articles: list[dict], limit: int = 20) -> list[dict]:
     return _dedupe_by_title(articles)[:limit]
 
 
+def _oldest_article_time(articles: list[dict]):
+    """
+    The timestamp of the earliest article on a card — when the story began.
+
+    Computed over the card's WHOLE article list, not the few shown before it is
+    opened, so the ordering does not shift as the preview length changes. Returns
+    None when no article has a timestamp: rows written before `mention_time`
+    existed have NULL there until the next recompute refills them from silver.
+    """
+    times = [a["mention_time"] for a in articles if a.get("mention_time")]
+    return min(times) if times else None
+
+
+def _sort_cards_newest_first(cards: list[dict]) -> list[dict]:
+    """
+    Order cards by the timestamp of their oldest article, most recent first — so
+    the story that STARTED most recently leads.
+
+    Cards with no timestamp at all sort last rather than raising on a None
+    comparison; among themselves they keep the order the database returned.
+    """
+    return sorted(
+        cards,
+        key=lambda c: (c["oldest_article_time"] is not None, c["oldest_article_time"]),
+        reverse=True,
+    )
+
+
 def _build_event_card(global_event_id: str, raw_articles: list[dict]) -> dict:
     filtered, inrawtext_filtered = _apply_inrawtext_filter(raw_articles)
     articles = _sort_and_cap(filtered)
@@ -201,6 +231,9 @@ def _build_event_card(global_event_id: str, raw_articles: list[dict]) -> dict:
         "age_days":           meta.get("age_days"),
         "top_article_url":    top_url,
         "inrawtext_filtered": inrawtext_filtered,
+        # When this story began, used to order the cards. Computed over the full
+        # article list, not just the ones visible before the card is opened.
+        "oldest_article_time": _oldest_article_time(articles),
         "articles":           articles,
     }
 
@@ -235,7 +268,8 @@ _EVENTS_SQL = """
         a.latitude,
         a.longitude,
         a.event_date,
-        a.age_days
+        a.age_days,
+        a.mention_time
     FROM user_articles ua
     JOIN articles a ON ua.doc_id = a.doc_id
     WHERE ua.user_id = :user_id
@@ -260,7 +294,8 @@ _SINGLE_EVENT_SQL = """
         a.latitude,
         a.longitude,
         a.event_date,
-        a.age_days
+        a.age_days,
+        a.mention_time
     FROM user_articles ua
     JOIN articles a ON ua.doc_id = a.doc_id
     WHERE ua.user_id = :user_id
@@ -286,7 +321,8 @@ def get_events_for_user(user_id: str, max_age_days: int = 90) -> list[dict]:
         row["url"] = row["document_identifier"]
         groups.setdefault(eid, []).append(row)
 
-    return [_build_event_card(eid, arts) for eid, arts in groups.items()]
+    return _sort_cards_newest_first(
+        [_build_event_card(eid, arts) for eid, arts in groups.items()])
 
 
 def get_event_articles(user_id: str, global_event_id: str) -> dict:
@@ -339,7 +375,8 @@ def get_events_by_ids(global_event_ids: list[str]) -> list[dict]:
             a.global_event_id, a.document_identifier, a.mention_identifier,
             a.in_raw_text, a.confidence, a.mention_doc_tone, a.country,
             a.risk_category, a.goldstein, a.cameo_code, a.cameo_label,
-            a.actor, a.latitude, a.longitude, a.event_date, a.age_days
+            a.actor, a.latitude, a.longitude, a.event_date, a.age_days,
+            a.mention_time
         FROM articles a
         WHERE a.global_event_id IN ({placeholders})
         ORDER BY a.global_event_id, a.confidence DESC, ABS(a.mention_doc_tone) ASC
@@ -355,7 +392,8 @@ def get_events_by_ids(global_event_ids: list[str]) -> list[dict]:
         eid = str(row["global_event_id"])
         row["url"] = row["document_identifier"]
         groups.setdefault(eid, []).append(row)
-    return [_build_event_card(eid, arts) for eid, arts in groups.items()]
+    return _sort_cards_newest_first(
+        [_build_event_card(eid, arts) for eid, arts in groups.items()])
 
 
 def get_events_version(user_id: str) -> str | None:

@@ -23,6 +23,7 @@ from components.recompute_notice import (
     render_no_matches_notice,
     render_recompute_notice,
 )
+from components.retention_notice import render_retention_notice
 
 
 STATUS_POLL_SECONDS  = 30
@@ -102,6 +103,7 @@ elif (
 header_left, header_right = st.columns([3, 1])
 with header_left:
     st.caption("Events are filtered according to your registered territories and supply-chain keywords.")
+    render_retention_notice()
 with header_right:
     manual_refresh = st.button("Refresh now")
 

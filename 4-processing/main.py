@@ -44,6 +44,7 @@ import countries
 import mongo_reader
 import oracle_writer
 import gold
+import retention
 import triggers
 
 logging.basicConfig(
@@ -138,6 +139,22 @@ def health() -> dict:
     return {"status": "processing layer is running"}
 
 
+def _sweep_orphans() -> int:
+    """
+    Delete gold `articles` rows nobody references, protecting triaged events.
+
+    Skips the sweep entirely if the tag list cannot be read. Leaving a few
+    unreachable rows behind costs a little space; deleting a card someone filed
+    under "needs action" loses their work, so the safe failure is to do nothing.
+    """
+    try:
+        protected = mongo_reader.get_all_tagged_event_ids()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Skipping orphan sweep: could not read tags (%s)", exc)
+        return 0
+    return oracle_writer.delete_orphan_articles(protected)
+
+
 def recompute_all() -> dict:
     """
     Recompute every user's `user_articles`, refresh `articles`, and mirror the
@@ -165,7 +182,7 @@ def recompute_all() -> dict:
     # still unreferenced is genuinely orphaned — narrowed preferences, or silver
     # that has been trimmed away. This is also what makes the documented
     # `trim seed` + recompute sequence leave the gold layer fully consistent.
-    n_orphans = oracle_writer.delete_orphan_articles()
+    n_orphans = _sweep_orphans()
     state = read_pipeline_status().get("state", "OK")
     oracle_writer.write_pipeline_status(state, datetime.now(timezone.utc))
     return {"articles": n_articles, "orphans_removed": n_orphans,
@@ -202,7 +219,7 @@ def recompute_user(user_id: str) -> int | None:
     # This user's set has just been replaced, so articles they dropped may now be
     # referenced by nobody. Rows any OTHER user still references are kept by the
     # anti-join, so purging here is safe even though only one user was recomputed.
-    oracle_writer.delete_orphan_articles()
+    _sweep_orphans()
     return n
 
 
@@ -232,7 +249,7 @@ def _report_silver_stale(idle_seconds: int) -> None:
 
 @app.on_event("startup")
 def _startup() -> None:
-    """Start the background triggers (silver watermark + Mongo change stream)."""
+    """Start the background triggers and the daily retention job."""
     if os.getenv("ENABLE_TRIGGERS", "1") == "1":
         triggers.start(
             ch_factory=_ch,
@@ -240,6 +257,10 @@ def _startup() -> None:
             recompute_user=recompute_user,
             report_stale=_report_silver_stale,
         )
+    # Separately gated: retention is the only thing in the pipeline that deletes
+    # data, so it must be possible to run the processing layer without it.
+    if os.getenv("ENABLE_RETENTION", "1") == "1":
+        retention.start(ch_factory=_ch)
 
 
 if __name__ == "__main__":

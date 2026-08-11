@@ -94,3 +94,28 @@ def get_all_profiles() -> list[dict]:
 def users_collection():
     """Return the user-profiles collection (used by the change-stream trigger)."""
     return _get_collection()
+
+
+def get_all_tagged_event_ids() -> set[str]:
+    """
+    Every GLOBALEVENTID any user has triaged, across all users.
+
+    The serving layer reads triaged cards (needs action / monitoring / archive)
+    straight from `articles`, deliberately WITHOUT joining `user_articles`, so
+    that a tagged card survives the user later dropping the territory that first
+    brought it in. The orphan sweep must therefore treat these events as
+    protected: an article can be unreferenced by every user_articles row and
+    still be the only copy of something someone has filed.
+
+    Tags are stored one document per user, `{_id: user_id, tags: {event_id: tag}}`.
+    Returns an empty set on any error — the caller then skips the sweep entirely
+    rather than risk deleting a card it could not prove was safe to delete.
+    """
+    try:
+        ids: set[str] = set()
+        for doc in _get_db()["tags"].find({}, {"tags": 1}):
+            ids.update(str(k) for k in (doc.get("tags") or {}))
+        return ids
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not read tagged event ids: %s", exc)
+        raise

@@ -43,6 +43,10 @@ CREATE TABLE radar.articles (
   actor               VARCHAR2(500),
   latitude            FLOAT,
   longitude           FLOAT,
+  -- The article's own timestamp (silver's MentionTimeDate). event_date below is
+  -- per-EVENT, so it is identical for every article on a card; this is what lets
+  -- the serving layer order cards by the oldest article each one carries.
+  mention_time        DATE,
   event_date          DATE,
   age_days            NUMBER(4)
 );
