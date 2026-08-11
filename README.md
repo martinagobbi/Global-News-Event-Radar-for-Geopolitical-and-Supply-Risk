@@ -129,7 +129,7 @@ docker run --rm --network pipeline_network -v "$PWD/5-serving:/seed:ro" \
 Either way it prints one line per account and is safe to repeat — the profiles are
 upserted, so re-running restores them to their seeded state.
 
-The `restore` step loads `data/silver_seed/*.parquet` — 16 MB committed to this
+The `restore` step loads `data/silver_seed/*.parquet` — 15 MiB committed to this
 repository, holding a fully filtered and enriched 30-day history — straight into
 the ClickHouse volume. It takes about **three seconds**. Gold follows on its own:
 the processing layer's watermark trigger notices silver has grown and builds
@@ -414,6 +414,22 @@ docker exec pipeline_processing python3 -c "import main; main.recompute_all()"  
 takes an explicit cutoff. Skip all three to keep the live history. In intended
 mode the first command uses `--env-file .env.full`.
 
+**What the third command does to the gold layer, precisely.** `trim` only touches
+silver, so the rebuild is what propagates the change — and it does so
+asymmetrically:
+
+- **`user_articles` is rebuilt from scratch per user** (`DELETE … WHERE user_id`,
+  then re-insert). Every article that no longer survives the trim disappears from
+  the user's pool, so **nothing removed from silver is still visible on the
+  dashboard**.
+- **`articles` is upserted, never deleted** (`MERGE INTO`). Rows for trimmed
+  articles remain in the table as orphans.
+
+Serving joins `user_articles → articles`, so an orphan is unreachable and harmless
+— it costs a little space and nothing else. If you want `articles` itself empty of
+them, the volume must be recreated, which also destroys the profiles and tags
+stored alongside it.
+
 **Testing mode:**
 
 ```bash
@@ -589,7 +605,7 @@ nine ClickHouse and Keeper volumes is declared with an interpolated name:
 modes is then purely a matter of compose arguments, with **no manual step and no
 data destroyed in either direction** — each mode simply reattaches to the silver
 it last had. The cost is that each mode keeps its own copy of silver, filled
-independently by `./bootstrap/silver_snapshot.sh restore`; at 16 MB and about
+independently by `./bootstrap/silver_snapshot.sh restore`; at 15 MiB and about
 three seconds from the committed seed, that is a better trade than a destructive
 manual step.
 
@@ -645,7 +661,7 @@ The system is distributed at the storage layer.
 
 ## Why the pre-loaded silver is small, and why it took so long to produce
 
-The silver seed committed to this repository is around 16 MB, which is easy to
+The silver seed committed to this repository is around 15 MiB, which is easy to
 mistake for a small amount of work. It is not. Even though the volume's ready-made
 data looks small in size, querying it from GDELT and letting the pipeline turn it
 into silver took about half a week. This is because the bronze layer being put
@@ -657,7 +673,7 @@ The figures for the 30-day window shipped here:
 | Stage | Size |
 |----|----|
 | Bronze — the raw GDELT archives that had to be downloaded | ≈ 410 MB |
-| Silver — after filtering, validation and enrichment | **16 MB** |
+| Silver — after filtering, validation and enrichment | **15 MiB** |
 
 Two reductions compound. The supply-chain relevance filter discards roughly 97%
 of events, keeping about 31 of every 979 in a slice; and Parquet's columnar
@@ -683,7 +699,7 @@ can carry, plus a command that loads them into the volume on whatever machine ru
 it.
 
 **The files.** `data/silver_seed/` holds two Parquet files, `gdelt_events.parquet`
-(7.0 MB, 103,972 rows) and `gdelt_mentions.parquet` (8.5 MB, 111,430 rows) — 16 MB
+(7.0 MiB, 103,972 rows) and `gdelt_mentions.parquet` (8.1 MiB, 111,430 rows) — 15 MiB
 in total, against the 410 MB of raw archives they were distilled from. They are
 committed; `data/release/` and `data/raw/` are not.
 
@@ -968,15 +984,15 @@ Nothing is deleted by any of this. An abandoned slice is **moved**, so it remain
 available for inspection, and can be replayed by copying it back or loaded
 deliberately with `bootstrap/bulk_load.py`.
 
-**Silence is reported rather than assumed to be health.** Three checks cover the
-three ways the pipeline can go quiet:
+**Silence is reported rather than assumed to be health.** Four checks cover the
+four ways the pipeline can go quiet:
 
 | Check | Where | Threshold | What it catches |
 |----|----|----|----|
-| No new files in `latest_files` | validation | 35 min | parsing or ingestion has stopped |
-| `latest_files` never drains | parsing | 30 min | validation has stalled; publishing is blocked |
-| Silver watermark not advancing | processing | 45 min | nothing is reaching the store; gold is frozen |
-| Gold older than the clock allows | serving backend | 60 min | the processing layer itself is down, so nobody is left to report |
+| No new files in `latest_files` | validation | `STALE_LIMIT_SECONDS` 35 min | parsing or ingestion has stopped |
+| `latest_files` never drains | parsing | `BACKPRESSURE_MAX_WAIT` 30 min | validation has stalled; publishing is blocked |
+| Silver watermark not advancing | processing | `SILVER_STALE_SECONDS` 45 min | nothing is reaching the store; gold is frozen |
+| Gold older than the clock allows | serving backend | `PIPELINE_STALE_SECONDS` 60 min | the processing layer itself is down, so nobody is left to report |
 
 The last of these is the reason the backend does not simply trust the stored
 status. The processing layer writes `ERROR` when it *notices* silver has stopped
@@ -984,6 +1000,35 @@ advancing — but if that layer is the thing that died, it writes nothing at all
 and the last row it wrote says `OK` for as long as Oracle keeps answering.
 Comparing the timestamp against the clock is what catches a pipeline with nobody
 left to report on it.
+
+### Why these thresholds are the right size
+
+Every threshold is derived from the **15-minute release cadence**, and each sits
+in the same band: long enough that ordinary jitter cannot trip it, short enough
+that a real stall is noticed within the hour.
+
+| Bound | Value | Reasoning |
+|----|----|----|
+| `SLICE_RETRIEVAL_DEADLINE` | 600 s | Two thirds of one release interval. A file still absent after 10 minutes is very unlikely to appear, and continuing to wait would delay the *next* slice — the deadline must be shorter than the cadence or slices would queue. |
+| `RETRY_TICK` | 60 s | Gives 10 attempts inside the deadline: frequent enough to catch a file published a minute late, rare enough not to hammer GDELT. |
+| `ENRICH_TIMEOUT_SECONDS` | 600 s | The single largest cost in a cycle, and deliberately capped below the cadence so validation can never take longer to process a slice than GDELT takes to publish the next one. |
+| `CLICKHOUSE_OP_TIMEOUT` | 120 s | Bounds every store operation, so a cycle is enrichment (≤ 600 s) plus a bounded number of bounded operations — comfortably inside 15 minutes. Measured, a live slice costs about a minute end to end, roughly 15× headroom. |
+| `BACKPRESSURE_MAX_WAIT` | 30 min | Two missed releases. One slow slice is normal; two consecutive intervals with the consumer never draining is not. |
+| `STALE_LIMIT_SECONDS` | 35 min | Two missed releases plus a margin for a slice that arrives late. Set fractionally above the 30-minute back-pressure bound so the *upstream* silence is reported by whichever layer actually observes it first. |
+| `SILVER_STALE_SECONDS` | 45 min | Three missed releases. Sits above the two upstream checks on purpose: if parsing or validation is going to report the problem, it should do so before processing escalates it. |
+| `PIPELINE_STALE_SECONDS` | 60 min | Four missed releases, and the last line of defence. Deliberately the loosest, because it is the only check that fires when *every* other reporter is dead, and a user-visible "your briefing is stale" banner should be certain rather than twitchy. |
+
+The ordering is the point: **30 → 35 → 45 → 60 minutes**, escalating outward from
+the layer closest to the problem to the one furthest from it. Whichever component
+is still alive reports first, and the backend's clock comparison catches the case
+where none of them are.
+
+**Bounded attempts, not bounded time, for processing.** Retrieval has a wall-clock
+deadline because a file that has not been published will never be published.
+*Processing* is bounded by **attempt count** instead (`MAX_SLICE_ATTEMPTS` and
+`MAX_PAIR_ATTEMPTS`, both 3). A wall-clock limit there would discard slices that
+were merely slow — a transient ClickHouse pause would start throwing away good
+data — whereas three failures of the same file is evidence about the file itself.
 
 **Gaps are stated, not silently back-filled.** The poller fetches whatever
 `lastupdate.txt` currently points at, so slices published while it was stopped are
@@ -1036,17 +1081,91 @@ filters in force.
 
 **Every 15 minutes**, ingestion reads `lastupdate.txt` and retrieves the current events and mentions archives. A representative slice contains approximately 979 events and 3,222 mentions.
 
-**Only the English feed is ingested.** GDELT publishes each slice twice: an English feed at `lastupdate.txt`, and a translingual (non-English) one at `lastupdate-translation.txt` whose files are named `<slice>.translation.export.CSV` and `<slice>.translation.mentions.CSV`. Each feed also carries a GKG file, which this project does not use. So of the four events/mentions CSVs GDELT publishes per slice, **two are retrieved**. The translingual feed is a deliberate, documented gap rather than an oversight — and the layers below are already prepared for it: `gdelt.classify()` recognises the translation variants, and the parsing layer derives `<slice>.translation` as a slice identifier distinct from `<slice>`, so the two feeds would pair independently with no further change.
+### Stage 1 — retrieval, and why the hand-off is atomic
 
-Anyone adding it should know that **the translingual feed runs one full slice — 15 minutes — behind the English one** (measured, not assumed). The two can therefore never be assembled into a single atomic payload; each feed must be its own unit, which is exactly how the hand-off below is built.
+Ingestion assembles a slice in a **staging directory** and moves it into the
+hand-off directory only when one of two things is true: the slice is **complete**,
+or its **retrieval deadline** has expired (`SLICE_RETRIEVAL_DEADLINE`, 600 s
+measured from the slice's own timestamp). While a file is missing and the deadline
+has not passed, only *that* file is re-attempted, every `RETRY_TICK` (60 s),
+addressed directly by its slice timestamp rather than by whatever `lastupdate.txt`
+currently advertises.
 
-**The hand-off is atomic per slice.** The two CSVs are assembled in a staging directory and moved into the hand-off directory only when the slice is complete, or when its retrieval deadline (`SLICE_RETRIEVAL_DEADLINE`, 600 s from the slice's own timestamp) expires. While a file is missing and the deadline has not passed, only that file is re-attempted, every `RETRY_TICK` (60 s), addressed directly by its slice timestamp. The poll cycle then sleeps the *remainder* of the 15 minutes, so retrying never pushes the cadence out.
+Before staging existed, each CSV was written to the hand-off directory the instant
+it was extracted, so a slice could be published half-finished while its partner was
+still downloading. Staging closes that window: files are moved with `os.replace()`,
+**mentions last**, mirroring the ordering the parsing layer already relies on.
 
-Consequently **anything in the hand-off directory is final**, which is what lets the layers below act on a partial slice instead of waiting for a partner that will never arrive. A partial slice is still useful: events alone update the store, because `gdelt_events` is a `ReplacingMergeTree` keyed on `GLOBALEVENTID` with `DATEADDED` as the version; and mentions alone attach to events already stored, because the referential-integrity check resolves against *this events file **or** the store*. Validation accepts one file or two.
+The consequence is the property the rest of the pipeline is built on:
+**anything in the hand-off directory is final**. A lone file there is not "half a
+slice still arriving" — it is all there will ever be. That is what allows the
+layers below to act on a partial slice instead of waiting for a partner that will
+never come, and a partial slice is still useful:
 
-**Bronze to silver.** Events are filtered for supply-chain relevance; approximately 31 of 979 are retained. Mentions are retained only when the event they reference exists, either in the same slice or already in the store. Surviving mentions are enriched with article title and keywords, within the time budget. Both tables are then appended to ClickHouse, and the events deduplication is triggered. The bronze files are deleted at each hand-off, so the bronze layer is continuously cleared.
+- **events alone** update the store, because `gdelt_events` is a
+  `ReplacingMergeTree` keyed on `GLOBALEVENTID` with `DATEADDED` as the version,
+  so a re-published event supersedes the stored copy;
+- **mentions alone** attach to events already stored, because the
+  referential-integrity check resolves against *this events file **or** the store*.
 
-**Silver to gold.** For each user, events are filtered by territory — CAMEO actor codes **or** FIPS location codes — and the resulting mentions are filtered by keyword. Every mention is searched in **all three** fields: the article URL, the article title and the extracted article keywords. A keyword matches when **all of its tokens** are present, where a token is a single word: `silicon wafers` requires both *silicon* and *wafers*, but not adjacently. Singular and plural collapse onto one another, so `chip` and `chips` are the same word. The territory and keyword conditions are combined with **and**: an article must match both perimeters. Because both filters are narrow, a single 15-minute slice frequently matches nothing for a given user, which is expected behaviour rather than a fault.
+The poll cycle then sleeps the **remainder** of the 15 minutes rather than a fixed
+15, so a cycle that spent time retrying does not push the next one out to T+25 and
+drift further every time.
+
+### Stage 2 — bronze to silver: two filters, applied in different layers
+
+**The relevance filter (parsing).** `parser.passes_filter()` requires
+`F1 AND (F2 OR F3) AND has_source_url`:
+
+| | Criterion | Backed by |
+|----|----|----|
+| **F1** | the 4-digit `EventCode` is a supply-chain-relevant CAMEO code, **or** the 2-digit `EventRootCode` is one of the relevant macro categories | 32 event codes; 6 root codes (14 protest, 15 force, 17 coerce, 18 assault, 19 fight, 20 mass violence) |
+| **F2** | an actor carries a relevant type or known-group code | 5 type codes, 8 known groups |
+| **F3** | a supply-chain word appears in either actor name or in the source URL | 35 keywords (*port, shipping, freight, customs, tariff, …*) |
+
+F1 is mandatory, so an article about shipping that is not a relevant *event* is
+still discarded. Roughly **31 of 979** events survive per slice. This filter is
+independent of users: it decides what is worth storing at all.
+
+**The referential-integrity filter (validation).** A mention is kept only if its
+`GLOBALEVENTID` exists **in the events file it arrived with, or already in
+ClickHouse**. The store lookup is what makes a mentions-only slice viable, and it
+also lets a mention attach to an event detected hours earlier. Unmatched mentions
+are dropped and the file on disk is rewritten without them.
+
+**Enrichment sits between the two**, and only touches the survivors — the
+referential filter runs first, so no rejected mention is ever scraped. Newspaper3k
+fetches each unique URL once across 8 threads, extracting `article_title` and,
+via NLTK, `article_keywords`. The whole step is bounded by
+`ENRICH_TIMEOUT_SECONDS` (600 s **per slice**, not per URL); anything unscraped
+when the budget expires is stored with empty fields and `enriched = 0`. A mention
+counts as enriched when a **title** was obtained.
+
+### Stage 3 — silver to gold: the per-user filter
+
+Two conditions, combined with **and** — an article must satisfy both:
+
+**Territory.** An event qualifies if *either* code system matches: CAMEO codes
+against the actor columns (`Actor1/Actor2CountryCode`), or FIPS codes against the
+location columns (`ActionGeo_`/`Actor1Geo_`/`Actor2Geo_CountryCode`). Keeping both
+is deliberate — measured on the current gold, 84 articles matched on location
+only, 17 on actor only and 63 on both.
+
+**Keywords.** Every mention is searched in **all three** text fields — the URL, the
+article title and the extracted keywords — regardless of its `enriched` flag. A
+keyword matches when **all of its tokens** are present, a token being a single
+word: `silicon wafers` needs both *silicon* and *wafers*, but not adjacently.
+Singular and plural collapse onto one another, so `chip` and `chips` are the same
+word. Matching is whole-word, so `chip` does not match `chipotle`.
+
+Two earlier rules were removed because they were measurably wrong. Keywords were
+matched as **contiguous phrases**, so `silicon wafers` matched 0 of 99,175 enriched
+mentions. And each row was routed to exactly **one** field depending on `enriched`,
+which meant that of those 99,175 rows, the 170 whose URL contained a supply-chain
+term were never checked against it — enrichment was actively destroying matches.
+
+Because both filters are narrow, a single 15-minute slice frequently matches
+nothing for a given user. That is expected behaviour, not a fault.
 
 Two earlier rules were removed because they were measurably wrong. Keywords were matched as **contiguous phrases**, so `silicon wafers` matched 0 of 99,175 enriched mentions — a headline says "chip firm buys wafer plant", never the procurement phrase verbatim. And each row was routed to exactly **one** field depending on its `enriched` flag, which meant that of the 99,175 enriched rows, the 170 whose URL contained a supply-chain term were never checked against it — enrichment was actively destroying matches.
 
