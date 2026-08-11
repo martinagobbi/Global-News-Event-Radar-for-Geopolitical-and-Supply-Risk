@@ -153,7 +153,9 @@ re-inserting the same rows collapses back to the same counts.
 > ```
 >
 > This is the same work the trigger performs, run on demand. It is safe to repeat:
-> `user_articles` is rebuilt per user from scratch, and `articles` is upserted.
+> `user_articles` is rebuilt per user from scratch, and `articles` is upserted and
+> then swept of rows no user still references — see
+> [Orphaned gold rows](#orphaned-gold-rows-and-why-they-can-be-removed-safely).
 
 This starts four store containers rather than thirteen, which is what makes the
 stack usable on a machine with 8 GB of RAM.
@@ -655,7 +657,7 @@ The system is distributed at the storage layer.
 - **Oracle — a single node.** This is a deliberate and acknowledged limitation: the free Oracle edition supports neither RAC nor Data Guard, so the gold layer cannot be replicated across machines without a licensed edition. Its resilience is restricted to container restart with a persistent volume. Were multi-machine redundancy of the gold layer required, PostgreSQL with streaming replication would be the pragmatic substitute; nothing in the design depends on Oracle specifically.
 - **Hand-offs.** The pipeline writes to ClickHouse with `insert_quorum`, so an append is acknowledged only once it has reached a quorum of replicas. MongoDB writes use majority acknowledgement. Oracle writes are committed transactionally, and the row counts the server reports are compared against the counts submitted.
 
-**PySpark** provides the horizontally distributed path from silver to gold, as an alternative to the in-process implementation. Its parallelism is genuine at all three stages: the read is a **partitioned JDBC read**, in which Spark divides the `GLOBALEVENTID` range into `numPartitions` disjoint ranges and issues one concurrent query per range, so each executor retrieves only its own slice; the events-to-mentions join is a distributed shuffle join; and `df.write.jdbc()` opens one connection per partition, so the write is executed by the executors in parallel. Because no result is materialised centrally, no row cap is required. Spark's JDBC writer offers only `append` and `overwrite` and cannot upsert, so the job writes to staging tables that it creates and drops itself, and a single subsequent SQL statement publishes them into the live tables with precisely the semantics of the in-process path: `MERGE` for `articles`, delete-and-reinsert per user for `user_articles`.
+**PySpark** provides the horizontally distributed path from silver to gold, as an alternative to the in-process implementation. Its parallelism is genuine at all three stages: the read is a **partitioned JDBC read**, in which Spark divides the `GLOBALEVENTID` range into `numPartitions` disjoint ranges and issues one concurrent query per range, so each executor retrieves only its own slice; the events-to-mentions join is a distributed shuffle join; and `df.write.jdbc()` opens one connection per partition, so the write is executed by the executors in parallel. Because no result is materialised centrally, no row cap is required. Spark's JDBC writer offers only `append` and `overwrite` and cannot upsert, so the job writes to staging tables that it creates and drops itself, and a single subsequent SQL statement publishes them into the live tables with precisely the semantics of the in-process path: `MERGE` for `articles`, delete-and-reinsert per user for `user_articles`, and then the same anti-join sweep of orphaned `articles` rows — inside the one publish transaction, after `user_articles` has been rebuilt, so both paths leave byte-for-byte the same gold.
 
 ## Why the pre-loaded silver is small, and why it took so long to produce
 
@@ -969,6 +971,19 @@ claimed otherwise, and was wrong.
 `NOT EXISTS` rather than `NOT IN`: Oracle optimises the anti-join, and `NOT IN`
 would silently match nothing at all if any `doc_id` were ever NULL.
 
+**Measured.** Narrowing `radar_agrifood` to a single territory and one keyword
+that matches nothing reduced its pool from 127 articles to none. The change
+stream fired a single-user recompute, which removed **exactly its 127 rows** and
+left **37** behind — precisely `radar_electronics` (21) plus `radar_pharma` (16),
+whose articles were still referenced. Restoring the profile returned the gold
+layer to 164 articles with zero orphans.
+
+**When the sweep runs.** At the end of `recompute_all()` and of
+`recompute_user()`. Because the MongoDB change stream calls the latter, editing
+preferences on the dashboard cleans up after itself within seconds; and because
+the documented shutdown sequence ends in a recompute, `trim seed` leaves no
+residue either.
+
 The same sweep runs in the PySpark path, inside the publish transaction and after
 `user_articles` has been rebuilt, so both paths leave the same state.
 
@@ -1202,7 +1217,7 @@ nothing for a given user. That is expected behaviour, not a fault.
 
 Two earlier rules were removed because they were measurably wrong. Keywords were matched as **contiguous phrases**, so `silicon wafers` matched 0 of 99,175 enriched mentions — a headline says "chip firm buys wafer plant", never the procurement phrase verbatim. And each row was routed to exactly **one** field depending on its `enriched` flag, which meant that of the 99,175 enriched rows, the 170 whose URL contained a supply-chain term were never checked against it — enrichment was actively destroying matches.
 
-**Tables retained on failure.** The PySpark path writes to `articles_stage` and `user_articles_stage`, which it creates at the start of each run and drops after a successful publication. They are deliberately **not** dropped when publication fails, so the staged result remains available for inspection; the next run drops and recreates them. Each carries an Oracle table comment recording its purpose and that it may safely be dropped.
+**Tables retained on failure.** The PySpark path writes to `articles_stage` and `user_articles_stage`, which it creates at the start of each run and drops after a successful publication. They are deliberately **not** dropped when publication fails, so the staged result remains available for inspection; the next run drops and recreates them. Each carries an Oracle table comment recording its purpose and that it may safely be dropped. These are the only Oracle objects left behind on purpose: unreferenced rows inside `articles` itself are removed automatically, as described under [Orphaned gold rows](#orphaned-gold-rows-and-why-they-can-be-removed-safely).
 
 ## Data persistence
 

@@ -68,6 +68,15 @@ Two values in `keyword_match_field` indicate something other than a normal match
   is what a filter change looks like after the fact: the row was admitted under
   the previous rules and has not yet been rebuilt.
 
+Both should now be **rare**, and seeing many of either is itself the finding. Every
+recompute ends by deleting `articles` rows that no `user_articles` row references,
+so an article whose silver has been trimmed away is normally swept out rather than
+left behind. What the sweep does *not* do is re-evaluate rows that are still
+referenced: if a user's set has not been recomputed since a filter change, its
+articles stay exactly as they were admitted. A run showing `(stale gold row)`
+therefore means a recompute is overdue, not that the sweep failed —
+`main.recompute_all()` resolves it.
+
 ## What it showed
 
 Run against the 30-day seed **before** the keyword matcher was fixed, it reported
