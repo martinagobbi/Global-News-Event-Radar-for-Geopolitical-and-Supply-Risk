@@ -29,6 +29,15 @@ services:
       SOURCE_DIR: /source
       REPORT_DIR: /report
       ENRICH: ${ENRICH:-0}
+      # These three must mirror the validation service in docker-compose.yml, or
+      # the loader produces silver that the live pipeline would not have produced.
+      # MENTION_ENRICH_NLP is the important one: bulk_load.py defaults it to "0",
+      # so leaving it unset means article.nlp() is never called and EVERY mention
+      # is stored with an empty article_keywords — silently, because a mention
+      # still counts as enriched once it has a title.
+      MENTION_ENRICH_NLP: ${MENTION_ENRICH_NLP:-1}
+      MENTION_ENRICH_WORKERS: ${MENTION_ENRICH_WORKERS:-8}
+      ENRICH_TIMEOUT_SECONDS: ${ENRICH_TIMEOUT_SECONDS:-600}
       LIMIT_SLICES: ${LIMIT_SLICES:-0}
       BATCH_SLICES: ${BATCH_SLICES:-50}
       CLICKHOUSE_HOST: ${CLICKHOUSE_HOST:-clickhouse-s1r1}
@@ -36,12 +45,44 @@ services:
       CLICKHOUSE_CLUSTER: gnews_cluster
       CLICKHOUSE_INSERT_QUORUM: ${CLICKHOUSE_INSERT_QUORUM:-2}
     volumes:
-      - ./data/release:/source:ro                    # the ZIPs to load
+      # RELEASE_SOURCE is the folder of ZIPs. The default reads them straight from
+      # the working tree, which is right on Linux. On macOS, see the note below:
+      # set it to a named volume instead, or the loader spends longer listing the
+      # files than loading them.
+      - ${RELEASE_SOURCE:-./data/release}:/source:ro
       - ./dev_tool_for_time_gauging:/report      # where the timing report lands
     networks:
       - pipeline_network
 
+# ── macOS: copy the archive into a named volume first ────────────────────────
+# Docker Desktop's file sharing is extremely slow for per-file metadata, and
+# worst of all under ~/Desktop and ~/Documents, which macOS additionally guards.
+# Measured on this project, listing the 5,762 ZIPs took:
+#
+#     0.04 s  from a named Docker volume
+#     0.04 s  on the host directly
+#     > 25 min  through a bind mount of ./data/release
+#
+# The loader looked frozen at 0% CPU for the whole of that. One tar stream moves
+# the archive inside Docker, after which the load runs at full speed:
+#
+#     docker volume create gdelt_release
+#     COPYFILE_DISABLE=1 tar cf - -C data/release . \
+#       | docker run --rm -i -v gdelt_release:/dest alpine tar xf - -C /dest
+#     RELEASE_SOURCE=gdelt_release ENRICH=1 \
+#       docker compose -f docker-compose.bootstrap.yml run --rm bootstrap
+#
+# COPYFILE_DISABLE=1 stops macOS tar writing an AppleDouble "._name" companion
+# beside every file. The loader ignores dot-files, so they are harmless, but they
+# double the file count for no reason.
 networks:
   pipeline_network:
     external: true
     name: pipeline_network
+
+volumes:
+  # Declared so RELEASE_SOURCE=gdelt_release resolves to a named volume rather
+  # than being treated as a relative path. Created by the command above; unused
+  # when the default bind mount is in effect.
+  gdelt_release:
+    external: true

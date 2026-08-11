@@ -5,6 +5,11 @@ import streamlit as st
 from components.tag_buttons import render_tag_buttons
 
 
+# How many articles are listed on the card without the reader opening anything.
+# The backend already caps the full list at 20, which is what the expander shows.
+PREVIEW_ARTICLES = 3
+
+
 def _tag_badge(tag: str | None) -> str:
     if tag == "requires_action":
         return ":red[Needs action from us]"
@@ -26,6 +31,10 @@ def render_event_card(event: dict) -> None:
 
     articles[0] is therefore the highest-confidence article and its
     mention_identifier is used as the card title.
+
+    The top PREVIEW_ARTICLES are listed on the card itself and the remainder sit
+    behind an expander, so a reader can judge an event's coverage at a glance
+    instead of having to open every card to find out what is in it.
     """
     articles: list[dict] = event.get("articles", [])
 
@@ -71,25 +80,38 @@ def render_event_card(event: dict) -> None:
         if top_url:
             st.link_button("Open top source", top_url)
 
-        # Article selector — user clicks to choose which article to open
+        # The first few articles are listed on the card itself, so the reader sees
+        # actual coverage without opening anything. The rest — the backend caps the
+        # list at 20 — stay behind the expander.
         if articles:
-            article_labels = {
-                f"{i + 1}. {a['mention_identifier']}": a
-                for i, a in enumerate(articles)
-            }
-            with st.expander(f"Related articles ({len(articles)})"):
-                selected_label = st.selectbox(
-                    "Choose an article to open",
-                    options=list(article_labels.keys()),
-                    key=f"article_selector_{event['global_event_id']}",
-                )
-                selected = article_labels[selected_label]
-                st.link_button("Open selected article", selected["url"])
+            st.write("**Articles**")
+            for a in articles[:PREVIEW_ARTICLES]:
+                st.markdown(f"- [{a['mention_identifier']}]({a['url']})")
                 st.caption(
-                    f"Confidence `{selected['confidence']}` | "
-                    f"Tone `{selected['mention_doc_tone']}` | "
-                    f"InRawText `{selected['in_raw_text']}`"
+                    f"    Confidence `{a['confidence']}` | "
+                    f"Tone `{a['mention_doc_tone']}` | "
+                    f"InRawText `{a['in_raw_text']}`"
                 )
+
+            # Only worth an expander when it would actually reveal something.
+            if len(articles) > PREVIEW_ARTICLES:
+                article_labels = {
+                    f"{i + 1}. {a['mention_identifier']}": a
+                    for i, a in enumerate(articles)
+                }
+                with st.expander(f"All {len(articles)} articles"):
+                    selected_label = st.selectbox(
+                        "Choose an article to open",
+                        options=list(article_labels.keys()),
+                        key=f"article_selector_{event['global_event_id']}",
+                    )
+                    selected = article_labels[selected_label]
+                    st.link_button("Open selected article", selected["url"])
+                    st.caption(
+                        f"Confidence `{selected['confidence']}` | "
+                        f"Tone `{selected['mention_doc_tone']}` | "
+                        f"InRawText `{selected['in_raw_text']}`"
+                    )
         else:
             st.info("No related articles available for this event.")
 

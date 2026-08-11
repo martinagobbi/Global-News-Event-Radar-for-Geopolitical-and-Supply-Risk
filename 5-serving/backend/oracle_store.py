@@ -56,6 +56,7 @@ from __future__ import annotations
 import logging
 import time
 import os
+from datetime import datetime, timezone
 
 import oracledb
 
@@ -69,6 +70,10 @@ _USER     = os.getenv("ORACLE_USER", "radar")
 _PASSWORD = os.getenv("ORACLE_PASSWORD", "radar")
 _TIMEOUT  = int(os.getenv("ORACLE_TIMEOUT", "10"))
 _RETRIES  = int(os.getenv("ORACLE_RETRIES", "3"))
+# How old the gold layer may be before the dashboard calls it stale. GDELT
+# releases every 15 minutes, so an hour is four missed releases: comfortably
+# beyond normal jitter, and well short of a user not noticing.
+PIPELINE_STALE_SECONDS = int(os.getenv("PIPELINE_STALE_SECONDS", str(60 * 60)))
 
 _DSN = f"{_HOST}:{_PORT}/{_SERVICE}"
 
@@ -399,9 +404,31 @@ def get_pipeline_status() -> dict:
                     return cur.fetchone()
         row = _with_retry(_run)
         if row:
+            status, updated = row[0], row[1]
+            # Freshness is judged here, not taken on trust. The processing layer
+            # writes ERROR when it NOTICES silver has stopped advancing, but if
+            # that layer is itself down it writes nothing at all, and the last row
+            # it wrote says OK for as long as Oracle keeps answering. Comparing the
+            # timestamp to the clock catches the case nobody is left to report.
+            if status == "OK" and updated is not None:
+                age = (datetime.now(timezone.utc)
+                       - updated.replace(tzinfo=timezone.utc)).total_seconds()
+                if age > PIPELINE_STALE_SECONDS:
+                    logger.warning("pipeline_status says OK but the gold layer is "
+                                   "%.0f min old", age / 60)
+                    return {
+                        "status": "ERROR",
+                        "timestamp_of_last_update": str(updated),
+                        "code": "STALE-PIPELINE",
+                        "message": (
+                            f"The briefing has not been updated for "
+                            f"{age / 3600:.1f} hours. New articles are not "
+                            "currently arriving."
+                        ),
+                    }
             return {
-                "status": row[0],
-                "timestamp_of_last_update": str(row[1]) if row[1] else None,
+                "status": status,
+                "timestamp_of_last_update": str(updated) if updated else None,
             }
         # Table reachable but empty — processing hasn't run yet, not an error.
         return {"status": "OK", "timestamp_of_last_update": None}

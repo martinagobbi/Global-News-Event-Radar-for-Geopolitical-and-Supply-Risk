@@ -21,12 +21,16 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 from itertools import combinations
 
 import requests
 
 BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000").rstrip("/")
 MIN_ANSWERS = 20
+# How long to wait for the backend before giving up, and how often to re-check.
+BACKEND_WAIT_SECONDS = int(os.getenv("BACKEND_WAIT_SECONDS", "120"))
+BACKEND_RETRY_SECONDS = int(os.getenv("BACKEND_RETRY_SECONDS", "5"))
 
 # ── Profiles ────────────────────────────────────────────────────────────────
 
@@ -258,7 +262,41 @@ def _check_territories_known() -> None:
 
 # ── Seeding ─────────────────────────────────────────────────────────────────
 
+def _wait_for_backend() -> bool:
+    """
+    Block until the backend answers, or BACKEND_WAIT_SECONDS elapses.
+
+    This is the only step of the setup that runs outside Docker, so it is the one
+    most likely to be started a moment too early — the backend container is up but
+    still opening its database connections. Every other component in the pipeline
+    retries an unavailable dependency every five seconds; without the same
+    courtesy here the script simply raised, and the three profiles were never
+    created, which leaves the gold layer permanently empty.
+    """
+    deadline = time.monotonic() + BACKEND_WAIT_SECONDS
+    announced = False
+    while True:
+        try:
+            requests.get(f"{BACKEND_URL}/health", timeout=5).raise_for_status()
+            if announced:
+                print(" ready.")
+            return True
+        except requests.RequestException:
+            if time.monotonic() >= deadline:
+                print(f"\nThe backend at {BACKEND_URL} did not respond within "
+                      f"{BACKEND_WAIT_SECONDS}s. Is it running?")
+                print("  docker compose --env-file .env.testing up -d --build")
+                return False
+            if not announced:
+                print(f"waiting for the backend at {BACKEND_URL} ", end="", flush=True)
+                announced = True
+            print(".", end="", flush=True)
+            time.sleep(BACKEND_RETRY_SECONDS)
+
+
 def seed() -> int:
+    if not _wait_for_backend():
+        return 1
     _check_mutually_exclusive()
     _check_minimum_answers()
     _check_territories_known()

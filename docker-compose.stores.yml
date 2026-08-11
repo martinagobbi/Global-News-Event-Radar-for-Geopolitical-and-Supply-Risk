@@ -267,15 +267,43 @@ services:
     networks: [pipeline_network]
 
 volumes:
+  # ── Mode-scoped: ClickHouse and Keeper ──────────────────────────────────────
+  # Keeper persists its Raft membership on disk, and the replicated tables'
+  # coordination lives inside Keeper. A volume written by a one-node ensemble
+  # therefore cannot be reused by a three-node one: Keeper refuses every
+  # connection and ClickHouse retries forever, so the symptom is a hang at 0%
+  # CPU rather than an error.
+  #
+  # STORE_VOLUMES (set per mode in the env file) gives each topology its OWN
+  # volumes, so the two never collide and neither destroys the other's silver.
+  # Switching modes is then purely a matter of compose arguments, with no
+  # volume-clearing step. Each mode's silver is filled independently by
+  # `./bootstrap/silver_snapshot.sh restore` (~3 s from the committed seed).
   keeper_1_data:
+    name: ${STORE_VOLUMES:-radar-testing}_keeper_1_data
   keeper_2_data:
+    name: ${STORE_VOLUMES:-radar-testing}_keeper_2_data
   keeper_3_data:
+    name: ${STORE_VOLUMES:-radar-testing}_keeper_3_data
   ch_s1r1_data:
+    name: ${STORE_VOLUMES:-radar-testing}_ch_s1r1_data
   ch_s1r2_data:
+    name: ${STORE_VOLUMES:-radar-testing}_ch_s1r2_data
   ch_s1r3_data:
+    name: ${STORE_VOLUMES:-radar-testing}_ch_s1r3_data
   ch_s2r1_data:
+    name: ${STORE_VOLUMES:-radar-testing}_ch_s2r1_data
   ch_s2r2_data:
+    name: ${STORE_VOLUMES:-radar-testing}_ch_s2r2_data
   ch_s2r3_data:
+    name: ${STORE_VOLUMES:-radar-testing}_ch_s2r3_data
+
+  # ── Shared between modes, deliberately ──────────────────────────────────────
+  # MongoDB records its member count on disk too, but `mongo-init` compares it
+  # against MONGO_MEMBERS on every start and issues rs.reconfig(…, {force: true})
+  # when they differ, so the same volume serves both topologies. Oracle runs as a
+  # single instance in both modes and needs no reconciliation. Sharing these is a
+  # feature: user profiles, tags and the gold layer survive a mode switch.
   mongo1_data:
   mongo2_data:
   mongo3_data:

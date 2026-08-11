@@ -1,8 +1,9 @@
 #!/usr/bin/env python
 """
 ==============================================================================
-  TEMPORARY DEV TOOL — DELETE THIS WHOLE FOLDER WHEN YOU ARE DONE.
-  Not part of the pipeline. Nothing imports it. Safe to remove at any time.
+  MEASUREMENT UTILITY — part of the project's tooling, not of the pipeline.
+  Nothing imports it and no service depends on it, so it can be run (or not)
+  without affecting the running system.
 ==============================================================================
 
 Measures how long each incoming 15-minute GDELT CSV takes to reach the SILVER

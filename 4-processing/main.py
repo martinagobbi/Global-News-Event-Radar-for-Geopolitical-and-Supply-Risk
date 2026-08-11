@@ -208,6 +208,17 @@ def process_user(user_id: str):
     return JSONResponse({"status": "success", "user_id": user_id, "user_articles": n})
 
 
+def _report_silver_stale(idle_seconds: int) -> None:
+    """
+    Record in the gold layer that silver has stopped advancing, so the serving
+    tier can say the data is stale instead of reporting OK simply because Oracle
+    answered. The last-update timestamp is deliberately left where it was: it
+    marks when the data was actually refreshed, which is the fact being reported.
+    """
+    logger.warning("Recording pipeline_status=ERROR: silver idle for %d s", idle_seconds)
+    oracle_writer.mark_pipeline_stale()
+
+
 @app.on_event("startup")
 def _startup() -> None:
     """Start the background triggers (silver watermark + Mongo change stream)."""
@@ -216,6 +227,7 @@ def _startup() -> None:
             ch_factory=_ch,
             recompute_all=recompute_all,
             recompute_user=recompute_user,
+            report_stale=_report_silver_stale,
         )
 
 

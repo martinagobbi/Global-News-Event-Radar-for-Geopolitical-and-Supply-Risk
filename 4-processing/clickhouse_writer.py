@@ -277,8 +277,10 @@ class ClickHouseWriter:
            ActionGeo_/Actor1Geo_/Actor2Geo_CountryCode is in the FIPS set
            (match if EITHER standard hits). No geo codes -> all recent events.
         2. Keyword filter on gdelt_mentions (FINAL, so re-ingested duplicates are
-           collapsed) for those events via build_keyword_clause (URL ngrambf LIKE
-           / enriched position match). No keywords -> every mention of the events.
+           collapsed) for those events via build_keyword_clause. Every row is
+           searched in all three fields — URL (ngrambf-backed LIKE), article title
+           and article keywords — and a keyword matches when ALL of its tokens are
+           present. No keywords -> every mention of the events.
 
         Returns (events_df, mentions_df), ready for gold.build_article_rows().
         """

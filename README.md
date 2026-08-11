@@ -87,13 +87,49 @@ identical in both modes.
 git clone https://github.com/martinagobbi/Global-News-Event-Radar-for-Geopolitical-and-Supply-Risk
 cd Global-News-Event-Radar-for-Geopolitical-and-Supply-Risk
 
+# 1. the stores (they create pipeline_network)
 docker compose --env-file .env.testing -f docker-compose.stores.yml up -d
-./bootstrap/silver_snapshot.sh restore                   # ~3 s: fills silver from the seed
+
+# 2. the pipeline — the validation layer creates the silver schema on first connect
 docker compose --env-file .env.testing up -d --build
+
+# 3. the 30-day history (needs the schema from step 2; waits for it if necessary)
+./bootstrap/silver_snapshot.sh restore
+
+# 4. the three test profiles — without these the gold layer stays empty
+python3 5-serving/seed_test_users.py          # needs `requests` on the host. Also, may have to type `python` instead of `python3`.
+
+# 5. the dashboard
 docker compose -f 5-serving/docker-compose.serving.yml up --build
 ```
 
-The `restore` step loads `data/silver_seed/*.parquet` — 13 MB committed to this
+**The order matters.** The silver tables are owned and created by the validation
+layer, so the seed cannot be restored before step 2 has run — there would be
+nothing to insert into. `restore` waits up to five minutes for the schema to
+appear and tells you what to start if it does not. Step 4 is equally load-bearing:
+the gold layer is built **per user**, so until at least one profile exists there
+is nothing for the processing layer to build and the dashboard stays empty.
+
+Step 4 is the only step that runs on the host rather than in a container, and its
+only dependency is `requests`. It waits up to two minutes for the backend to
+answer before giving up, so it can safely be run the moment step 2 returns.
+
+**There is no virtual environment to activate, and none is needed.** Every layer
+runs in its own container with its own `requirements.txt`, so the project has no
+host-side Python environment at all — this one script is the sole exception. If
+the host has no suitable Python, run it in a throwaway container instead, which
+needs nothing installed and reaches the backend by service name:
+
+```bash
+docker run --rm --network pipeline_network -v "$PWD/5-serving:/seed:ro" \
+  -e BACKEND_URL=http://radar-backend:8000 python:3.11-slim \
+  sh -c "pip install -q requests && python /seed/seed_test_users.py"
+```
+
+Either way it prints one line per account and is safe to repeat — the profiles are
+upserted, so re-running restores them to their seeded state.
+
+The `restore` step loads `data/silver_seed/*.parquet` — 16 MB committed to this
 repository, holding a fully filtered and enriched 30-day history — straight into
 the ClickHouse volume. It takes about **three seconds**. Gold follows on its own:
 the processing layer's watermark trigger notices silver has grown and builds
@@ -108,9 +144,9 @@ re-inserting the same rows collapses back to the same counts.
 > On a fresh clone it always does, because the trigger starts with no previous
 > value and the first poll reads `None -> 20260727171500`. But on a cluster that
 > has already processed **newer** data — for instance one that ran the live
-> pipeline before the seed was restored — the watermark moves *backwards*, and the
-> trigger correctly declines to fire. Gold then stays as it was. One command
-> rebuilds it:
+> pipeline before restoring the seed — inserting the seed's older rows leaves
+> `max(DATEADDED)` untouched, so the watermark does not advance and the trigger
+> correctly declines to fire. Gold then stays as it was. One command rebuilds it:
 >
 > ```bash
 > docker exec pipeline_processing python3 -c "import main; main.recompute_all()"
@@ -129,6 +165,61 @@ stack usable on a machine with 8 GB of RAM.
 
 The dashboard is then available at **http://localhost:8501**.
 
+#### Signing in
+
+The dashboard shows a sign-in screen first and nothing else until you are
+authenticated — there is no anonymous view, and account creation is deliberately
+not implemented. The three fixed accounts come from step 4 above
+(`seed_test_users.py`); **without that step the credentials below still sign in,
+but the account has no profile, so it lands on the setup page and the gold layer
+stays empty** — the gold is built per user, and there is no user to build it for.
+
+| Username | Password | Supply chain | Territories |
+|---|---|---|---|
+| `radar_electronics` | `chips2026` | Semiconductors and electronics | Asia-Pacific |
+| `radar_pharma` | `vials2026` | Pharmaceuticals and biologics | Europe |
+| `radar_agrifood` | `grain2026` | Agri-food commodities | Americas and Africa |
+
+The three profiles are mutually exclusive: no territory and no keyword appears in
+more than one account. Inactive sessions are signed out after 15 minutes.
+
+These are test credentials, published deliberately. The sign-in gates the
+dashboard UI only — the serving backend has no authentication of its own, so
+anyone who can reach it directly can query any user's data. It is not production
+authentication.
+
+#### What each account will show
+
+Measured on the committed seed, immediately after the steps above:
+
+| Account | Articles | Event cards (unique `GLOBALEVENTID`) |
+|---|---|---|
+| `radar_agrifood` | **127** | **124** |
+| `radar_electronics` | **21** | **21** |
+| `radar_pharma` | **16** | **16** |
+| *total distinct articles in gold* | *164* | |
+
+An event card groups the articles reporting the same GDELT event, so cards are
+never more numerous than articles. Only `radar_agrifood` shows the difference
+here — 127 articles across 124 cards, meaning three of its events were reported
+by two outlets each. For the other two accounts every article is a distinct
+event.
+
+The three counts differ by roughly eight-fold because the profiles genuinely
+differ in reach, not because anything is wrong: agri-food keywords (*grain*,
+*wheat*, *port*, *tariff*) are ordinary news vocabulary, whereas the electronics
+and pharmaceutical lists are procurement-register terms (*photoresist*, *epoxy
+molding compound*, *bromobutyl stoppers*) that rarely reach a general-news
+headline. A single 15-minute slice frequently matches nothing for a given user;
+that is the filter working as intended.
+
+**All of it is historical.** A fresh clone starts with the committed 30-day
+history and nothing else: GDELT slices from **2026-06-27 17:15 UTC to
+2026-07-27 17:15 UTC**, 2,881 slices in total. Live polling begins the moment the
+pipeline starts, so newer articles accumulate from then on at roughly one slice
+every 15 minutes — but everything present at first sign-in comes from that
+30-day window.
+
 > **The `--build` flag is required.** Compose reuses an existing image and does not rebuild because a source file changed. Any modification to Python code, or to `.streamlit/config.toml`, reaches a container only when `--build` is passed. Files that are *mounted* rather than copied into the image — the compose files, `clickhouse/*.xml`, `oracle-init/*.sql` — are read at container start and require no rebuild.
 
 On the **first** run the stores need several minutes: Oracle creates its database files from scratch and only then executes the gold schema. This occurs once per machine per volume; subsequent starts are fast.
@@ -138,23 +229,12 @@ On the **first** run the stores need several minutes: Oracle creates its databas
 Every step below is a command. Nothing is edited except `.env.full`, which is a
 template where the placeholder `STORES_HOST` is replaced with a real address.
 
-**Step 0 — only if this machine previously ran testing mode.** ClickHouse Keeper
-records its cluster membership on disk, and a Keeper whose volume says it belongs
-to a one-node ensemble cannot join a three-node one. The symptom is not an error
-but a hang: ClickHouse retries the connection indefinitely at 0% CPU. Clear the
-coordination state and the ClickHouse data that depends on it:
-
-```bash
-docker compose -f docker-compose.stores.yml down
-docker volume ls -q | grep -E 'keeper_._data|ch_s._._data' | xargs docker volume rm
-```
-
-The ClickHouse volumes must be removed as well, because the replicated tables'
-coordination lives in Keeper and is orphaned without it. Silver is rebuilt in
-minutes afterwards from `data/silver_seed`. **MongoDB needs nothing here** — its
-`mongo-init` service detects the member-count change and reconfigures the replica
-set automatically. The MongoDB and Oracle volumes, which hold user profiles, tags
-and the gold layer, must **not** be removed.
+**No volume-clearing step is required**, whichever mode this machine ran before.
+Each topology owns its own ClickHouse and Keeper volumes — `radar-full_*` here,
+`radar-testing_*` in testing mode — so the two never share coordination state and
+neither disturbs the other's silver. See
+[Switching modes](#switching-modes-state-that-persists-across-the-switch) for why
+that separation is necessary.
 
 **Step 1 — prepare the address file** (on both the stores and pipeline machines).
 `STORES_HOST` becomes the stores machine's address, for example `10.0.0.5`:
@@ -177,31 +257,6 @@ docker compose --env-file .env.full -f docker-compose.stores.yml --profile full 
 `--profile full` is what starts the redundant nodes. Ports 27017–27019, 9000 and
 1521 must be reachable from the pipeline machine.
 
-**Step 2b — load the seed into the new silver volume** (run on the stores
-machine, once the containers above are up):
-
-```bash
-./bootstrap/silver_snapshot.sh restore
-```
-
-This is the same three-second step as in testing mode, and it is needed here for
-the same reason: Docker volumes are not part of the repository, so a newly created
-cluster starts empty. `data/silver_seed/*.parquet` is the committed 30-day
-history. Skipping it leaves the dashboard blank until the live pipeline has run
-for days.
-
-If the ClickHouse volumes were **not** cleared in Step 0 — that is, this cluster
-already holds silver — the restore is still safe: both tables are
-`ReplacingMergeTree`, so re-inserting the same rows collapses back to the same
-counts rather than duplicating them. In that case, however, the cluster may
-already have processed newer data than the seed contains, so the watermark
-trigger will not fire and gold will not update by itself. Force one rebuild after
-Step 3, once the pipeline is running:
-
-```bash
-docker exec pipeline_processing python3 -c "import main; main.recompute_all()"
-```
-
 **Step 3 — the pipeline machine**:
 
 ```bash
@@ -211,14 +266,53 @@ docker compose --env-file .env.full up -d --build
 `.env.full` sets `PIPELINE_NET_EXTERNAL=false`, so Compose creates the network
 here instead of expecting the stores to have made it.
 
-**Step 4 — each user machine** (one frontend per machine, any number of them):
+**Step 4 — load the seed** (on the stores machine, after Step 3):
+
+```bash
+./bootstrap/silver_snapshot.sh restore
+```
+
+**This must follow Step 3, not precede it.** The silver tables are created by the
+validation layer, which runs on the *pipeline* machine, so before Step 3 there is
+no schema to insert into. `restore` waits up to five minutes for it to appear.
+
+It is needed here for the same reason as in testing mode: Docker volumes are not
+part of the repository, so a newly created cluster starts empty.
+`data/silver_seed/*.parquet` is the committed 30-day history, and skipping this
+leaves the dashboard blank until the live pipeline has run for days. Because
+intended mode has its own ClickHouse volumes, this runs once per machine per mode
+— restoring in testing mode does not populate intended mode's silver, or the
+other way round.
+
+Repeating the restore is safe: both tables are `ReplacingMergeTree`, so
+re-inserting the same rows collapses back to the same counts rather than
+duplicating them. If this cluster has already processed data **newer** than the
+seed, the watermark will not advance and gold will not rebuild by itself. Force
+one rebuild:
+
+```bash
+docker exec pipeline_processing python3 -c "import main; main.recompute_all()"
+```
+
+**Step 5 — create the three test profiles** (once, from any machine that can
+reach the backend). The gold layer is built per user, so until a profile exists
+there is nothing to build and the dashboard stays empty:
+
+```bash
+BACKEND_URL=http://10.0.0.60:8000 python3 5-serving/seed_test_users.py
+```
+
+Credentials and expected contents are under
+[Signing in](#signing-in).
+
+**Step 6 — each user machine** (one frontend per machine, any number of them):
 
 ```bash
 BACKEND_URL=http://10.0.0.60:8000 \
   docker compose -f 5-serving/docker-compose.serving.yml up --build
 ```
 
-**Step 5 — optional: run the pipeline under Docker Swarm.** Steps 3 and 4 give a
+**Step 7 — optional: run the pipeline under Docker Swarm.** Steps 3 and 6 give a
 working distributed system, but the pipeline is then restarted only on the machine
 it already occupies. Swarm adds machine-level failover: if the whole pipeline
 machine dies, the pipeline is re-created on another node. It cannot be enabled by
@@ -256,7 +350,7 @@ replication.
 ### Returning to testing mode
 
 Stop the current stores, then start them without `--profile full` and with the
-testing env file. The volumes are untouched, so no data is lost:
+testing env file. Nothing is deleted, in either direction:
 
 ```bash
 docker compose -f docker-compose.stores.yml --profile full down
@@ -264,10 +358,17 @@ docker compose --env-file .env.testing -f docker-compose.stores.yml up -d
 docker compose --env-file .env.testing up -d --build
 ```
 
-`mongo-init` detects that the replica set is still configured for three members
-while only one is running — a state in which no primary can be elected and every
-write fails — and reconfigures it to a single member automatically. The reverse
-switch is handled the same way.
+Testing mode reattaches to its **own** ClickHouse and Keeper volumes
+(`radar-testing_*`), which still hold whatever silver they held when this mode
+was last used; intended mode's `radar-full_*` volumes are left exactly as they
+were. If this is the first time testing mode has run on this machine, its silver
+starts empty and needs one `./bootstrap/silver_snapshot.sh restore`.
+
+MongoDB and Oracle are shared between the modes, so **user profiles, tags and the
+gold layer carry across the switch**. `mongo-init` detects that the replica set is
+still configured for three members while only one is running — a state in which no
+primary can be elected and every write fails — and reconfigures it to a single
+member automatically. The reverse switch is handled the same way.
 
 **What `BACKEND_URL` is.** The frontend holds no database credentials and never contacts ClickHouse, MongoDB or Oracle directly; every value it displays is retrieved from the serving backend's HTTP API. `BACKEND_URL` is the address of that API. Because the frontend runs on each user's machine while the backend runs on the operator's, it must be set to the operator machine's address and the backend's published port 8000.
 
@@ -297,6 +398,21 @@ There is a gap between the end of the bootstrap history and the moment the pipel
 Stop the tiers in the reverse of their start order. The commands differ per mode,
 because a tier must be shut down with the same arguments that started it: omitting
 `--profile full`, for instance, leaves the nine redundant containers running.
+
+**Optional first — keep only the shipped 30-day history.** The pipeline polls
+continuously, so a store that has been running holds the seed *plus* everything
+since. Stop the ingest path before trimming, or the next poll lands mid-clean-up
+and puts the excess straight back:
+
+```bash
+docker compose --env-file .env.testing stop ingestion parsing validation        # stop new data
+./bootstrap/silver_snapshot.sh trim seed                                        # silver
+docker exec pipeline_processing python3 -c "import main; main.recompute_all()"  # gold
+```
+
+`seed` resolves to the last slice in `data/silver_seed`; `trim <YYYYMMDDHHMMSS>`
+takes an explicit cutoff. Skip all three to keep the live history. In intended
+mode the first command uses `--env-file .env.full`.
 
 **Testing mode:**
 
@@ -335,7 +451,7 @@ docker swarm leave --force     # optional, on each machine
 | User profiles — territories, keywords | `mongo1/2/3_data` (`radar.users`) | Yes |
 | Per-user tags — archived, needs action, monitoring | `mongo1/2/3_data` (`radar.tags`) | Yes |
 | Gold — `articles`, `user_articles` | `oracle_data` | Yes |
-| Silver — `gdelt_events`, `gdelt_mentions` | `ch_*_data` | Yes |
+| Silver — `gdelt_events`, `gdelt_mentions` | `radar-testing_ch_*_data` / `radar-full_ch_*_data` (per mode) | Yes |
 | In-flight raw and parsed slices | `shared_data` | Yes, and disposable in any case |
 
 > **The `-v` flag must never be used.** `docker compose … down -v` deletes the volumes, permanently destroying every user profile, every tag, and the entire silver and gold history. Only the most recent 15-minute GDELT slice could be re-retrieved.
@@ -413,6 +529,7 @@ The cluster is named `gnews_cluster` in both versions, so every
 | `MONGO_MEMBER_0/1/2` | Docker service names | the stores machine's real addresses | Clients are redirected to the addresses the set advertises, so they must be reachable from the pipeline machine |
 | `MONGO_URI`, `CLICKHOUSE_HOST`, `ORACLE_HOST` | unset (Docker service names apply) | the stores machine's address | Only needed when the tiers are on separate machines |
 | `BACKEND_URL` | `host.docker.internal:8000` | `http://<pipeline-host>:8000` | The frontend runs on a different machine from the backend |
+| `STORE_VOLUMES` | `radar-testing` | `radar-full` | Names this mode's ClickHouse and Keeper volumes, so the two topologies never share coordination state. See [Switching modes](#switching-modes-state-that-persists-across-the-switch) |
 
 ### Structural differences
 
@@ -447,30 +564,39 @@ compares the configured member count against `MONGO_MEMBERS` on every start and
 issues `rs.reconfig(…, {force: true})` when they differ. `force` is required
 precisely because there is no primary to accept an ordinary reconfiguration.
 
-**ClickHouse Keeper — requires one manual step.** Keeper persists its Raft
-membership in its data volume. A Keeper whose volume says it belongs to a
-three-node ensemble cannot elect a leader when started alone, and rejects every
-connection with `Coordination::Exception: Keeper server rejected the connection
-during the handshake … doesn't see leader or stale`. ClickHouse then retries
-indefinitely, so the symptom is a pipeline that appears to hang at 0% CPU rather
-than an error.
+**ClickHouse Keeper — resolved by giving each mode its own volumes.** Keeper
+persists its Raft membership in its data volume. A Keeper whose volume says it
+belongs to a three-node ensemble cannot elect a leader when started alone, and
+rejects every connection with `Coordination::Exception: Keeper server rejected the
+connection during the handshake … doesn't see leader or stale`. ClickHouse then
+retries indefinitely, so the symptom is a pipeline that appears to hang at 0% CPU
+rather than an error. The ClickHouse data volumes are affected too, because the
+replicated tables' coordination lives in Keeper and their metadata is orphaned
+without it.
 
-This one **cannot be resolved by compose arguments alone**, because it requires
-deleting persisted data, and Compose has no conditional "empty this volume"
-directive: a volume is either mounted or it is not. The coordination state must
-therefore be cleared by hand when the number of Keeper nodes changes — the
-commands are given as **Step 0** of the intended-mode setup, and in the
-"Returning to testing mode" section.
+This cannot be fixed by *clearing* the volumes from a compose argument, because
+Compose has no conditional "empty this volume" directive: a volume is either
+mounted or it is not. It can, however, be fixed by never sharing them. Each of the
+nine ClickHouse and Keeper volumes is declared with an interpolated name:
 
-The ClickHouse volumes must be cleared alongside Keeper's, because the replicated
-tables' coordination lives in Keeper and their metadata is orphaned without it.
-This costs little: silver is rebuilt in minutes from `data/silver_seed`, and the
-MongoDB and Oracle volumes — user profiles, tags and the gold layer — are never
-touched.
+```yaml
+  ch_s1r1_data:
+    name: ${STORE_VOLUMES:-radar-testing}_ch_s1r1_data
+```
 
-An alternative, were modes switched frequently, would be to give each topology its
-own volume names, making the switch purely argument-driven at the cost of each
-mode keeping a separate copy of silver.
+`.env.testing` sets `STORE_VOLUMES=radar-testing` and `.env.full` sets
+`radar-full`, so the two topologies address entirely separate volumes. Switching
+modes is then purely a matter of compose arguments, with **no manual step and no
+data destroyed in either direction** — each mode simply reattaches to the silver
+it last had. The cost is that each mode keeps its own copy of silver, filled
+independently by `./bootstrap/silver_snapshot.sh restore`; at 16 MB and about
+three seconds from the committed seed, that is a better trade than a destructive
+manual step.
+
+MongoDB and Oracle are deliberately **not** mode-scoped. MongoDB reconciles its
+own member count as described above, and Oracle runs as a single instance in both
+modes, so both can safely share one volume — which means user profiles, tags and
+the gold layer survive a mode switch intact.
 
 Docker Swarm is the third thing that cannot be a compose argument: it changes the
 Docker daemon's own state and requires an image registry, so it is an explicit
@@ -519,7 +645,7 @@ The system is distributed at the storage layer.
 
 ## Why the pre-loaded silver is small, and why it took so long to produce
 
-The silver seed committed to this repository is around 13 MB, which is easy to
+The silver seed committed to this repository is around 16 MB, which is easy to
 mistake for a small amount of work. It is not. Even though the volume's ready-made
 data looks small in size, querying it from GDELT and letting the pipeline turn it
 into silver took about half a week. This is because the bronze layer being put
@@ -531,12 +657,12 @@ The figures for the 30-day window shipped here:
 | Stage | Size |
 |----|----|
 | Bronze — the raw GDELT archives that had to be downloaded | ≈ 410 MB |
-| Silver — after filtering, validation and enrichment | **13 MB** |
+| Silver — after filtering, validation and enrichment | **16 MB** |
 
 Two reductions compound. The supply-chain relevance filter discards roughly 97%
 of events, keeping about 31 of every 979 in a slice; and Parquet's columnar
 compression is very effective on the low-cardinality codes that dominate what
-remains. The result is a 32-fold reduction.
+remains. The result is a 26-fold reduction.
 
 The time went almost entirely into work that leaves no trace in the final size:
 downloading 5,762 archives, and then fetching roughly 85,000 individual article
@@ -547,6 +673,92 @@ any local resource.
 This is precisely why the seed is committed. The expensive work is done once, by
 the maintainers, and every clone restores the result in seconds instead of
 repeating it.
+
+## How the silver seed is implemented
+
+Docker volumes are not part of a git repository. They live in Docker's own storage
+on each machine, outside the project directory, so a clone always creates **empty**
+volumes. The seed is the mechanism that bridges that gap: ordinary files that git
+can carry, plus a command that loads them into the volume on whatever machine runs
+it.
+
+**The files.** `data/silver_seed/` holds two Parquet files, `gdelt_events.parquet`
+(7.0 MB, 103,972 rows) and `gdelt_mentions.parquet` (8.5 MB, 111,430 rows) — 16 MB
+in total, against the 410 MB of raw archives they were distilled from. They are
+committed; `data/release/` and `data/raw/` are not.
+
+**The tool.** `bootstrap/silver_snapshot.sh` has three verbs:
+
+| Verb | Action |
+|----|----|
+| `export` | `SELECT * FROM <table> FINAL FORMAT Parquet` for each silver table, written to `data/silver_seed/`. `FINAL` collapses the `ReplacingMergeTree` duplicates, so the snapshot holds one row per key. |
+| `restore` | `INSERT INTO <table> FORMAT Parquet` for each file, streamed through the **Distributed** table, so rows are routed to their shard exactly as a live write would be. Waits for the validation layer to have created the schema. |
+| `wipe` | `TRUNCATE TABLE <table>_local ON CLUSTER` — used when rebuilding from scratch. |
+| `trim <slice>` | Deletes every row published after a given 15-minute slice. Needed when rebuilding the seed, because the live pipeline keeps polling while a backfill runs; without it the exported seed would carry an arbitrary tail of "today" and ship it to everyone who clones the repository. |
+
+**Rebuilding the seed from the raw archives** is a four-step sequence, and the
+order matters for the same reason `trim` exists:
+
+```bash
+docker compose --env-file .env.testing stop ingestion parsing validation  # stop live writes
+./bootstrap/silver_snapshot.sh wipe
+ENRICH=1 docker compose -f docker-compose.bootstrap.yml run --rm bootstrap
+./bootstrap/silver_snapshot.sh trim 20260727171500   # the last slice in the release
+./bootstrap/silver_snapshot.sh export
+```
+
+> **On macOS, copy the archive into a named volume first.** Docker Desktop's file
+> sharing is very slow for per-file metadata, and slowest under `~/Desktop` and
+> `~/Documents`, which macOS additionally guards. Measured here, simply *listing*
+> the 5,762 archives took **0.04 s** from a named volume or on the host, against
+> **more than 25 minutes** through a bind mount of `./data/release` — during which
+> the loader sits at 0% CPU and looks frozen. `docker-compose.bootstrap.yml`
+> documents the one-line `tar` that moves the archive inside Docker, after which
+> `RELEASE_SOURCE=gdelt_release` runs the load at full speed.
+
+**Why restore is safe to repeat.** Both tables are `ReplacingMergeTree`:
+`gdelt_events` keyed on `GLOBALEVENTID`, `gdelt_mentions` on
+`(GLOBALEVENTID, MentionIdentifier)`. Re-inserting identical rows collapses back to
+the same counts rather than duplicating them — measured: a second restore left the
+totals unchanged at 103,972 and 111,430.
+
+**Why gold is not snapshotted.** Only silver is captured. Gold is derived, and
+derived per user: it depends on the territories and keywords in each profile, which
+differ per installation. Shipping a gold snapshot would bake one set of users'
+preferences into every clone. Instead the processing layer rebuilds gold from the
+restored silver through its normal trigger, so the result always matches the
+profiles that actually exist on that machine and can never drift from what the
+pipeline would have produced.
+
+**Cost.** `restore` takes about three seconds; gold follows within the trigger's
+60-second poll. Producing the seed took 213 minutes of enrichment plus the archive
+download.
+
+## What causes the gold layer to update
+
+Four things, two automatic and two manual. All of them call the same two functions,
+`recompute_all()` and `recompute_user()`, so the result is identical whichever
+path is taken.
+
+| Trigger | Scope | Latency |
+|----|----|----|
+| **MongoDB change stream** on `radar.users` — fires on `insert`, `update` or `replace` of a profile | that one user (`recompute_user`) | **immediate**, typically under a second |
+| **ClickHouse watermark poll** — compares `max(DATEADDED)` in silver against the last value seen | every user (`recompute_all`) | up to `WATERMARK_POLL_SECONDS`, default **60 s** |
+| `POST /process/{user_id}` on the processing service | that one user | on demand |
+| `POST /process-all` on the processing service | every user | on demand |
+
+The change stream is what makes a preference change take effect immediately: the
+moment a user saves new territories or keywords, their profile document is written
+to MongoDB, the stream delivers the change, and `recompute_user` re-runs that
+user's filter against the whole of silver. Articles that were previously in silver
+but matched nobody are therefore promoted into that user's gold at once, without
+waiting for new data to arrive. This is also why MongoDB runs as a replica set even
+in testing mode: change streams are unavailable on a standalone server.
+
+The watermark trigger covers the other direction — new data arriving for existing
+preferences. It deliberately fires only when the watermark **increases**, so
+restoring an older snapshot onto a cluster that has already seen newer data will
+not trigger it; that case needs one manual `recompute_all()`.
 
 ## Why enrichment never reaches 100%
 
@@ -724,6 +936,63 @@ Duplicates are eliminated at four distinct points, because they arise for four d
 3. **Syndicated stories.** The same report is frequently republished under different URLs, which produce different keys but an identical headline. Rows are therefore also deduplicated by `(event, normalised headline)`, compared case-insensitively and with whitespace collapsed. The same filter is applied on the read path, so gold written before this rule was introduced also displays correctly.
 4. **The `user_articles` primary key.** Document identifiers are deduplicated before insertion, since a URL may be reachable through several events.
 
+## Watermarking: how the pipeline knows it is making progress
+
+New data is expected every 15 minutes. The question a watermark answers is what
+should happen when a particular 15-minute point **does not** arrive, or arrives
+and cannot be processed. Waiting for it indefinitely is the failure this section
+exists to prevent.
+
+**Progress is measured in event time.** GDELT names every file after its own
+15-minute slice (`20260810121500`), and that identifier — not the time the file
+happened to be handled — is what the pipeline records. Slice ids can be compared
+and ordered, so a gap in the feed is detectable; a URL alone cannot be.
+
+**The watermark only moves forwards.** A slice arriving late never drags it back
+over ground already covered, and the processing layer recomputes only when
+`max(DATEADDED)` in silver **increases**. An equal value means nothing new
+arrived; a lower one means the store was rebuilt behind it — for instance a seed
+restored over newer data — and rebuilding gold from a shorter history than it
+already reflects would be a regression, so it declines and says so.
+
+**Lateness is bounded, and failure is bounded with it.** A slice that cannot be
+processed is retried three times and then moved to `/data/dead_letter/<slice>/`.
+This matters more than it sounds: slices are handled oldest-first and one at a
+time, so before this bound existed a single malformed file was retried every few
+seconds **forever**, and every later slice queued behind it — the pipeline
+stopped without ever reporting an error. The same bound applies in the validation
+layer, where a failing pair would otherwise block parsing from publishing at all,
+since parsing waits for `latest_files` to drain.
+
+Nothing is deleted by any of this. An abandoned slice is **moved**, so it remains
+available for inspection, and can be replayed by copying it back or loaded
+deliberately with `bootstrap/bulk_load.py`.
+
+**Silence is reported rather than assumed to be health.** Three checks cover the
+three ways the pipeline can go quiet:
+
+| Check | Where | Threshold | What it catches |
+|----|----|----|----|
+| No new files in `latest_files` | validation | 35 min | parsing or ingestion has stopped |
+| `latest_files` never drains | parsing | 30 min | validation has stalled; publishing is blocked |
+| Silver watermark not advancing | processing | 45 min | nothing is reaching the store; gold is frozen |
+| Gold older than the clock allows | serving backend | 60 min | the processing layer itself is down, so nobody is left to report |
+
+The last of these is the reason the backend does not simply trust the stored
+status. The processing layer writes `ERROR` when it *notices* silver has stopped
+advancing — but if that layer is the thing that died, it writes nothing at all,
+and the last row it wrote says `OK` for as long as Oracle keeps answering.
+Comparing the timestamp against the clock is what catches a pipeline with nobody
+left to report on it.
+
+**Gaps are stated, not silently back-filled.** The poller fetches whatever
+`lastupdate.txt` currently points at, so slices published while it was stopped are
+missed. It now names them in the log instead of passing over them. Back-filling
+them automatically is deliberately *not* done: a 15-minute poller quietly
+reloading hours of history is exactly the unbounded lateness the rest of this
+design rules out. `bootstrap/bulk_load.py` exists to load a known period on
+purpose.
+
 ## Retries: nothing waits indefinitely
 
 Every dependency that may be temporarily unavailable is retried rather than allowed to block or fail permanently.
@@ -736,15 +1005,50 @@ Every dependency that may be temporarily unavailable is retried rather than allo
 - **Frontend → backend.** Every call is wrapped, and an unreachable backend produces an explanatory banner rather than an error page.
 - **Bootstrap loader.** Waits for ClickHouse in the same five-second retry loop before loading.
 
+Retrying is bounded where the thing being retried may never succeed. A transient
+dependency is worth waiting for indefinitely; a malformed file is not, because
+retrying it forever blocks every slice behind it. Parsing and validation therefore
+give a slice three attempts and then set it aside — see
+[Watermarking](#watermarking-how-the-pipeline-knows-it-is-making-progress).
+
 Fail-soft behaviour complements this. A failure to read tags leaves events untagged rather than hiding them; a failure to read the pipeline status is reported explicitly as a database outage rather than being silently reported as healthy. One deliberate exception exists: a failure to read a user profile is raised rather than substituted with an empty default, because an empty profile is indistinguishable from a new user and could otherwise be saved over a real one.
+
+## Inspecting why an article was selected
+
+Because the filters are narrow and applied in sequence, "why is this pool so
+small?" is not answerable by reading the code alone — it depends on which rule
+each surviving article actually satisfied.
+[`dev_tools_for_filter_diagnostics/`](dev_tools_for_filter_diagnostics/) answers
+it by re-deriving the decision for every article in gold:
+
+```bash
+docker compose -f docker-compose.diagnostics.yml run --rm diagnostics
+```
+
+It reads all three stores read-only, writes no store, and produces
+`gold_provenance.csv` — one row per article per user, naming the parsing
+criterion that admitted it, the territory code and code system that matched, and
+the keyword and field that selected it. It imports the pipeline's own filter
+functions rather than restating them, so it cannot fall out of step with the
+filters in force.
 
 ## What is retrieved, and what is filtered at each stage
 
 **Every 15 minutes**, ingestion reads `lastupdate.txt` and retrieves the current events and mentions archives. A representative slice contains approximately 979 events and 3,222 mentions.
 
+**Only the English feed is ingested.** GDELT publishes each slice twice: an English feed at `lastupdate.txt`, and a translingual (non-English) one at `lastupdate-translation.txt` whose files are named `<slice>.translation.export.CSV` and `<slice>.translation.mentions.CSV`. Each feed also carries a GKG file, which this project does not use. So of the four events/mentions CSVs GDELT publishes per slice, **two are retrieved**. The translingual feed is a deliberate, documented gap rather than an oversight — and the layers below are already prepared for it: `gdelt.classify()` recognises the translation variants, and the parsing layer derives `<slice>.translation` as a slice identifier distinct from `<slice>`, so the two feeds would pair independently with no further change.
+
+Anyone adding it should know that **the translingual feed runs one full slice — 15 minutes — behind the English one** (measured, not assumed). The two can therefore never be assembled into a single atomic payload; each feed must be its own unit, which is exactly how the hand-off below is built.
+
+**The hand-off is atomic per slice.** The two CSVs are assembled in a staging directory and moved into the hand-off directory only when the slice is complete, or when its retrieval deadline (`SLICE_RETRIEVAL_DEADLINE`, 600 s from the slice's own timestamp) expires. While a file is missing and the deadline has not passed, only that file is re-attempted, every `RETRY_TICK` (60 s), addressed directly by its slice timestamp. The poll cycle then sleeps the *remainder* of the 15 minutes, so retrying never pushes the cadence out.
+
+Consequently **anything in the hand-off directory is final**, which is what lets the layers below act on a partial slice instead of waiting for a partner that will never arrive. A partial slice is still useful: events alone update the store, because `gdelt_events` is a `ReplacingMergeTree` keyed on `GLOBALEVENTID` with `DATEADDED` as the version; and mentions alone attach to events already stored, because the referential-integrity check resolves against *this events file **or** the store*. Validation accepts one file or two.
+
 **Bronze to silver.** Events are filtered for supply-chain relevance; approximately 31 of 979 are retained. Mentions are retained only when the event they reference exists, either in the same slice or already in the store. Surviving mentions are enriched with article title and keywords, within the time budget. Both tables are then appended to ClickHouse, and the events deduplication is triggered. The bronze files are deleted at each hand-off, so the bronze layer is continuously cleared.
 
-**Silver to gold.** For each user, events are filtered by territory — CAMEO actor codes **or** FIPS location codes — and the resulting mentions are filtered by keyword, matched against the article URL, or against the enriched title or keywords, according to whether the row was enriched. The two conditions are combined with **and**: an article must match both the territory perimeter and the keyword perimeter. Because both filters are narrow, a single 15-minute slice frequently matches nothing for a given user, which is expected behaviour rather than a fault.
+**Silver to gold.** For each user, events are filtered by territory — CAMEO actor codes **or** FIPS location codes — and the resulting mentions are filtered by keyword. Every mention is searched in **all three** fields: the article URL, the article title and the extracted article keywords. A keyword matches when **all of its tokens** are present, where a token is a single word: `silicon wafers` requires both *silicon* and *wafers*, but not adjacently. Singular and plural collapse onto one another, so `chip` and `chips` are the same word. The territory and keyword conditions are combined with **and**: an article must match both perimeters. Because both filters are narrow, a single 15-minute slice frequently matches nothing for a given user, which is expected behaviour rather than a fault.
+
+Two earlier rules were removed because they were measurably wrong. Keywords were matched as **contiguous phrases**, so `silicon wafers` matched 0 of 99,175 enriched mentions — a headline says "chip firm buys wafer plant", never the procurement phrase verbatim. And each row was routed to exactly **one** field depending on its `enriched` flag, which meant that of the 99,175 enriched rows, the 170 whose URL contained a supply-chain term were never checked against it — enrichment was actively destroying matches.
 
 **Tables retained on failure.** The PySpark path writes to `articles_stage` and `user_articles_stage`, which it creates at the start of each run and drops after a successful publication. They are deliberately **not** dropped when publication fails, so the staged result remains available for inspection; the next run drops and recreates them. Each carries an Oracle table comment recording its purpose and that it may safely be dropped.
 

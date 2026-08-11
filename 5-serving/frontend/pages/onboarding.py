@@ -4,7 +4,9 @@ from configuration.countries import get_territory_options
 # from configuration.sectors import RISK_CATEGORY_OPTIONS  # replaced by the keyword form
 from components.branding import use_neutral_spinner
 from components.keyword_form import render_keyword_questions
+from components.recompute_notice import mark_recompute_pending, render_recompute_notice
 from data.api_client import BackendUnavailable
+from data.gold_layer import get_events_version
 from data.user_store import get_current_user, get_user_profile, is_first_login, save_user_profile
 
 
@@ -54,6 +56,7 @@ monitored_territories = st.multiselect(
 
 st.subheader("Your supply chain")
 st.caption("Add one item at a time. Leave a question empty to ignore it.")
+st.caption("**IMPORTANT**: For legal reasons, we can scrape article titles, not article bodies. In the fields below, **please add words that you believe are very likely to appear in the titles of articles that might interest you**. However, there is no downside to adding esoteric words as well. You can add up to 1000 words per question.")
 keywords = render_keyword_questions(profile, prefix="onboard")
 
 briefing_days = st.slider(
@@ -74,6 +77,14 @@ st.caption(
 )
 
 if st.button("Save profile", type="primary"):
+    # Read the gold fingerprint BEFORE saving: the rebuild is triggered by the
+    # save itself, so a fingerprint taken afterwards could already be the new one
+    # and the notice would never appear.
+    try:
+        version_before_save = get_events_version(user_id)
+    except BackendUnavailable:
+        version_before_save = None
+
     try:
         save_user_profile({
             "user_id":         user_id,
@@ -90,4 +101,8 @@ if st.button("Save profile", type="primary"):
         )
         st.stop()
     st.success("Profile saved.")
+    # The save has triggered a rebuild of this user's article pool; say so here
+    # and keep saying it on the dashboard until the new pool lands.
+    mark_recompute_pending(version_before_save)
+    render_recompute_notice()
     st.page_link("pages/dashboard.py", label="Open dashboard", icon="📊")

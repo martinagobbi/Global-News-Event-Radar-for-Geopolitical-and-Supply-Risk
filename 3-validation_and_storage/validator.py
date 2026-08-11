@@ -57,11 +57,24 @@ def _event_id_series(df):
 
 def validate_pair(paths, storage) -> dict:
     """
-    Validate and ingest one events+mentions pair.
+    Validate and ingest one slice: an events file, a mentions file, or both.
+
+    A PARTIAL slice is legitimate. The ingestion layer releases whatever it
+    retrieved once a slice's deadline passes, and each half still reaches silver
+    on its own:
+
+      * events only   — `gdelt_events` is a ReplacingMergeTree keyed on
+        GLOBALEVENTID with DATEADDED as the version, so appending a re-published
+        event UPDATES the stored copy. The mentions stages are skipped.
+      * mentions only — the referential-integrity check already resolves against
+        "this events file OR the store", so with no events file every id is
+        looked up in ClickHouse and any mention whose event is already stored
+        survives. Mentions for unknown events are dropped, exactly as they would
+        be in a full slice.
 
     Parameters
     ----------
-    paths   : the two file paths currently in latest_files
+    paths   : one or two file paths currently in latest_files
     storage : storage.Storage — used both to look up already-stored event ids
               and to append the validated tables
 
@@ -70,51 +83,62 @@ def validate_pair(paths, storage) -> dict:
     dict summary: counts of rows seen / dropped / appended.
     """
     events_path, mentions_path = _split_pair(paths)
-    if events_path is None or mentions_path is None:
-        raise ValueError("validate_pair requires one events file and one mentions file")
+    if events_path is None and mentions_path is None:
+        raise ValueError("validate_pair requires at least one events or mentions file")
 
-    events_df = load_table(events_path)
-    mentions_df = load_table(mentions_path)
+    events_df = load_table(events_path) if events_path is not None else None
+    mentions_df = load_table(mentions_path) if mentions_path is not None else None
 
-    # ── GLOBALEVENTID referential integrity ──────────────────────────────────
-    event_ids_here = set(_event_id_series(events_df).tolist())
-    mention_ids = _event_id_series(mentions_df)
+    n_events = dropped = n_mentions = 0
+    mentions_clean = None
 
-    # Only the ids NOT already in the current events file need a store lookup.
-    to_lookup = set(mention_ids.tolist()) - event_ids_here
-    event_ids_stored = storage.existing_event_ids(to_lookup)
-    valid_ids = event_ids_here | event_ids_stored
+    # ── Append events ─────────────────────────────────────────────────────────
+    if events_df is not None:
+        n_events = storage.append_events(events_df)
 
-    keep_mask = mention_ids.isin(valid_ids)
-    dropped = int((~keep_mask).sum())
-    mentions_clean = mentions_df[keep_mask].copy()
+    # ── GLOBALEVENTID referential integrity, then enrich and append ───────────
+    if mentions_df is not None:
+        # With no events file this is empty, so every id goes to the store lookup.
+        event_ids_here = (set(_event_id_series(events_df).tolist())
+                          if events_df is not None else set())
+        mention_ids = _event_id_series(mentions_df)
 
-    # ── Enrich the surviving mentions (Newspaper3k → 3 columns) ───────────────
-    # Only the post-filter survivors are scraped; bounded by ENRICH_TIMEOUT.
-    enrich_dataframe(
-        mentions_clean,
-        url_column="MentionIdentifier",
-        max_workers=ENRICH_WORKERS,
-        do_nlp=ENRICH_NLP,
-        time_budget_s=ENRICH_TIMEOUT,
-    )
+        # Only the ids NOT already in the current events file need a store lookup.
+        to_lookup = set(mention_ids.tolist()) - event_ids_here
+        event_ids_stored = storage.existing_event_ids(to_lookup)
+        valid_ids = event_ids_here | event_ids_stored
 
-    if dropped:
-        # Rewrite the file in latest_files so the table itself is cleaned.
-        save_table(mentions_clean, mentions_path)
-        logger.info("Dropped %d unmatched mention rows from %s",
-                    dropped, mentions_path.name)
+        keep_mask = mention_ids.isin(valid_ids)
+        dropped = int((~keep_mask).sum())
+        mentions_clean = mentions_df[keep_mask].copy()
 
-    # ── Append to the wide-column store ───────────────────────────────────────
-    n_events = storage.append_events(events_df)
-    n_mentions = storage.append_mentions(mentions_clean)
+        # Only the post-filter survivors are scraped; bounded by ENRICH_TIMEOUT.
+        enrich_dataframe(
+            mentions_clean,
+            url_column="MentionIdentifier",
+            max_workers=ENRICH_WORKERS,
+            do_nlp=ENRICH_NLP,
+            time_budget_s=ENRICH_TIMEOUT,
+        )
 
+        if dropped:
+            # Rewrite the file in latest_files so the table itself is cleaned.
+            save_table(mentions_clean, mentions_path)
+            logger.info("Dropped %d unmatched mention rows from %s",
+                        dropped, mentions_path.name)
+
+        n_mentions = storage.append_mentions(mentions_clean)
+
+    kinds = "+".join(k for k, v in (("events", events_path),
+                                    ("mentions", mentions_path)) if v is not None)
     return {
-        "events_file": events_path.name,
-        "mentions_file": mentions_path.name,
+        "slice_kinds": kinds,
+        "events_file": events_path.name if events_path is not None else None,
+        "mentions_file": mentions_path.name if mentions_path is not None else None,
         "events_appended": n_events,
-        "mentions_seen": len(mentions_df),
+        "mentions_seen": len(mentions_df) if mentions_df is not None else 0,
         "mentions_dropped": dropped,
         "mentions_appended": n_mentions,
-        "mentions_enriched": int(mentions_clean["enriched"].sum()) if n_mentions else 0,
+        "mentions_enriched": (int(mentions_clean["enriched"].sum())
+                              if n_mentions and mentions_clean is not None else 0),
     }

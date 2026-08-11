@@ -24,6 +24,10 @@ set -euo pipefail
 CH_CONTAINER="${CH_CONTAINER:-pipeline_clickhouse_s1r1}"
 SEED_DIR="${SEED_DIR:-data/silver_seed}"
 TABLES=(gdelt_events gdelt_mentions)
+# The last 15-minute slice covered by the committed seed. `trim seed` uses it, so
+# the window need not be remembered. Update it if the seed is ever rebuilt over a
+# different period.
+SEED_LAST_SLICE="${SEED_LAST_SLICE:-20260727171500}"
 
 ch() { docker exec -i "$CH_CONTAINER" clickhouse-client "$@"; }
 
@@ -45,6 +49,29 @@ case "${1:-}" in
     ;;
 
   restore)
+    # The silver schema is owned by the validation layer, which creates it
+    # ON CLUSTER the first time it reaches ClickHouse. On a fresh clone that
+    # happens seconds after the pipeline starts, so wait rather than failing with
+    # "Unknown table expression" if this is run the moment the containers are up.
+    printf 'waiting for the silver schema (created by the validation layer) '
+    for attempt in $(seq 1 60); do
+      if ch --query "EXISTS TABLE ${TABLES[0]}" 2>/dev/null | grep -q '^1$'; then
+        printf ' ready after %ds\n' "$(( (attempt - 1) * 5 ))"
+        break
+      fi
+      # A dot per attempt: this wait can last minutes on a cold start, and silence
+      # for that long is indistinguishable from a hang.
+      printf '.'
+      sleep 5
+    done
+    printf '\n'
+    if ! ch --query "EXISTS TABLE ${TABLES[0]}" 2>/dev/null | grep -q '^1$'; then
+      echo "ERROR: ${TABLES[0]} still does not exist after 5 minutes." >&2
+      echo "       Is the pipeline running? Start it with:" >&2
+      echo "         docker compose --env-file .env.testing up -d --build" >&2
+      exit 1
+    fi
+
     for t in "${TABLES[@]}"; do
       f="$SEED_DIR/$t.parquet"
       [ -s "$f" ] || { echo "missing or empty: $f — skipped"; continue; }
@@ -65,8 +92,39 @@ case "${1:-}" in
     done
     ;;
 
+  trim)
+    # Drop everything published AFTER a given slice, so the store holds exactly
+    # one known period. Used when rebuilding the seed: the live pipeline keeps
+    # polling while a backfill runs, so silver ends up holding the backfill
+    # window PLUS whatever arrived meanwhile, and a seed built from that would
+    # ship an arbitrary slice of "today" to everyone who clones the repository.
+    #
+    # Events and mentions carry the slice timestamp in different columns, and both
+    # are strings of fixed width, so a lexicographic comparison is also chronological.
+    cutoff="${2:-}"
+    # `trim seed` is the common case: keep exactly the window the committed seed
+    # covers, discarding whatever the live pipeline has polled since.
+    [ "$cutoff" = "seed" ] && cutoff="$SEED_LAST_SLICE"
+    case "$cutoff" in
+      ??????????????) ;;
+      *) echo "usage: $0 trim {seed|<YYYYMMDDHHMMSS>}   (e.g. 20260727171500)" >&2; exit 1 ;;
+    esac
+    echo "removing rows published after $cutoff ..."
+    # mutations_sync=2 waits for every replica, so the counts printed below are final.
+    ch --query "ALTER TABLE gdelt_events_local ON CLUSTER gnews_cluster
+                DELETE WHERE DATEADDED > '$cutoff' SETTINGS mutations_sync = 2" >/dev/null
+    ch --query "ALTER TABLE gdelt_mentions_local ON CLUSTER gnews_cluster
+                DELETE WHERE MentionTimeDate > '$cutoff' SETTINGS mutations_sync = 2" >/dev/null
+    for t in "${TABLES[@]}"; do
+      rows=$(ch --query "SELECT count() FROM $t FINAL")
+      printf '  %-16s %8s rows remain\n' "$t" "$rows"
+    done
+    echo "events  now span: $(ch --query "SELECT concat(min(DATEADDED),' .. ',max(DATEADDED)) FROM gdelt_events FINAL")"
+    echo "mentions now span: $(ch --query "SELECT concat(min(MentionTimeDate),' .. ',max(MentionTimeDate)) FROM gdelt_mentions FINAL")"
+    ;;
+
   *)
-    echo "usage: $0 {export|restore|wipe}" >&2
+    echo "usage: $0 {export|restore|wipe|trim {seed|<YYYYMMDDHHMMSS>}}" >&2
     exit 1
     ;;
 esac

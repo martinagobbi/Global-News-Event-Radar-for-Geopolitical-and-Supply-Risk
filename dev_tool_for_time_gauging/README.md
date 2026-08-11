@@ -1,7 +1,25 @@
-# dev_tool_for_time_gauging — TEMPORARY, DELETE WHEN DONE
+# dev_tool_for_time_gauging
 
-Throwaway measurement tool. **Not part of the pipeline** — nothing imports it,
-no service depends on it. Delete this whole folder when you no longer need it.
+Measurement tooling for the pipeline. **Not part of the pipeline itself** —
+nothing imports it and no service depends on it, so running it (or not) has no
+effect on the system.
+
+It exists to answer questions about throughput with measurements rather than
+estimates, and the figures it produced are what the main README's design notes
+cite. Every full 30-day backfill of the same 2,881 slices is in
+`bulk_load_report.csv`:
+
+| Run | Elapsed | Rate | What it was |
+|----|----|----|----|
+| 2026-08-04 20:24 | 36 min | 79.0 slices/min | enrichment silently failing (a dropped connection) |
+| 2026-08-05 00:05 | 205 min | 14.0 slices/min | enrichment working, but `article.nlp()` never called |
+| 2026-08-11 01:44 | 213 min | 13.5 slices/min | enrichment and keyword extraction both working |
+
+Keeping the reports is what made each of those problems detectable. The 36-minute
+run looked like a success and was not; it was the *timing*, not any error, that
+gave it away. The 8-minute gap between the last two runs is the cost of the NLP
+step that populates `article_keywords` — which the middle run was skipping
+silently, producing a store where every keyword field was empty.
 
 ## What it answers
 

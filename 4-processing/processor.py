@@ -104,6 +104,89 @@ def normalize_keyword_enriched(keyword: str) -> str:
     return _MULTISPACE.sub(" ", keyword.strip())
 
 
+# Anything that is not a letter or a digit separates one token from the next.
+_TOKEN_SPLIT = re.compile(r"[^a-z0-9]+")
+# Below this length a token carries no meaning of its own ("in", "of", "and").
+_MIN_TOKEN_LEN = 3
+
+
+def tokenize_keyword_enriched(keyword: str) -> list[str]:
+    """
+    Split a user keyword into the tokens that must ALL be present for the keyword
+    to match an enriched row.
+
+    Matching a multi-word keyword as one contiguous string is far too strict for
+    news text: "silicon wafers" matched 0 of 99,175 enriched rows, because a
+    headline says "chip firm buys wafer plant", never the procurement phrase
+    verbatim. Splitting into tokens and requiring all of them keeps the keyword's
+    precision without demanding that the words be adjacent.
+
+    Tokens shorter than three characters are dropped from MULTI-word keywords, so
+    "burn-in boards" is not dragged down by "in"; a keyword that is itself short
+    ("R&D" -> ["r", "d"]) keeps its tokens, since dropping them would leave
+    nothing to match on.
+
+    Examples
+    --------
+        "silicon wafers"  -> ["silicon", "wafers"]
+        "burn-in boards"  -> ["burn", "boards"]
+        "TSMC"            -> ["tsmc"]
+        "R&D"             -> ["r", "d"]
+    """
+    if not keyword:
+        return []
+
+    toks = [t for t in _TOKEN_SPLIT.split(keyword.lower()) if t]
+    if len(toks) > 1:
+        longer = [t for t in toks if len(t) >= _MIN_TOKEN_LEN]
+        if longer:
+            toks = longer
+
+    # Dedupe while preserving order, so the generated SQL is stable.
+    seen: set[str] = set()
+    out: list[str] = []
+    for t in toks:
+        if t not in seen:
+            seen.add(t)
+            out.append(t)
+    return out
+
+
+def stem_token(token: str) -> str:
+    """
+    Strip a single trailing 's' so that singular and plural forms collapse onto
+    one another: "chips" -> "chip". "chip" alone matched 125 headlines that
+    "chips" would have missed, so the two must not be treated as different words.
+
+    The SAME rule is applied to the row's own tokens in SQL, so both sides meet in
+    the middle rather than one side being expanded into variants — expanding would
+    multiply an already large predicate count and exhaust ClickHouse's memory.
+
+    Words of three characters or fewer are left alone, so "gas" does not become
+    "ga". Over-stemming is harmless here precisely because it is symmetric.
+    """
+    if len(token) > _MIN_TOKEN_LEN and token.endswith("s"):
+        return token[:-1]
+    return token
+
+
+# The row's text, lower-cased, split into words, and stemmed by the same rule as
+# stem_token(). Evaluated once per row; ClickHouse reuses it across the keyword
+# predicates rather than rebuilding it for each one.
+#
+# splitByRegexp('[^a-z0-9]+', …) rather than the cheaper splitByNonAlpha, because
+# splitByNonAlpha does not treat non-ASCII punctuation as a separator: a headline
+# reading "Novo Nordisk’s owner" (with a typographic apostrophe) tokenised to
+# "nordisk’s", which stemmed to "nordisk’" and never matched the keyword
+# "Nordisk". The pattern is character-for-character the one the Spark path uses,
+# so the two engines tokenise identically.
+_ROW_TOKENS_SQL = (
+    "arrayMap(t -> if(length(t) > {min_len} AND endsWith(t, 's'),"
+    " substring(t, 1, length(t) - 1), t),"
+    " splitByRegexp('[^a-z0-9]+', lower(concat({title}, ' ', {keywords}))))"
+)
+
+
 def build_keyword_clause(
     keywords,
     url_column: str = "MentionIdentifier",
@@ -112,22 +195,28 @@ def build_keyword_clause(
     enriched_column: str = "enriched",
 ):
     """
-    Row-conditional keyword match for the enriched mentions table. A row matches
-    if a keyword is found in the field appropriate to THAT row:
+    Keyword match for the mentions table. A row matches when ANY of the user's
+    keywords matches, and a keyword matches when ALL of its tokens are found —
+    in the URL, the article title, or the extracted article keywords.
 
-        enriched = 0                           -> search the URL
-        enriched = 1 AND article_keywords = '' -> search lower(article_title)
-        enriched = 1 AND article_keywords <> ''-> search article_keywords
+    The three fields are searched for EVERY row, regardless of `enriched`. An
+    earlier version routed each row to exactly one field (URL if enriched = 0,
+    else article_keywords when non-empty, else article_title). That was actively
+    harmful: of 99,175 enriched rows, 170 had a supply-chain term in their URL
+    that was never looked at, against 16 counted among the 12,255 unenriched
+    ones. Marking a row enriched disqualified it from the field most likely to
+    match. Searching all three fields also makes an empty `article_keywords`
+    harmless, which matters because rows loaded before the NLTK data was added to
+    the bootstrap image have no keywords at all.
 
-    Two different normalisations are applied to the search words:
-        * URL branch      -> normalize_keyword()          (lower-case, hyphenation,
-                                                            &/math-logic branching)
-        * enriched branch -> normalize_keyword_enriched() (trim + collapse spaces
-                                                            only; symbols & case kept)
+    Two normalisations are applied, because the fields differ in shape:
+        * URL   -> normalize_keyword(), whose hyphenated variants suit URL slugs,
+                   matched with LIKE so the ngrambf index on lower(url) is used.
+        * text  -> tokenize_keyword_enriched(), matched with hasToken so that
+                   whole words are required: "chip" must not match "chipotle".
 
-    URL matches use LIKE (backed by the ngrambf index on lower(url)); enriched
-    matches use position() — an exact, wildcard-free substring search — so that
-    symbols kept in the keyword are matched literally.
+    `enriched_column` is retained in the signature for callers that still pass it,
+    but no longer affects which fields are searched.
 
     Returns (sql_fragment, params); ("", {}) when there are no usable keywords.
     """
@@ -138,37 +227,39 @@ def build_keyword_clause(
     for kw in keywords:
         url_variants |= normalize_keyword(kw)
 
-    enr_variants = {normalize_keyword_enriched(kw) for kw in keywords}
-    enr_variants.discard("")
+    token_groups = [toks for toks in (tokenize_keyword_enriched(kw) for kw in keywords) if toks]
 
     params: dict = {}
     branches: list[str] = []
 
-    # enriched = 0 → the URL (heavy/hyphen variants, case-insensitive via lower)
+    # ── The URL, for every row ────────────────────────────────────────────────
+    # One multiSearchAny over the whole variant list, not one LIKE per variant.
+    # A 100-keyword profile expands to roughly 200 URL variants, and 200 separate
+    # `lower(url) LIKE …` predicates means 200 lower-cased copies of the column
+    # per row — enough to exhaust ClickHouse's memory cap (error 241) on a real
+    # recompute. multiSearchAny lower-cases once and scans for every needle in a
+    # single pass, and matches exactly what the chain of LIKEs matched.
     if url_variants:
-        likes = []
-        for i, v in enumerate(sorted(url_variants)):
-            key = f"kw_url_{i}"
-            params[key] = f"%{v}%"
-            likes.append(f"lower({url_column}) LIKE %({key})s")
-        branches.append(f"({enriched_column} = 0 AND (" + " OR ".join(likes) + "))")
+        params["kw_url"] = sorted(url_variants)
+        branches.append(f"multiSearchAny(lower({url_column}), %(kw_url)s)")
 
-    # enriched = 1 → article_title when keywords are empty, else article_keywords
-    if enr_variants:
-        title_pos, kw_pos = [], []
-        for i, v in enumerate(sorted(enr_variants)):
-            key = f"kw_enr_{i}"
-            params[key] = v  # literal substring; symbols & case preserved
-            title_pos.append(f"position(lower({title_column}), %({key})s) > 0")
-            kw_pos.append(f"position({keywords_column}, %({key})s) > 0")
-        branches.append(
-            f"({enriched_column} = 1 AND {keywords_column} = '' AND ("
-            + " OR ".join(title_pos) + "))"
+    # ── The enriched text, for every row ──────────────────────────────────────
+    # The row's title and keywords are tokenised ONCE into a stemmed array, and
+    # each keyword becomes a single hasAll() against it. Calling a string function
+    # per keyword instead (position, hasToken) meant several hundred predicates
+    # for a 100-keyword profile, each re-reading the row — enough to exhaust
+    # ClickHouse's memory cap on a full scan (error 241). hasAll also expresses
+    # the "all tokens of this keyword must be present" rule directly.
+    if token_groups:
+        row_tokens = _ROW_TOKENS_SQL.format(
+            min_len=_MIN_TOKEN_LEN, title=title_column, keywords=keywords_column
         )
-        branches.append(
-            f"({enriched_column} = 1 AND {keywords_column} != '' AND ("
-            + " OR ".join(kw_pos) + "))"
-        )
+        # The keywords travel as ONE array-of-arrays parameter and the row-token
+        # expression is written exactly once, inside the lambda. Emitting a
+        # separate hasAll() per keyword repeated that expression 100 times and
+        # pushed the query past ClickHouse's max_query_size (error 62).
+        params["kw_tok"] = [[stem_token(t) for t in toks] for toks in token_groups]
+        branches.append(f"arrayExists(kw -> hasAll({row_tokens}, kw), %(kw_tok)s)")
 
     return "(" + " OR ".join(branches) + ")", params
 

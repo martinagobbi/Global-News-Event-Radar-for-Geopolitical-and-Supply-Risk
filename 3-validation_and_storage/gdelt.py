@@ -90,6 +90,21 @@ def is_valid_pair(paths) -> bool:
     return kinds == ["events", "mentions"]
 
 
+def is_processable(paths) -> bool:
+    """
+    True if the given files form a slice this layer can ingest: one events file,
+    one mentions file, or one of each.
+
+    Looser than is_valid_pair() because a slice may legitimately arrive partial —
+    ingestion releases whatever it retrieved once the slice's retrieval deadline
+    passes, and each half reaches silver on its own. What is still rejected is a
+    file whose kind cannot be determined, or two files of the SAME kind, which
+    would mean the hand-off directory holds something unexpected.
+    """
+    kinds = sorted(classify(p) for p in paths)
+    return kinds in (["events"], ["mentions"], ["events", "mentions"])
+
+
 # ── Loading (ZIP or CSV) ─────────────────────────────────────────────────────
 
 def _read_bytes(path: Path) -> bytes:

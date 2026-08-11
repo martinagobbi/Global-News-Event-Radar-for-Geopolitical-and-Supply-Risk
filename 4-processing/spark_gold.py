@@ -59,7 +59,7 @@ from pyspark.sql import functions as F
 from pyspark.sql.types import BinaryType
 
 import countries
-from processor import normalize_keyword, normalize_keyword_enriched
+from processor import normalize_keyword, tokenize_keyword_enriched, stem_token
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s [%(levelname)s] %(name)s — %(message)s")
@@ -232,22 +232,39 @@ def user_predicate(profile: dict):
         url_variants: set[str] = set()
         for k in raw_keywords:
             url_variants |= normalize_keyword(k)
-        enr_variants = {normalize_keyword_enriched(k) for k in raw_keywords} - {""}
+        token_groups = [t for t in (tokenize_keyword_enriched(k) for k in raw_keywords) if t]
 
         parts = []
+        # The URL, for every row — mirrors the LIKE branch of build_keyword_clause.
         if url_variants:
             url_hit = F.lit(False)
             for v in sorted(url_variants):
                 url_hit = url_hit | F.lower(F.col("MentionIdentifier")).contains(v)
-            parts.append((F.col("enriched") == 0) & url_hit)
-        if enr_variants:
-            title_hit = F.lit(False)
-            kw_hit = F.lit(False)
-            for v in sorted(enr_variants):
-                title_hit = title_hit | F.lower(F.col("article_title")).contains(v.lower())
-                kw_hit = kw_hit | F.col("article_keywords").contains(v)
-            parts.append((F.col("enriched") == 1) & (F.col("article_keywords") == "") & title_hit)
-            parts.append((F.col("enriched") == 1) & (F.col("article_keywords") != "") & kw_hit)
+            parts.append(url_hit)
+
+        # The enriched text, for every row. Mirrors build_keyword_clause exactly:
+        # the row's title and keywords are tokenised once and stemmed by the same
+        # rule as stem_token(), then each keyword requires ALL of its tokens.
+        # `enriched` is deliberately NOT consulted — see build_keyword_clause for
+        # why routing each row to a single field discarded real matches.
+        if token_groups:
+            row_tokens = (
+                "array_distinct(transform("
+                "  split(lower(concat_ws(' ', article_title, article_keywords)), '[^a-z0-9]+'),"
+                "  t -> CASE WHEN length(t) > 3 AND right(t, 1) = 's'"
+                "            THEN substring(t, 1, length(t) - 1) ELSE t END))"
+            )
+            text_hit = F.lit(False)
+            for toks in token_groups:
+                stems = [stem_token(t) for t in toks]
+                arr = "array(" + ", ".join(
+                    "'" + s.replace("\\", "\\\\").replace("'", "\\'") + "'" for s in stems
+                ) + ")"
+                text_hit = text_hit | F.expr(
+                    f"forall({arr}, s -> array_contains({row_tokens}, s))"
+                )
+            parts.append(text_hit)
+
         if parts:
             kw = parts[0]
             for p in parts[1:]:

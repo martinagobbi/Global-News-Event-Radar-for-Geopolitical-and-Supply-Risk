@@ -132,6 +132,22 @@ def write_user_articles(user_id: str, document_identifiers: list[str]) -> int:
     return inserted
 
 
+def mark_pipeline_stale() -> None:
+    """
+    Flag the gold as stale WITHOUT moving timestamp_of_last_update.
+
+    write_pipeline_status() defaults that column to now, which is right when a
+    recompute has just happened and wrong here: the whole point of this call is
+    that nothing has been refreshed, so advancing the timestamp would make stale
+    data look freshly built to the serving tier.
+    """
+    with _connect() as conn:
+        cur = conn.cursor()
+        cur.execute("UPDATE pipeline_status SET status = 'ERROR'")
+        conn.commit()
+    logger.warning("Marked pipeline_status=ERROR (silver stopped advancing)")
+
+
 def write_pipeline_status(status: str, ts: datetime | None = None) -> None:
     """Replace pipeline_status with a single (status, timestamp) row."""
     with _connect() as conn:

@@ -27,20 +27,55 @@ logger = logging.getLogger("processing.triggers")
 
 WATERMARK_POLL_SECONDS = int(os.getenv("WATERMARK_POLL_SECONDS", "60"))
 CHANGE_STREAM_RETRY_SECONDS = int(os.getenv("CHANGE_STREAM_RETRY_SECONDS", "5"))
+# Two missed 15-minute slices plus margin. Beyond this, silver has stopped
+# growing and the gold on display is no longer being refreshed.
+SILVER_STALE_SECONDS = int(os.getenv("SILVER_STALE_SECONDS", str(45 * 60)))
 
 
-def _silver_watermark_loop(ch_factory, recompute_all) -> None:
-    """Recompute everyone whenever the silver store grows (new DATEADDED)."""
+def _silver_watermark_loop(ch_factory, recompute_all, report_stale=None) -> None:
+    """
+    Recompute everyone whenever the silver store grows.
+
+    The watermark is max(DATEADDED) in gdelt_events, and it is required to move
+    strictly FORWARDS. An equal value means nothing new arrived; a lower one means
+    the store was rebuilt behind us (a seed restored over newer data, say), and
+    recomputing then would rebuild gold from a smaller history than it already
+    reflects. Either way there is nothing to do.
+
+    If the watermark has not advanced within SILVER_STALE_SECONDS, the upstream
+    pipeline has stopped delivering. That is reported rather than passed over in
+    silence, because gold simply freezing looks identical to gold being current.
+    """
     last = None
+    last_advance = time.monotonic()
+    reported_stale = False
+
     while True:
         try:
             with ch_factory() as ch:
                 watermark = ch.silver_watermark()
-            if watermark and watermark != last:
+            if watermark and (last is None or watermark > last):
                 logger.info("Silver watermark %s -> %s; running recompute_all()",
                             last, watermark)
                 recompute_all()
                 last = watermark
+                last_advance = time.monotonic()
+                reported_stale = False
+            elif watermark and last is not None and watermark < last:
+                logger.warning("Silver watermark went backwards (%s -> %s); "
+                               "not recomputing", last, watermark)
+
+            idle = time.monotonic() - last_advance
+            if idle > SILVER_STALE_SECONDS and not reported_stale:
+                logger.error("Silver has not advanced for %.0f min — the upstream "
+                             "pipeline appears stalled; gold is no longer being "
+                             "refreshed", idle / 60)
+                if report_stale is not None:
+                    try:
+                        report_stale(int(idle))
+                    except Exception as exc:  # noqa: BLE001 — reporting must not crash the loop
+                        logger.warning("could not record stale status: %s", exc)
+                reported_stale = True
         except Exception as exc:  # noqa: BLE001 — best-effort, never crash
             logger.warning("silver watermark poll failed: %s", exc)
         time.sleep(WATERMARK_POLL_SECONDS)
@@ -75,10 +110,10 @@ def _users_change_stream_loop(recompute_user) -> None:
             time.sleep(CHANGE_STREAM_RETRY_SECONDS)
 
 
-def start(ch_factory, recompute_all, recompute_user) -> None:
+def start(ch_factory, recompute_all, recompute_user, report_stale=None) -> None:
     """Launch the two trigger threads as daemons."""
     threading.Thread(
-        target=_silver_watermark_loop, args=(ch_factory, recompute_all),
+        target=_silver_watermark_loop, args=(ch_factory, recompute_all, report_stale),
         name="silver-watermark", daemon=True,
     ).start()
     threading.Thread(

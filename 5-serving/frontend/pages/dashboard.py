@@ -16,6 +16,13 @@ from data.gold_layer import (
     get_system_status,
 )
 from data.user_store import get_current_user, get_user_profile, is_first_login
+from components.recompute_notice import (
+    gold_never_built,
+    recompute_pending,
+    render_first_build_notice,
+    render_no_matches_notice,
+    render_recompute_notice,
+)
 
 
 STATUS_POLL_SECONDS  = 30
@@ -70,11 +77,19 @@ elif system_status.get("status") == "ERROR":
         f"{last_update}."
     )
 
+# ── Preferences just changed: the pool is being rebuilt ────────────────────
+# Shown from the moment preferences are saved until the rebuild lands, so the
+# dashboard never silently shows articles chosen by the old preferences. It
+# clears itself when the fingerprint moves, and the green message below then
+# announces the new set.
+if recompute_pending(live_gold_version):
+    render_recompute_notice()
+
 # ── "Your articles changed" nudge (green = good news) ──────────────────────
 # live_gold_version is polled cheaply every rerun; st.session_state.gold_version
 # is the version the currently-shown events were rendered against (set in the
 # data-fetch block below). If they differ, new gold has arrived for this user.
-if (
+elif (
     live_gold_version is not None
     and st.session_state.get("gold_version") not in (None, live_gold_version)
 ):
@@ -165,6 +180,16 @@ with sidebar_col:
 
 # ── Briefing ───────────────────────────────────────────────────────────────
 st.subheader("Radar Briefing")
+
+# An empty briefing has two very different causes, and they must not look alike:
+# the gold layer has never been built yet, or it has been built and nothing
+# matched this user's filters.
+if not events:
+    if gold_never_built(system_status):
+        render_first_build_notice()
+    else:
+        render_no_matches_notice()
+
 render_briefing(events, selected_countries=selected_countries, older_events=older_events if show_older else [])
 
 # ── Polling loop ───────────────────────────────────────────────────────────
