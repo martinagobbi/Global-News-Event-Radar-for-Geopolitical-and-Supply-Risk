@@ -415,20 +415,18 @@ takes an explicit cutoff. Skip all three to keep the live history. In intended
 mode the first command uses `--env-file .env.full`.
 
 **What the third command does to the gold layer, precisely.** `trim` only touches
-silver, so the rebuild is what propagates the change — and it does so
-asymmetrically:
+silver, so the rebuild is what propagates the change into gold:
 
 - **`user_articles` is rebuilt from scratch per user** (`DELETE … WHERE user_id`,
-  then re-insert). Every article that no longer survives the trim disappears from
-  the user's pool, so **nothing removed from silver is still visible on the
-  dashboard**.
-- **`articles` is upserted, never deleted** (`MERGE INTO`). Rows for trimmed
-  articles remain in the table as orphans.
+  then re-insert), so every article that no longer survives the trim disappears
+  from that user's pool.
+- **`articles` is upserted** (`MERGE INTO`) and then **swept**: any row no
+  `user_articles` row still references is deleted.
 
-Serving joins `user_articles → articles`, so an orphan is unreachable and harmless
-— it costs a little space and nothing else. If you want `articles` itself empty of
-them, the volume must be recreated, which also destroys the profiles and tags
-stored alongside it.
+The sweep is what stops `articles` growing forever. It runs at the end of every
+recompute — full or single-user — so it also fires when someone narrows their own
+preferences on the dashboard, not only after a trim. See
+[Orphaned gold rows](#orphaned-gold-rows-and-why-they-can-be-removed-safely).
 
 **Testing mode:**
 
@@ -938,6 +936,41 @@ Territories are matched by two independent code systems: **CAMEO** three-letter 
 The two published lookups do not cover an identical set of places. Reconciling them produced 237 entries, of which **eight have a FIPS code but no CAMEO code** — that is, they can be matched as the location of an event, but never as an actor. Two are sovereign states: **Kosovo** and **South Sudan** (the CAMEO list predates South Sudan's independence). The remaining six are territories: the British Indian Ocean Territory, the French Southern and Antarctic Lands, Guernsey, Jersey, Saint Martin and Saint-Barthélemy. Two further entries have the converse limitation, holding a CAMEO code but no FIPS code: the Åland Islands and Palestine.
 
 Reconciliation also required correcting errors in the published data — the FIPS list mislabels Guinea's code as Equatorial Guinea, and labels Slovakia's code as Czechoslovakia — and merging divergent spellings of the same place, such as `Cote dIvoire` against `Ivory Coast`, and `Columbia` against `Colombia`. The Palestinian territories are consolidated into a single entry carrying all five related codes, so that selecting it matches both actor and location.
+
+## Orphaned gold rows, and why they can be removed safely
+
+The gold layer is normalised into `articles` (one row per document) and
+`user_articles` (the `(user_id, doc_id)` join). The two are written with different
+semantics, and that asymmetry used to leave rubbish behind:
+
+- `user_articles` is **rebuilt** per user on every recompute, so a user's set is
+  always exactly what their current preferences select;
+- `articles` is written with **MERGE**, which only ever inserts or updates.
+
+So whenever a user narrowed their territories or keywords — or silver was trimmed
+— the articles they dropped stayed in `articles`, referenced by nobody. They were
+unreachable, because serving joins `user_articles → articles`, but they
+accumulated without limit.
+
+They are now swept at the end of every recompute:
+
+```sql
+DELETE FROM articles a
+WHERE NOT EXISTS (SELECT 1 FROM user_articles ua WHERE ua.doc_id = a.doc_id)
+```
+
+**This destroys nothing but the orphans.** A row referenced by *any* user is kept
+by the anti-join, which is why the sweep is safe even after a single-user
+recompute: user A dropping an article that user B still holds does not remove it.
+`user_articles` is untouched, and so are MongoDB (profiles, tags) and the silver
+layer. No volume has to be recreated — an earlier version of this document
+claimed otherwise, and was wrong.
+
+`NOT EXISTS` rather than `NOT IN`: Oracle optimises the anti-join, and `NOT IN`
+would silently match nothing at all if any `doc_id` were ever NULL.
+
+The same sweep runs in the PySpark path, inside the publish transaction and after
+`user_articles` has been rebuilt, so both paths leave the same state.
 
 ## Why an article never appears twice in the gold layer
 

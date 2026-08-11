@@ -431,7 +431,9 @@ def publish(processed_uids: list[str]) -> None:
     Move the staged rows into the live tables, in ONE transaction, reproducing
     exactly what the pandas path does:
 
-      articles        — MERGE (upsert) on doc_id; rows are never deleted.
+      articles        — MERGE (upsert) on doc_id, then any row no user still
+                        references is deleted, so the table cannot accumulate
+                        unreachable rows.
       user_articles   — every processed user's rows are deleted and re-inserted,
                         including users who matched nothing this run (so their old
                         set is cleared), which is what write_user_articles([]) did.
@@ -453,6 +455,15 @@ def publish(processed_uids: list[str]) -> None:
                 "INSERT INTO user_articles (user_id, doc_id) "
                 "SELECT user_id, doc_id FROM user_articles_stage")
             logger.info("user_articles: replaced %d rows with %d", deleted, cur.rowcount)
+
+        # Purge orphans AFTER user_articles has been rebuilt, so the anti-join
+        # sees the new sets. Mirrors oracle_writer.delete_orphan_articles(), and
+        # is inside the same transaction as everything else here.
+        cur.execute(
+            "DELETE FROM articles a WHERE NOT EXISTS "
+            "(SELECT 1 FROM user_articles ua WHERE ua.doc_id = a.doc_id)")
+        if cur.rowcount:
+            logger.info("articles: removed %d orphaned rows", cur.rowcount)
 
         state = read_pipeline_status()
         cur.execute("DELETE FROM pipeline_status")

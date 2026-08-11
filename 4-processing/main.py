@@ -161,9 +161,15 @@ def recompute_all() -> dict:
     # `articles` only needs the rows some user references (serving joins
     # user_articles -> articles); upsert the de-duplicated union once.
     n_articles = oracle_writer.write_articles(list(catalog.values()))
+    # Every user_articles set has just been rebuilt, so anything in `articles`
+    # still unreferenced is genuinely orphaned — narrowed preferences, or silver
+    # that has been trimmed away. This is also what makes the documented
+    # `trim seed` + recompute sequence leave the gold layer fully consistent.
+    n_orphans = oracle_writer.delete_orphan_articles()
     state = read_pipeline_status().get("state", "OK")
     oracle_writer.write_pipeline_status(state, datetime.now(timezone.utc))
-    return {"articles": n_articles, "users": per_user, "pipeline_status": state}
+    return {"articles": n_articles, "orphans_removed": n_orphans,
+            "users": per_user, "pipeline_status": state}
 
 
 @app.post("/process-all")
@@ -192,7 +198,12 @@ def recompute_user(user_id: str) -> int | None:
     # Upsert the articles this user references so the user_articles join is
     # always satisfied even if /process-all hasn't run yet.
     oracle_writer.write_articles(rows)
-    return oracle_writer.write_user_articles(user_id, docs)
+    n = oracle_writer.write_user_articles(user_id, docs)
+    # This user's set has just been replaced, so articles they dropped may now be
+    # referenced by nobody. Rows any OTHER user still references are kept by the
+    # anti-join, so purging here is safe even though only one user was recomputed.
+    oracle_writer.delete_orphan_articles()
+    return n
 
 
 @app.post("/process/{user_id}")

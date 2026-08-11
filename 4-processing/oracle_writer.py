@@ -132,6 +132,38 @@ def write_user_articles(user_id: str, document_identifiers: list[str]) -> int:
     return inserted
 
 
+def delete_orphan_articles() -> int:
+    """
+    Remove rows from `articles` that no `user_articles` row references.
+
+    `articles` is written with MERGE (upsert) and never deleted from, so it only
+    ever grows. `user_articles`, by contrast, is rebuilt per user, so an article
+    stops being referenced the moment a user narrows their preferences or the
+    silver it came from is trimmed away. Those rows are unreachable — serving
+    joins user_articles -> articles — but they accumulate indefinitely.
+
+    Deleting them is precise and destroys nothing else: rows still referenced by
+    ANY user are kept by the NOT EXISTS, `user_articles` is untouched, and so are
+    MongoDB (profiles, tags) and the silver layer. This is why the cleanup does
+    not require recreating the Oracle volume.
+
+    NOT EXISTS rather than NOT IN: an anti-join is what Oracle optimises for here,
+    and NOT IN would return nothing at all if any doc_id were ever NULL.
+    """
+    sql = (
+        "DELETE FROM articles a WHERE NOT EXISTS "
+        "(SELECT 1 FROM user_articles ua WHERE ua.doc_id = a.doc_id)"
+    )
+    with _connect() as conn:
+        cur = conn.cursor()
+        cur.execute(sql)
+        removed = cur.rowcount
+        conn.commit()
+    if removed:
+        logger.info("Removed %d orphaned rows from Oracle articles", removed)
+    return removed
+
+
 def mark_pipeline_stale() -> None:
     """
     Flag the gold as stale WITHOUT moving timestamp_of_last_update.
