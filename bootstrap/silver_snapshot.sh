@@ -78,7 +78,15 @@ case "${1:-}" in
       echo "restoring $t ..."
       # The Distributed table routes each row to its shard, exactly as a live
       # write would, so the sharding stays consistent with the cluster layout.
-      ch --query "INSERT INTO $t FORMAT Parquet" < "$f"
+      # insert_deduplicate=0 is REQUIRED, not an optimisation. ReplicatedMergeTree
+      # remembers the checksums of recently inserted blocks and silently skips a
+      # block it has seen before. Restoring the same seed file after rows were
+      # deleted — by `trim`, or by the retention job — inserts byte-identical
+      # blocks, which ClickHouse would drop as duplicates: the command reports
+      # success and restores NOTHING. Correctness does not depend on this
+      # de-duplication anyway, because both tables are ReplacingMergeTree and
+      # collapse genuine duplicate rows by key at merge/FINAL time.
+      ch --query "INSERT INTO $t SETTINGS insert_deduplicate = 0 FORMAT Parquet" < "$f"
       rows=$(ch --query "SELECT count() FROM $t FINAL")
       printf '  %-16s now %s rows\n' "$t" "$rows"
     done

@@ -738,6 +738,17 @@ ENRICH=1 docker compose -f docker-compose.bootstrap.yml run --rm bootstrap
 the same counts rather than duplicating them — measured: a second restore left the
 totals unchanged at 103,972 and 111,430.
 
+**And why the restore disables insert de-duplication.** `ReplicatedMergeTree` keeps
+the checksums of recently inserted blocks and silently skips any block it has seen
+before. That is a useful protection against a retried insert, but it makes restore
+*after a deletion* fail in the worst possible way: the seed file produces
+byte-identical blocks, ClickHouse recognises them, drops them, and the command
+reports success having restored **nothing**. It was measured doing exactly that —
+after the retention job removed 7,471 events, `restore` reported "now 96501 rows",
+i.e. the survivors and not one row more. `restore` therefore issues
+`SETTINGS insert_deduplicate = 0`. Correctness does not depend on the skipped
+check, because the `ReplacingMergeTree` key collapses genuine duplicates anyway.
+
 **Why gold is not snapshotted.** Only silver is captured. Gold is derived, and
 derived per user: it depends on the territories and keywords in each profile, which
 differ per installation. Shipping a gold snapshot would bake one set of users'
@@ -993,6 +1004,43 @@ mentions whose event has vanished — the state the referential-integrity check
 assumes cannot happen. In Oracle, `user_articles` goes before `articles`, so the
 join never briefly points at rows that are already gone.
 
+**No query here nests one silver table inside another**, and on a sharded cluster
+that restriction is not optional. `gdelt_events` and `gdelt_mentions` are
+`Distributed` tables, and ClickHouse refuses a *distributed subquery inside a
+distributed query* by default:
+
+```
+Code: 288. Double-distributed IN/JOIN subqueries is denied
+           (distributed_product_mode = 'deny')
+```
+
+Measured on a real two-shard cluster: `… WHERE GLOBALEVENTID IN (SELECT … FROM
+gdelt_events …)` fails with exactly that, while the same query with a **literal**
+id list succeeds. A top-level `JOIN` between two such subqueries happens to be
+accepted by the current version, but the margin is thin enough not to rely on.
+
+The expiry set is therefore built from three single-table queries — plain
+aggregates and literal `IN` lists — combined in Python. This is exact rather than
+approximate because both tables shard on `cityHash64(GLOBALEVENTID)`: every
+mention of an event lives on the same shard as the event, so each shard's
+`GROUP BY GLOBALEVENTID` is already complete. Verified to return an identical
+result on one shard and on two.
+
+**Deletes are issued in batches**, because the ids are substituted into the SQL
+text and `max_query_size` caps a statement at 256 KB — roughly 21,800 ids, or six
+days of this pipeline's output. A nightly run is nowhere near that: only the events
+that turned ten years old *that day* expire, some 3,500 of them. The cases that
+would overflow are a machine that was off for a week or more, whose catch-up run
+clears the whole backlog at once, and the first run after `RETENTION_YEARS` is
+shortened, which retires years of history in one go.
+
+**In intended mode the deletes are slower.** `mutations_sync = 2` waits for every
+replica to apply the mutation, which is what makes the reported counts final. With
+one replica that returns immediately; with three it waits for all of them, and if
+one is down it blocks until `replication_wait_for_inactive_replica_timeout`
+(120 s) and then errors. Nothing is lost when that happens — the day's marker is
+only written after a successful run, so the next daily pass retries the same work.
+
 **Schedule.** Daily at 00:00, plus a catch-up on startup when a midnight was
 missed — a laptop that sleeps overnight would otherwise never clean up at all.
 The last run is recorded in `/data/state/retention.json`, written atomically, so
@@ -1238,6 +1286,13 @@ it by re-deriving the decision for every article in gold:
 ```bash
 docker compose -f docker-compose.diagnostics.yml run --rm diagnostics
 ```
+
+**In intended mode, run this on the stores machine.** It reaches ClickHouse,
+MongoDB and Oracle by their Docker service names, which resolve only where those
+containers run; from the pipeline machine the names do not resolve and it cannot
+connect. The same applies to `docker-compose.bootstrap.yml` and
+`docker-compose.spark.yml`. In testing mode everything is on one machine, so the
+distinction does not arise.
 
 It reads all three stores read-only, writes no store, and produces
 `gold_provenance.csv` — one row per article per user, naming the parsing

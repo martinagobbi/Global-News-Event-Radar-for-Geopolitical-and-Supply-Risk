@@ -62,6 +62,9 @@ RETENTION_STATE_FILE = STATE_DIR / "retention.json"
 TICK_SECONDS = int(os.getenv("RETENTION_TICK_SECONDS", "300"))
 # Oracle's IN list caps at 1000 entries.
 _ORACLE_IN_CHUNK = 900
+# Ids per ClickHouse statement. Well under the ~21,800 that max_query_size allows,
+# so a batch cannot approach the limit even if ids grow longer.
+ID_CHUNK = int(os.getenv("RETENTION_ID_CHUNK", "10000"))
 
 
 # ── Durable last-run marker ──────────────────────────────────────────────────
@@ -99,29 +102,105 @@ def _due(now: datetime, last_run: datetime | None) -> bool:
     return last_run < midnight
 
 
+# ── Statement sizing ─────────────────────────────────────────────────────────
+
+def _chunked(ids: list[int], size: int | None = None):
+    """
+    Split an id list into statement-sized batches.
+
+    clickhouse-driver substitutes an `IN %(ids)s` list into the SQL text on the
+    client, so the statement grows with the number of ids and is capped by the
+    server's max_query_size (256 KB by default). At roughly 12 bytes per id that
+    is about 21,800 ids, or six days of this pipeline's output.
+
+    A normal nightly run is far below that — only the events that turned ten years
+    old that day expire, some 3,500 of them, about 41 KB. The cases that overflow
+    are the ones where a single run covers a longer stretch: a machine that was
+    off for a week or more (the catch-up runs once and clears the whole backlog),
+    or the first run after RETENTION_YEARS is shortened, which retires years of
+    history at once. Batching costs nothing in the normal case and removes the
+    cliff in those.
+
+    `size` is resolved at CALL time, not bound as a default argument: a default is
+    evaluated once when the function is defined, which would freeze ID_CHUNK at
+    import and make the batch size impossible to change afterwards — including
+    from a test.
+    """
+    size = size or ID_CHUNK
+    for start in range(0, len(ids), size):
+        yield ids[start:start + size]
+
+
 # ── The three stores ─────────────────────────────────────────────────────────
 
 def find_expired_event_ids(ch, cutoff: str) -> list[int]:
     """
     GLOBALEVENTIDs whose newest article predates `cutoff` (YYYYMMDDHHMMSS).
 
-    An event with no mentions at all has no "most recent article", so it falls
-    back to its own DATEADDED — otherwise such rows could never expire.
+    An event with no usable article timestamp has no "most recent article", so it
+    falls back to its own DATEADDED — otherwise such rows could never expire.
+
+    Deliberately THREE single-table queries combined in Python, with literal id
+    lists and no nested table reads. gdelt_events and gdelt_mentions are
+    Distributed tables, and ClickHouse denies a distributed subquery inside a
+    distributed query by default:
+
+        Code: 288. Double-distributed IN/JOIN subqueries is denied
+                   (distributed_product_mode = 'deny')
+
+    Measured on a real two-shard cluster: `WHERE GLOBALEVENTID IN (SELECT ...)`
+    fails with exactly that, while the same query with a literal id list succeeds.
+    A top-level JOIN of two such subqueries — which this function used to use —
+    turns out to be accepted by the current version and returned the right answer
+    on two shards, so this is not a bug fix; it is removing a dependence on a
+    distinction thin enough to break quietly. Every other ClickHouse query in the
+    project already sticks to plain aggregates and literal IN lists.
+
+    The split is exact rather than approximate because both tables shard on
+    cityHash64(GLOBALEVENTID): every mention of an event lives on the same shard
+    as the event, so each shard's GROUP BY GLOBALEVENTID is already complete and
+    the merged aggregates are correct.
+
+        A = events whose newest usable mention time is older than the cutoff
+        D = events whose own DATEADDED is older than the cutoff
+        H = those of D that have a usable mention time (so do NOT use the fallback)
+        expired = A | (D - H)
+
+    The `!= ''` guard is load-bearing. An empty string sorts BELOW any digit
+    string, so without it an event whose mention timestamps were all blank would
+    look ancient and be deleted regardless of its DATEADDED — silently dropping
+    the fallback the previous query performed with `if(m.newest = '', ...)`.
     """
-    sql = """
-        SELECT e.GLOBALEVENTID
-        FROM (
-            SELECT GLOBALEVENTID, max(toString(DATEADDED)) AS added
-            FROM gdelt_events FINAL GROUP BY GLOBALEVENTID
-        ) e
-        LEFT JOIN (
-            SELECT GLOBALEVENTID, max(MentionTimeDate) AS newest
-            FROM gdelt_mentions FINAL GROUP BY GLOBALEVENTID
-        ) m ON e.GLOBALEVENTID = m.GLOBALEVENTID
-        WHERE if(m.newest = '' OR m.newest IS NULL, e.added, m.newest) < %(cutoff)s
-    """
-    rows = ch._get_client().execute(sql, {"cutoff": cutoff})
-    return [int(r[0]) for r in rows]
+    client = ch._get_client()
+
+    a_rows = client.execute(
+        "SELECT GLOBALEVENTID FROM gdelt_mentions FINAL GROUP BY GLOBALEVENTID "
+        "HAVING max(MentionTimeDate) != '' AND max(MentionTimeDate) < %(cutoff)s",
+        {"cutoff": cutoff},
+    )
+    expired = {int(r[0]) for r in a_rows}
+
+    d_rows = client.execute(
+        "SELECT GLOBALEVENTID FROM gdelt_events FINAL GROUP BY GLOBALEVENTID "
+        "HAVING max(toString(DATEADDED)) < %(cutoff)s",
+        {"cutoff": cutoff},
+    )
+    old_by_event_date = [int(r[0]) for r in d_rows]
+
+    # Only the ids in D need the fallback test, so this is bounded by the old
+    # tail rather than the whole table — and chunked, because it is a literal IN.
+    has_usable_time: set[int] = set()
+    for batch in _chunked(old_by_event_date):
+        rows = client.execute(
+            "SELECT GLOBALEVENTID FROM gdelt_mentions FINAL "
+            "WHERE GLOBALEVENTID IN %(ids)s GROUP BY GLOBALEVENTID "
+            "HAVING max(MentionTimeDate) != ''",
+            {"ids": batch},
+        )
+        has_usable_time.update(int(r[0]) for r in rows)
+
+    expired.update(e for e in old_by_event_date if e not in has_usable_time)
+    return sorted(expired)
 
 
 def delete_from_silver(ch, event_ids: list[int]) -> None:
@@ -139,13 +218,16 @@ def delete_from_silver(ch, event_ids: list[int]) -> None:
     client = ch._get_client()
     for table, column in (("gdelt_mentions_local", "GLOBALEVENTID"),
                           ("gdelt_events_local", "GLOBALEVENTID")):
-        client.execute(
-            f"ALTER TABLE {table} ON CLUSTER {CLICKHOUSE_CLUSTER} "
-            f"DELETE WHERE {column} IN %(ids)s SETTINGS mutations_sync = 2",
-            {"ids": event_ids},
-        )
-        logger.info("silver: deleted rows for %d expired events from %s",
-                    len(event_ids), table)
+        batches = 0
+        for batch in _chunked(event_ids):
+            client.execute(
+                f"ALTER TABLE {table} ON CLUSTER {CLICKHOUSE_CLUSTER} "
+                f"DELETE WHERE {column} IN %(ids)s SETTINGS mutations_sync = 2",
+                {"ids": batch},
+            )
+            batches += 1
+        logger.info("silver: deleted rows for %d expired events from %s (%d batch%s)",
+                    len(event_ids), table, batches, "" if batches == 1 else "es")
 
 
 def delete_from_gold(event_ids: list[int]) -> tuple[int, int]:
