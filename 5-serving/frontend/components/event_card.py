@@ -20,7 +20,7 @@ def _tag_badge(tag: str | None) -> str:
     return "Untagged"
 
 
-def render_event_card(event: dict) -> None:
+def render_event_card(event: dict, context: str = "main") -> None:
     """
     Render a single event card.
 
@@ -115,4 +115,4 @@ def render_event_card(event: dict) -> None:
         else:
             st.info("No related articles available for this event.")
 
-        render_tag_buttons(event["global_event_id"])
+        render_tag_buttons(event["global_event_id"], context=context)
