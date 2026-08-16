@@ -15,7 +15,7 @@ from mongo_store import (
     save_profile,
     set_tag,
 )
-from oracle_store import (
+from postgres_store import (
     get_event_articles,
     get_events_by_ids,
     get_events_for_user,
@@ -61,17 +61,17 @@ def system_status() -> dict:
     Combined health signal for the dashboard banner.
 
     Priority order:
-      1. Oracle unreachable (503-ORACLE) — no event data can be shown at all,
+      1. PostgreSQL unreachable (503-POSTGRES) — no event data can be shown at all,
          this is the most severe case.
       2. MongoDB unreachable (503-MONGO) — events can still be read from
-         Oracle, but profiles/tags can't be saved or read.
+         PostgreSQL, but profiles/tags can't be saved or read.
       3. Pipeline-reported ERROR (processing layer issue, e.g. ingestion
          stalled) — data is stale but the stores themselves are fine.
       4. OK.
     """
     pipeline = get_pipeline_status()
 
-    if pipeline.get("code") == "503-ORACLE":
+    if pipeline.get("code") == "503-POSTGRES":
         return pipeline   # already shaped as the error payload
 
     mongo_error = check_mongo_health()
@@ -153,7 +153,7 @@ def update_tag(user_id: str, global_event_id: str, payload: dict) -> dict:
         )
 
 
-# ── Events (Oracle) ────────────────────────────────────────────────────────
+# ── Events (PostgreSQL) ────────────────────────────────────────────────────────
 
 @app.get("/users/{user_id}/events")
 def list_events(
@@ -165,7 +165,7 @@ def list_events(
 ) -> dict:
     # min_age_days makes the window a true BAND: the "Older news" tab asks for
     # events older than the main briefing window, so the two never overlap.
-    # get_events_for_user() returns [] on Oracle error.
+    # get_events_for_user() returns [] on database error.
     events = get_events_for_user(user_id, max_age_days=max_age_days)
 
     # Attach per-user tags — get_tags() returns {} on MongoDB error.
@@ -191,9 +191,9 @@ def list_events(
 def get_event(user_id: str, global_event_id: str) -> dict:
     event = get_event_articles(user_id, global_event_id)
     if not event:
-        # An empty result can mean "no such event" OR "Oracle unreachable". Only
-        # call it 404 when Oracle is actually up; otherwise surface 503.
-        if get_pipeline_status().get("code") == "503-ORACLE":
+        # An empty result can mean "no such event" OR "PostgreSQL unreachable". Only
+        # call it 404 when PostgreSQL is actually up; otherwise surface 503.
+        if get_pipeline_status().get("code") == "503-POSTGRES":
             raise HTTPException(status_code=503, detail="Database temporarily unavailable. Please try again shortly.")
         raise HTTPException(status_code=404, detail="Event not found for this user.")
     tags = get_tags(user_id)

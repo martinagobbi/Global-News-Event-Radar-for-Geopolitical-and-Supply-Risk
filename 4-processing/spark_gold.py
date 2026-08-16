@@ -17,7 +17,7 @@ centrally:
             range (that is what partitionColumn/lowerBound/upperBound do), so
             each executor pulls only its own slice, in parallel.
   * JOIN  — events x mentions is a distributed shuffle join across executors.
-  * WRITE — df.write.jdbc() opens one connection PER PARTITION, so the Oracle
+  * WRITE — df.write.jdbc() opens one connection PER PARTITION, so the gold
             insert is executed by the executors in parallel too.
 
 Memory per machine is therefore bounded by the partition size, not by the total,
@@ -37,11 +37,11 @@ Submitting it
     docker compose -f docker-compose.spark.yml run --rm spark-submit
 
 Environment (same names as the rest of the pipeline)
-    CLICKHOUSE_HOST/PORT, ORACLE_HOST/PORT/SERVICE/USER/PASSWORD,
+    CLICKHOUSE_HOST/PORT, POSTGRES_DSN (or POSTGRES_HOST/PORT/DB/USER/PASSWORD),
     MONGO_URI/MONGO_DB/MONGO_COLLECTION
     SPARK_MASTER            default spark://spark-master:7077
     SPARK_READ_PARTITIONS   parallel JDBC readers  (default 8)
-    SPARK_WRITE_PARTITIONS  parallel Oracle writers(default 4)
+    SPARK_WRITE_PARTITIONS  parallel PostgreSQL writers(default 4)
 
 NOTE: never run against live stores from this session — treat the first run as a
 smoke test and watch the Spark UI on :8080.
@@ -66,29 +66,45 @@ logging.basicConfig(level=logging.INFO,
 logger = logging.getLogger("spark_gold")
 
 CH_HOST = os.getenv("CLICKHOUSE_HOST", "clickhouse-s1r1")
-CH_PORT = os.getenv("CLICKHOUSE_PORT", "8123")          # JDBC uses the HTTP port
+# DELIBERATELY NOT CLICKHOUSE_PORT. That variable is the NATIVE protocol port
+# (9000), used by clickhouse-driver for the watermark poll and the retention
+# deletes, and it is set to 9000 on this very container. JDBC speaks ClickHouse's
+# HTTP protocol instead, on 8123; pointing it at 9000 connects and then fails
+# with "java.sql.SQLException: Connection reset", because the native port answers
+# nothing it understands. The two ports need two variables.
+CH_PORT = os.getenv("CLICKHOUSE_HTTP_PORT", "8123")
 CH_DB   = os.getenv("CLICKHOUSE_DATABASE", "default")
 
-OR_HOST = os.getenv("ORACLE_HOST", "pipeline_oracle")
-OR_PORT = os.getenv("ORACLE_PORT", "1521")
-OR_SVC  = os.getenv("ORACLE_SERVICE", "FREEPDB1")
-OR_USER = os.getenv("ORACLE_USER", "radar")
-OR_PASS = os.getenv("ORACLE_PASSWORD", "radar")
+PG_HOST = os.getenv("POSTGRES_HOST", "pipeline_postgres")
+PG_PORT = os.getenv("POSTGRES_PORT", "5432")
+PG_DB   = os.getenv("POSTGRES_DB", "radar")
+PG_USER = os.getenv("POSTGRES_USER", "radar")
+PG_PASS = os.getenv("POSTGRES_PASSWORD", "radar")
+# The driver-side connection (the publish step). In intended mode this lists all
+# three members with target_session_attrs=read-write, so libpq lands on whichever
+# node Patroni has made leader.
+PG_DSN  = os.getenv("POSTGRES_DSN") or \
+    f"postgresql://{PG_USER}:{PG_PASS}@{PG_HOST}:{PG_PORT}/{PG_DB}"
 
 READ_PARTITIONS  = int(os.getenv("SPARK_READ_PARTITIONS", "8"))
 WRITE_PARTITIONS = int(os.getenv("SPARK_WRITE_PARTITIONS", "4"))
 
 # The global status file the validation layer writes on the shared volume. The
 # Spark container mounts that volume read-only so it can mirror the value into
-# Oracle, exactly as the pandas path's recompute_all does.
+# PostgreSQL, exactly as the pandas path's recompute_all does.
 STATUS_FILE = Path(os.getenv("STATUS_DIR", "/data/status")) / "pipeline_status.json"
 
 CH_URL = f"jdbc:clickhouse://{CH_HOST}:{CH_PORT}/{CH_DB}"
-OR_URL = f"jdbc:oracle:thin:@//{OR_HOST}:{OR_PORT}/{OR_SVC}"
+# The executors' JDBC URL. targetServerType=primary makes the PostgreSQL JDBC
+# driver skip any standby it is offered, which matters because the executors
+# write and a standby is read-only; it is the JDBC counterpart of libpq's
+# target_session_attrs=read-write used by PG_DSN above.
+PG_URL = (f"jdbc:postgresql://{PG_HOST}:{PG_PORT}/{PG_DB}"
+          "?targetServerType=primary")
 
 
-# ── UDF: the Oracle primary key ──────────────────────────────────────────────
-# Same definition as oracle_writer._doc_id, so both paths address the same rows.
+# ── UDF: the gold primary key ────────────────────────────────────────────────
+# Same definition as postgres_writer._doc_id, so both paths address the same rows.
 def _doc_id(url: str):
     if url is None:
         return None
@@ -99,10 +115,38 @@ doc_id_udf = F.udf(_doc_id, BinaryType())
 
 
 def _spark() -> SparkSession:
+    """
+    The session, created once and then reused.
+
+    SPARK_MASTER selects where the work runs, and is the ONLY difference between
+    the two modes:
+
+        local[*]                  testing — Spark runs inside this container, on
+                                  every available core. No master or worker
+                                  containers exist, so testing mode stays a small
+                                  stack while running exactly the same code.
+        spark://spark-master:7077 intended — the work is distributed across the
+                                  worker containers.
+
+    `getOrCreate` returns the existing session on every call after the first.
+    That matters now that this module is driven by a resident FastAPI process
+    rather than a one-shot spark-submit: building a session costs seconds (a JVM
+    start in local mode, a cluster handshake otherwise), and a recompute runs
+    whenever silver advances or a user edits their preferences.
+    """
     return (
         SparkSession.builder
         .appName("radar-silver-to-gold")
         .master(os.getenv("SPARK_MASTER", "spark://spark-master:7077"))
+        # Spark's default is 200 shuffle partitions, which is sized for a cluster
+        # and a dataset far larger than this one. Measured on the 30-day seed
+        # (~104k events, ~111k mentions) it put ~500 rows in each partition, so a
+        # recompute spent almost all of its ~3 minutes on task scheduling rather
+        # than work. This is the single knob that matters for how long a recompute
+        # takes; raise it in intended mode, where there are real executors to
+        # spread across and the partitions are worth having.
+        .config("spark.sql.shuffle.partitions",
+                os.getenv("SPARK_SHUFFLE_PARTITIONS", "16"))
         .getOrCreate()
     )
 
@@ -197,17 +241,34 @@ def build_catalogue(events, mentions):
                                      "yyyyMMddHHmmss"))
     )
 
-    # De-duplicate: one row per URL, then one per (event, normalised headline).
-    df = df.dropDuplicates(["doc_id"])
-    df = df.withColumn("_title_key", F.lower(F.regexp_replace(F.trim("mention_identifier"), r"\s+", " ")))
-    df = df.dropDuplicates(["global_event_id", "_title_key"]).drop("_title_key")
+    # ONE de-duplication, on (doc_id, global_event_id) — the true grain, matching
+    # silver's gdelt_mentions ORDER BY key. Collapsing on doc_id alone, which this
+    # used to do, kept one arbitrary event and discarded the rest: 51.8% of URLs
+    # on the shipped seed mention more than one event, one of them 64.
+    #
+    # There is deliberately NO title de-duplication here any more. It used to sit
+    # on this line, keyed (global_event_id, _title_key), and it was WRONG in a way
+    # that only showed up as drifting totals (566 -> 567 articles across identical
+    # runs). The reason is ordering: this runs on the SHARED catalogue, BEFORE any
+    # user predicate. Two rows can share an event and a headline while differing in
+    # MentionIdentifier and article_keywords — and those are exactly the fields the
+    # keyword predicate reads. So whichever row `dropDuplicates` happened to keep
+    # decided whether a user matched at all. Same group count, different result.
+    #
+    # Syndication still gets collapsed, in the right place: the serving layer does
+    # it per card, where "one headline per card" is actually meaningful —
+    # postgres_store._build_event_card -> _sort_and_cap -> _dedupe_by_title.
+    df = df.dropDuplicates(["doc_id", "global_event_id"])
     return df
 
 
 def user_predicate(profile: dict):
     """
-    One user's filter as a Spark Column — the same semantics as
-    clickhouse_writer._build_geo_clause + processor.build_keyword_clause:
+    One user's filter as a Spark Column. This is the ONLY implementation of the
+    per-user predicate: the SQL builders it was once mirrored from
+    (clickhouse_writer._build_geo_clause, processor.build_keyword_clause) belonged
+    to the removed pandas path and have been deleted, precisely so the two cannot
+    drift apart again.
       geo:      CAMEO actor codes OR FIPS geo codes
       keywords: URL substring (normalised) OR enriched title/keywords
       the two sides are ANDed; an empty side is no constraint.
@@ -241,18 +302,19 @@ def user_predicate(profile: dict):
         token_groups = [t for t in (tokenize_keyword_enriched(k) for k in raw_keywords) if t]
 
         parts = []
-        # The URL, for every row — mirrors the LIKE branch of build_keyword_clause.
+        # The URL, for every row: match any normalised variant of a keyword.
         if url_variants:
             url_hit = F.lit(False)
             for v in sorted(url_variants):
                 url_hit = url_hit | F.lower(F.col("MentionIdentifier")).contains(v)
             parts.append(url_hit)
 
-        # The enriched text, for every row. Mirrors build_keyword_clause exactly:
-        # the row's title and keywords are tokenised once and stemmed by the same
-        # rule as stem_token(), then each keyword requires ALL of its tokens.
-        # `enriched` is deliberately NOT consulted — see build_keyword_clause for
-        # why routing each row to a single field discarded real matches.
+        # The enriched text, for every row: the row's title and keywords are
+        # tokenised once and stemmed by the same rule as stem_token(), then each
+        # keyword requires ALL of its tokens to be present.
+        # `enriched` is deliberately NOT consulted — routing each row to a single
+        # field (URL *or* text, by whether it was enriched) discarded real matches,
+        # because an enriched row can still match on its URL.
         if token_groups:
             row_tokens = (
                 "array_distinct(transform("
@@ -287,21 +349,21 @@ ARTICLE_COLUMNS = [
 ]
 
 
-def write_oracle(df, table: str, mode: str = "append", truncate: bool = False) -> None:
+def write_gold(df, table: str, mode: str = "append", truncate: bool = False) -> None:
     """
     Distributed JDBC write: one connection per partition.
 
     truncate=True makes `overwrite` empty the table instead of DROPping it, so
-    the stage tables keep the column types declared in oracle-init (RAW(32) for
+    the stage tables keep the column types declared in _STAGE_DDL (BYTEA for
     doc_id in particular — Spark would otherwise invent its own).
     """
     writer = (df.repartition(WRITE_PARTITIONS)
                 .write.format("jdbc")
-                .option("url", OR_URL)
+                .option("url", PG_URL)
                 .option("dbtable", table)
-                .option("user", OR_USER)
-                .option("password", OR_PASS)
-                .option("driver", "oracle.jdbc.OracleDriver")
+                .option("user", PG_USER)
+                .option("password", PG_PASS)
+                .option("driver", "org.postgresql.Driver")
                 .option("batchsize", 5000))
     if truncate:
         writer = writer.option("truncate", "true")
@@ -309,39 +371,28 @@ def write_oracle(df, table: str, mode: str = "append", truncate: bool = False) -
 
 
 # ── Publish: stage -> live, with the pandas path's exact semantics ───────────
-# oracle_writer.write_articles      = MERGE on doc_id (upsert, never deletes)
-# oracle_writer.write_user_articles = DELETE this user's rows, then INSERT
-_MERGE_ARTICLES = """
-MERGE INTO articles t
-USING articles_stage s ON (t.doc_id = s.doc_id)
-WHEN MATCHED THEN UPDATE SET
-    t.document_identifier = s.document_identifier,
-    t.mention_identifier  = s.mention_identifier,
-    t.global_event_id     = s.global_event_id,
-    t.in_raw_text         = s.in_raw_text,
-    t.confidence          = s.confidence,
-    t.mention_doc_tone    = s.mention_doc_tone,
-    t.country             = s.country,
-    t.risk_category       = s.risk_category,
-    t.goldstein           = s.goldstein,
-    t.cameo_code          = s.cameo_code,
-    t.cameo_label         = s.cameo_label,
-    t.actor               = s.actor,
-    t.latitude            = s.latitude,
-    t.longitude           = s.longitude,
-    t.event_date          = s.event_date,
-    t.age_days            = s.age_days,
-    t.mention_time        = s.mention_time
-WHEN NOT MATCHED THEN INSERT
-    (doc_id, document_identifier, mention_identifier, global_event_id, in_raw_text,
-     confidence, mention_doc_tone, country, risk_category, goldstein, cameo_code,
-     cameo_label, actor, latitude, longitude, event_date, age_days, mention_time)
-VALUES
-    (s.doc_id, s.document_identifier, s.mention_identifier, s.global_event_id,
-     s.in_raw_text, s.confidence, s.mention_doc_tone, s.country, s.risk_category,
-     s.goldstein, s.cameo_code, s.cameo_label, s.actor, s.latitude, s.longitude,
-     s.event_date, s.age_days, s.mention_time)
-"""
+# postgres_writer.write_articles      = upsert on doc_id (never deletes)
+# postgres_writer.write_user_articles = DELETE this user's rows, then INSERT
+#
+# ON CONFLICT would raise "cannot affect row a second time" if articles_stage
+# held two rows with the same doc_id — but it cannot: the DataFrame is
+# dropDuplicates(["doc_id"]) before it is staged. Oracle's MERGE had the same
+# requirement (ORA-30926 otherwise), so this is not a new constraint.
+_ARTICLE_UPSERT_COLUMNS = [
+    "doc_id", "document_identifier", "mention_identifier", "global_event_id",
+    "in_raw_text", "confidence", "mention_doc_tone", "country", "risk_category",
+    "goldstein", "cameo_code", "cameo_label", "actor", "latitude", "longitude",
+    "event_date", "age_days", "mention_time",
+]
+
+_UPSERT_ARTICLES = (
+    "INSERT INTO articles ({cols}) SELECT {cols} FROM articles_stage "
+    "ON CONFLICT (doc_id, global_event_id) DO UPDATE SET {sets}"
+).format(
+    cols=", ".join(_ARTICLE_UPSERT_COLUMNS),
+    sets=", ".join(f"{c} = EXCLUDED.{c}" for c in _ARTICLE_UPSERT_COLUMNS
+                   if c not in ("doc_id", "global_event_id")),
+)
 
 
 def read_pipeline_status() -> str:
@@ -358,9 +409,9 @@ def read_pipeline_status() -> str:
 # have been published, so nothing has to be pre-created in the database and no
 # scratch tables are left behind by a successful run.
 #
-# Each one carries an Oracle table COMMENT, so anyone browsing the schema (or a
-# tool listing it) can see what these two odd tables are and that they are safe
-# to drop, without having to find this file.
+# Each one carries a table COMMENT, so anyone browsing the schema (or a tool
+# listing it) can see what these two odd tables are and that they are safe to
+# drop, without having to find this file.
 _STAGE_COMMENT = (
     "TRANSIENT scratch table for the distributed silver-to-gold job "
     "(4-processing/spark_gold.py). Dropped and recreated at the start of every "
@@ -369,28 +420,33 @@ _STAGE_COMMENT = (
     "safe to drop at any time."
 )
 
+# Types mirror postgres-init/01_schema.sql. TIMESTAMP rather than DATE for the
+# two time columns, because PostgreSQL's DATE holds no time-of-day and
+# mention_time drives the card ordering.
 _STAGE_DDL = {
     "articles_stage": """
         CREATE TABLE articles_stage (
-          doc_id RAW(32), document_identifier VARCHAR2(2000),
-          mention_identifier VARCHAR2(2000), global_event_id VARCHAR2(50),
-          in_raw_text NUMBER(1), confidence NUMBER(3), mention_doc_tone FLOAT,
-          country VARCHAR2(200), risk_category VARCHAR2(500), goldstein FLOAT,
-          cameo_code VARCHAR2(10), cameo_label VARCHAR2(200), actor VARCHAR2(500),
-          latitude FLOAT, longitude FLOAT, event_date DATE, age_days NUMBER(4),
-          mention_time DATE)
+          doc_id BYTEA, document_identifier VARCHAR(2000),
+          mention_identifier VARCHAR(2000), global_event_id VARCHAR(50),
+          in_raw_text SMALLINT, confidence SMALLINT,
+          mention_doc_tone DOUBLE PRECISION,
+          country VARCHAR(200), risk_category VARCHAR(500),
+          goldstein DOUBLE PRECISION,
+          cameo_code VARCHAR(10), cameo_label VARCHAR(200), actor VARCHAR(500),
+          latitude DOUBLE PRECISION, longitude DOUBLE PRECISION,
+          event_date TIMESTAMP, age_days SMALLINT,
+          mention_time TIMESTAMP)
     """,
     "user_articles_stage": """
         CREATE TABLE user_articles_stage (
-          user_id VARCHAR2(200), doc_id RAW(32))
+          user_id VARCHAR(200), doc_id BYTEA, global_event_id VARCHAR(50))
     """,
 }
 
 
-def _connect_oracle():
-    import oracledb
-    return oracledb.connect(user=OR_USER, password=OR_PASS,
-                            dsn=f"{OR_HOST}:{OR_PORT}/{OR_SVC}")
+def _connect_postgres():
+    import psycopg
+    return psycopg.connect(PG_DSN)
 
 
 def recreate_stage_tables() -> None:
@@ -406,28 +462,34 @@ def recreate_stage_tables() -> None:
     Rows left behind by a failed run therefore survive until the NEXT run starts,
     which is the window in which they are useful for inspection.
     """
-    with _connect_oracle() as conn:
+    from psycopg import sql
+
+    with _connect_postgres() as conn:
         cur = conn.cursor()
         for name, ddl in _STAGE_DDL.items():
-            try:
-                cur.execute(f"DROP TABLE {name}")
-                logger.info("dropped pre-existing stage table %s", name)
-            except Exception as exc:  # noqa: BLE001
-                if "ORA-00942" not in str(exc):   # "table or view does not exist"
-                    raise
+            # DROP TABLE IF EXISTS replaces the Oracle version's catch-and-inspect
+            # of ORA-00942 ("table or view does not exist"). That matters for more
+            # than tidiness here: in PostgreSQL a failed statement aborts the
+            # whole transaction, so swallowing an error and carrying on would not
+            # have worked — every later statement would fail too.
+            cur.execute(f"DROP TABLE IF EXISTS {name}")
             cur.execute(ddl)
-            cur.execute(f"COMMENT ON TABLE {name} IS :c", c=_STAGE_COMMENT)
+            # COMMENT ON accepts no query parameters, so the text has to be a
+            # literal in the statement; sql.Literal quotes it properly rather
+            # than by hand-rolled escaping.
+            cur.execute(sql.SQL("COMMENT ON TABLE {} IS {}").format(
+                sql.Identifier(name), sql.Literal(_STAGE_COMMENT)))
             logger.info("created stage table %s", name)
         conn.commit()
 
 
 def drop_stage_tables() -> None:
     """Remove the scratch tables after a successful publish."""
-    with _connect_oracle() as conn:
+    with _connect_postgres() as conn:
         cur = conn.cursor()
         for name in _STAGE_DDL:
             try:
-                cur.execute(f"DROP TABLE {name}")
+                cur.execute(f"DROP TABLE IF EXISTS {name}")
             except Exception as exc:  # noqa: BLE001
                 logger.warning("could not drop %s: %s", name, exc)
         conn.commit()
@@ -448,36 +510,38 @@ def publish(processed_uids: list[str]) -> None:
       pipeline_status — replaced with the single row mirroring the validation
                         layer's status file, as write_pipeline_status did.
     """
-    with _connect_oracle() as conn:
+    with _connect_postgres() as conn:
         cur = conn.cursor()
-        cur.execute(_MERGE_ARTICLES)
-        logger.info("articles: merged %d staged rows", cur.rowcount)
+        cur.execute(_UPSERT_ARTICLES)
+        logger.info("articles: upserted %d staged rows", cur.rowcount)
 
         if processed_uids:
-            binds = {f"u{n}": u for n, u in enumerate(processed_uids)}
-            placeholders = ", ".join(f":{k}" for k in binds)
             cur.execute(
-                f"DELETE FROM user_articles WHERE user_id IN ({placeholders})", binds)
+                "DELETE FROM user_articles WHERE user_id = ANY(%(uids)s)",
+                {"uids": list(processed_uids)})
             deleted = cur.rowcount
             cur.execute(
-                "INSERT INTO user_articles (user_id, doc_id) "
-                "SELECT user_id, doc_id FROM user_articles_stage")
+                "INSERT INTO user_articles (user_id, doc_id, global_event_id) "
+                "SELECT user_id, doc_id, global_event_id FROM user_articles_stage")
             logger.info("user_articles: replaced %d rows with %d", deleted, cur.rowcount)
 
         # Purge orphans AFTER user_articles has been rebuilt, so the anti-join
-        # sees the new sets. Mirrors oracle_writer.delete_orphan_articles(), and
+        # sees the new sets. Mirrors postgres_writer.delete_orphan_articles(), and
         # is inside the same transaction as everything else here.
         #
-        # Triaged events are protected for the same reason as in the pandas path:
-        # the serving layer reads needs-action / monitoring / archive cards from
-        # `articles` WITHOUT joining user_articles, so those rows are legitimately
-        # unreferenced and must survive. Skipping the sweep is the safe failure.
+        # Tracked events are protected for the same reason as in the pandas path:
+        # the serving layer reads needs-action / monitoring cards from `articles`
+        # WITHOUT joining user_articles, so those rows are legitimately
+        # unreferenced and must survive. ARCHIVED events are not protected —
+        # archiving says the event does not matter. Skipping the sweep is the
+        # safe failure.
         sweep = ("DELETE FROM articles a WHERE NOT EXISTS "
-                 "(SELECT 1 FROM user_articles ua WHERE ua.doc_id = a.doc_id)")
-        binds: dict = {}
+                 "(SELECT 1 FROM user_articles ua WHERE ua.doc_id = a.doc_id "
+                 "   AND ua.global_event_id = a.global_event_id)")
+        params: dict = {}
         try:
             import mongo_reader
-            protected = sorted(mongo_reader.get_all_tagged_event_ids())
+            protected = sorted(mongo_reader.get_protected_event_ids())
         except Exception as exc:  # noqa: BLE001
             logger.warning("Skipping orphan sweep: could not read tags (%s)", exc)
             protected = None
@@ -486,17 +550,11 @@ def publish(processed_uids: list[str]) -> None:
             pass                                    # sweep skipped entirely
         else:
             if protected:
-                chunks = [protected[i:i + 900] for i in range(0, len(protected), 900)]
-                clauses = []
-                for ci, chunk in enumerate(chunks):
-                    names = []
-                    for vi, value in enumerate(chunk):
-                        key = f"p{ci}_{vi}"
-                        binds[key] = value
-                        names.append(f":{key}")
-                    clauses.append(f"a.global_event_id IN ({', '.join(names)})")
-                sweep += " AND NOT (" + " OR ".join(clauses) + ")"
-            cur.execute(sweep, binds)
+                # One array parameter for the whole set. Oracle needed it split
+                # into OR-ed 900-entry IN lists because its IN list caps at 1000.
+                sweep += " AND NOT (a.global_event_id = ANY(%(protected)s))"
+                params["protected"] = [str(p) for p in protected]
+            cur.execute(sweep, params)
             if cur.rowcount:
                 logger.info("articles: removed %d orphaned rows (%d triaged "
                             "events protected)", cur.rowcount, len(protected))
@@ -505,65 +563,117 @@ def publish(processed_uids: list[str]) -> None:
         cur.execute("DELETE FROM pipeline_status")
         cur.execute(
             "INSERT INTO pipeline_status (status, timestamp_of_last_update) "
-            "VALUES (:s, :t)",
-            s=state, t=datetime.now(timezone.utc),
+            "VALUES (%(s)s, %(t)s)",
+            # Naive UTC, to match postgres_writer: an aware value written to a
+            # TIMESTAMP (without time zone) column is converted using the
+            # session's TimeZone and the offset then dropped, so the stored
+            # instant would depend on server configuration.
+            {"s": state,
+             "t": datetime.now(timezone.utc).replace(tzinfo=None)},
         )
         logger.info("pipeline_status set to %s", state)
         conn.commit()
 
 
-def main() -> None:
+def recompute(only_user: str | None = None) -> dict:
+    """
+    Rebuild the gold layer from silver. THE silver -> gold path, in both modes.
+
+    `only_user` is what the MongoDB change-stream trigger uses: when a single
+    profile is edited there is no reason to re-evaluate everyone, so only that
+    user's predicate is run and only that user's `user_articles` rows are
+    replaced. The semantics then match what the in-process path used to do in
+    recompute_user(): their articles are upserted (never deleted), their links
+    are rebuilt from scratch, and the orphan sweep runs afterwards.
+
+    Returns a summary dict so the caller — the FastAPI routes and the triggers —
+    can log and report without reaching into Spark.
+
+    The session is NOT stopped here: it is process-wide and reused (see _spark).
+    """
     import mongo_reader
+    import postgres_writer
+
+    # Bring the gold schema up to date BEFORE anything is staged. This used to be
+    # reached only through postgres_writer.write_articles(), which the Spark path
+    # never calls — it writes over JDBC and publishes with raw SQL — so on a
+    # database created before the key changed, `user_articles` still lacked
+    # global_event_id and publish() failed on every run. The recompute then
+    # retried on the next watermark poll, giving a silent ~4-minute failure loop
+    # in which gold was never updated.
+    postgres_writer.ensure_schema()
 
     spark = _spark()
+    events = read_partitioned(spark, "gdelt_events")
+    mentions = read_partitioned(spark, "gdelt_mentions")
+    if events is None or mentions is None:
+        logger.warning("silver is empty — nothing to do")
+        return {"users": 0, "articles": 0, "status": "EMPTY"}
+
+    catalogue = build_catalogue(events, mentions).cache()
+    logger.info("catalogue built: %d candidate articles", catalogue.count())
+
+    # Per-user sets: each predicate is evaluated across the cluster.
+    processed_uids: list[str] = []
+    per_user = None
+    for profile in mongo_reader.get_all_profiles():
+        uid = str(profile.get("_id") or profile.get("user_id") or "")
+        if not uid or (only_user is not None and uid != only_user):
+            continue
+        processed_uids.append(uid)
+        hits = (catalogue.filter(user_predicate(profile))
+                         .select(F.lit(uid).alias("user_id"), "doc_id",
+                                 "global_event_id")
+                         # Pair-scoped: the same article reaching this user
+                         # through two events is TWO rows, one per card.
+                         .dropDuplicates(["doc_id", "global_event_id"]))
+        per_user = hits if per_user is None else per_user.unionByName(hits)
+
+    if per_user is None:
+        # Reached only when NO PROFILE was selected — there are none at all, or
+        # `only_user` names one that does not exist. Distinct from a profile that
+        # matches nothing: that leaves `hits` as an EMPTY DataFrame rather than
+        # None, so the run continues and publish() clears that user's rows and
+        # inserts none. That is deliberate and matches what the in-process path
+        # did with write_user_articles(uid, []) — a user who narrows their
+        # preferences until nothing matches must end up with an empty pool, not
+        # a stale one.
+        logger.warning("no matching user profile%s — nothing to do",
+                       f" for {only_user}" if only_user else "s")
+        return {"users": 0, "articles": 0, "status": "NO_PROFILES"}
+    per_user = per_user.cache()
+
+    # `articles` holds only documents at least one processed user receives — the
+    # same union the in-process path accumulated in its `catalog` dict.
+    matched_ids = (per_user.select("doc_id", "global_event_id")
+                           .dropDuplicates(["doc_id", "global_event_id"]))
+    articles = catalogue.join(matched_ids, on=["doc_id", "global_event_id"],
+                              how="inner")
+
+    recreate_stage_tables()
+    write_gold(articles.select(*ARTICLE_COLUMNS), "articles_stage",
+                 mode="overwrite", truncate=True)
+    write_gold(per_user.select("user_id", "doc_id", "global_event_id"), "user_articles_stage",
+                 mode="overwrite", truncate=True)
+    n_articles = articles.count()
+    logger.info("staged %d articles for %d user(s)", n_articles, len(processed_uids))
+
+    publish(processed_uids)
+    # Only dropped once the rows are safely published; if publish() raised, the
+    # stage tables are left behind on purpose so the run can be inspected.
+    drop_stage_tables()
+    logger.info("published — articles, user_articles and pipeline_status are live")
+    return {"users": len(processed_uids), "articles": n_articles, "status": "OK"}
+
+
+def main() -> None:
+    """Entry point for a one-shot `spark-submit` (the manual/batch route)."""
     try:
-        events = read_partitioned(spark, "gdelt_events")
-        mentions = read_partitioned(spark, "gdelt_mentions")
-        if events is None or mentions is None:
-            logger.warning("silver is empty — nothing to do")
-            return
-
-        catalogue = build_catalogue(events, mentions).cache()
-        logger.info("catalogue built: %d candidate articles", catalogue.count())
-
-        # Per-user sets: each predicate is evaluated across the cluster.
-        processed_uids: list[str] = []
-        per_user = None
-        for profile in mongo_reader.get_all_profiles():
-            uid = str(profile.get("_id") or profile.get("user_id") or "")
-            if not uid:
-                continue
-            processed_uids.append(uid)
-            hits = (catalogue.filter(user_predicate(profile))
-                             .select(F.lit(uid).alias("user_id"), "doc_id")
-                             .dropDuplicates(["doc_id"]))
-            per_user = hits if per_user is None else per_user.unionByName(hits)
-
-        if per_user is None:
-            logger.warning("no user profiles — nothing to do")
-            return
-        per_user = per_user.cache()
-
-        # `articles` holds only documents at least one user receives — the same
-        # union the pandas path accumulated in its `catalog` dict.
-        matched_ids = per_user.select("doc_id").dropDuplicates(["doc_id"])
-        articles = catalogue.join(matched_ids, on="doc_id", how="inner")
-
-        recreate_stage_tables()
-        write_oracle(articles.select(*ARTICLE_COLUMNS), "articles_stage",
-                     mode="overwrite", truncate=True)
-        write_oracle(per_user.select("user_id", "doc_id"), "user_articles_stage",
-                     mode="overwrite", truncate=True)
-        logger.info("staged %d articles for %d users",
-                    articles.count(), len(processed_uids))
-
-        publish(processed_uids)
-        # Only dropped once the rows are safely published; if publish() raised,
-        # the stage tables are left behind on purpose so the run can be inspected.
-        drop_stage_tables()
-        logger.info("published — articles, user_articles and pipeline_status are live")
+        recompute()
     finally:
-        spark.stop()
+        # A submitted job owns its session and must release it; the resident
+        # service does not, which is why this lives here and not in recompute().
+        SparkSession.builder.getOrCreate().stop()
 
 
 if __name__ == "__main__":

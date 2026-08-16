@@ -1,5 +1,5 @@
 # ═════════════════════════════════════════════════════════════════════════════
-# STORES TIER — ClickHouse (silver), MongoDB (profiles + reference), Oracle (gold).
+# STORES TIER — ClickHouse (silver), MongoDB (profiles + reference), PostgreSQL (gold).
 #
 # These are LONG-LIVED and completely detached from the pipeline's lifecycle.
 # Bring them up ONCE and leave them running:
@@ -14,7 +14,7 @@
 # The two one-time setup steps live here (not in the pipeline), and both are
 # idempotent, so re-running this file is safe:
 #   * mongo-init      -> rs.initiate(rs0), guarded by rs.status()
-#   * oracle-init/    -> 01_schema.sql, run once at first DB creation
+#   * postgres-init/  -> 01_schema.sql, run once at first DB creation
 # ═════════════════════════════════════════════════════════════════════════════
 services:
 
@@ -246,24 +246,29 @@ services:
             rs.initiate({_id: 'rs0', members: members});
           }"
 
-  # ── Oracle: the gold sink the serving backend reads ───────────────────────
-  # gvenzl/oracle-free ships a CDB (FREE) with one PDB, FREEPDB1 — that PDB name
-  # is the service the pipeline connects to (ORACLE_SERVICE: FREEPDB1). APP_USER
-  # creates the `radar` user inside it; ./oracle-init/01_schema.sql then creates
-  # the three gold tables ONCE, at first database creation.
-  pipeline_oracle:
-    image: gvenzl/oracle-free:slim
-    container_name: pipeline_oracle
+  # ── PostgreSQL: the gold sink the serving backend reads ───────────────────
+  # A SINGLE node here, which is all testing mode needs and mirrors what Oracle
+  # provided. Intended mode runs three of these under Patroni instead — see
+  # docker-stack.stores.yml — which is the reason the gold layer moved off
+  # Oracle at all: Oracle Free supports neither RAC nor Data Guard, so it could
+  # never be spread across machines.
+  #
+  # POSTGRES_USER / POSTGRES_DB create the `radar` role and database; the image
+  # then runs ./postgres-init/01_schema.sql ONCE, at first database creation,
+  # to add the three gold tables.
+  pipeline_postgres:
+    image: postgres:16
+    container_name: pipeline_postgres
     restart: unless-stopped
     environment:
-      ORACLE_PASSWORD: radar_sys        # SYS / SYSTEM password — change for real use
-      APP_USER: radar
-      APP_USER_PASSWORD: radar
+      POSTGRES_USER: radar
+      POSTGRES_PASSWORD: radar
+      POSTGRES_DB: radar
     volumes:
-      - oracle_data:/opt/oracle/oradata
-      - ./oracle-init:/container-entrypoint-initdb.d:ro
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres-init:/docker-entrypoint-initdb.d:ro
     ports:
-      - "1521:1521"
+      - "${POSTGRES_PUBLISH:-5432}:5432"
     networks: [pipeline_network]
 
 volumes:
@@ -301,13 +306,19 @@ volumes:
   # ── Shared between modes, deliberately ──────────────────────────────────────
   # MongoDB records its member count on disk too, but `mongo-init` compares it
   # against MONGO_MEMBERS on every start and issues rs.reconfig(…, {force: true})
-  # when they differ, so the same volume serves both topologies. Oracle runs as a
-  # single instance in both modes and needs no reconciliation. Sharing these is a
-  # feature: user profiles, tags and the gold layer survive a mode switch.
+  # when they differ, so the same volume serves both topologies. Sharing these is
+  # a feature: user profiles and tags survive a mode switch.
+  #
+  # postgres_data is used by testing mode only. Intended mode's PostgreSQL runs
+  # under Patroni in the Swarm stack with its own per-node volumes, because a
+  # Patroni data directory records the cluster identity and cannot be shared with
+  # a standalone server — the same reasoning that gives ClickHouse and Keeper
+  # mode-scoped volumes above. Gold is derived from silver in any case, so a
+  # mode switch costs one recompute rather than any data.
   mongo1_data:
   mongo2_data:
   mongo3_data:
-  oracle_data:
+  postgres_data:
 
 networks:
   # Explicit name (no compose project prefix) so the pipeline tier can attach to

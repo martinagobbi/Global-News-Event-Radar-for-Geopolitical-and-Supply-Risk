@@ -9,14 +9,14 @@ A five-layer pipeline that polls GDELT every 15 minutes, retains supply-chain-re
 - **1-ingestion** — polls GDELT's `lastupdate.txt` feed and writes the raw events and mentions CSVs to the shared volume.
 - **2-parsing** — applies the supply-chain relevance filter to events, passes mentions through unchanged, and publishes each slice to `latest_files`.
 - **3-validation_and_storage** — enforces referential integrity, performs Newspaper3k enrichment, and owns the silver store (ClickHouse), including its schema and deduplication.
-- **4-processing** — filters silver per user by territory codes and keywords, writes the Oracle gold (`articles`, `user_articles`, `pipeline_status`), and publishes the territory table to MongoDB.
-- **5-serving** — a **backend** (FastAPI, reads Oracle and MongoDB) and a **frontend** (Streamlit dashboard).
+- **4-processing** — filters silver per user by territory codes and keywords, writes the PostgreSQL gold (`articles`, `user_articles`, `pipeline_status`), and publishes the territory table to MongoDB.
+- **5-serving** — a **backend** (FastAPI, reads PostgreSQL and MongoDB) and a **frontend** (Streamlit dashboard).
 
 ### Stores
 
 - **ClickHouse** — silver: `gdelt_events` / `gdelt_mentions`, 2 shards × 3 replicas plus a 3-node Keeper ensemble.
 - **MongoDB** — replica set `rs0`: user profiles (`radar.users`), per-user tags (`radar.tags`) and the territory table (`radar.reference`).
-- **Oracle** — the gold sink the serving backend reads.
+- **PostgreSQL** — the gold sink the serving backend reads. One node in testing mode; three under Patroni in intended mode.
 
 ------------------------------------------------------------------------
 
@@ -25,11 +25,21 @@ A five-layer pipeline that polls GDELT every 15 minutes, retains supply-chain-re
 The Docker memory allocation must be raised in **both** modes — the default is too
 small for either. Set it in **Docker Desktop → Settings → Resources → Memory limit**.
 
-| Mode | Store containers | Measured usage, everything running | Set the limit to |
+| Mode | Store containers | Measured usage | Set the limit to |
 |----|----|----|----|
-| **Testing** | 4 | ≈ 4.3 GB | **at least 5 GB** |
-| **Intended**, all tiers on one host | 13 | ≈ 6.1 GB at idle alone | **at least 8 GB** |
-| **Intended**, tiers on separate machines | 13 on the stores machine | ≈ 6.1 GB there; ≈ 0.3 GB on the pipeline machine | **8 GB on the stores machine** |
+| **Testing** | 4 | **≈ 3.4 GB** with the stores, processing and backend running | **at least 6 GB** |
+| **Intended**, one machine per store node | 3–4 per store machine | ≈ 1.5 GB per store machine; ≈ 2.5 GB on the pipeline machine | **4 GB per store machine, 6 GB for the pipeline machine** |
+
+**Spark is why testing mode needs more than it used to.** The processing container is
+built on the Spark image and runs the silver → gold job in-process
+(`SPARK_MASTER=local[*]`), so it holds a JVM: **1.77 GB on its own**, against roughly
+200 MB when that job was plain pandas. The image grew from about 0.6 GB to **2.69 GB**
+for the same reason. The rest of the stack is unchanged and small — ClickHouse ≈ 1.2 GB,
+MongoDB ≈ 0.1 GB, PostgreSQL ≈ 0.02 GB.
+
+That is the price of having ONE implementation of silver → gold instead of two. The
+alternative was keeping a separate pandas path for testing mode, which is exactly the
+duplication that let the two versions drift apart in the first place.
 
 Below these thresholds the ClickHouse nodes are terminated under memory pressure
 and restart in a loop, which appears as queries timing out or returning nothing
@@ -41,13 +51,280 @@ alone occupy roughly 4.6 GB.
 
 ------------------------------------------------------------------------
 
+## The whole system, one box per node
+
+Two drawings of the same pipeline. Nothing in the application code differs between
+them — only how many nodes each store has, and how many machines they sit on.
+
+### Testing mode — 10 containers, 1 machine
+
+```
+┌─ YOUR MACHINE — docker compose --env-file .env.testing ──────────────────────────────┐
+│                                                                                      │
+│  ┌──────────────┐  1-INGESTION — polls GDELT every 15 min                            │
+│  │ 1-ingestion  │  reads lastupdate.txt, downloads two zips:                         │
+│  │              │    20260727171500.export.CSV.zip    ~979 events                    │
+│  │              │    20260727171500.mentions.CSV.zip  ~3,222 mentions                │
+│  └──────┬───────┘  -> /data/raw on the `shared_data` volume                          │
+│         │                                                                            │
+│  ┌──────▼───────┐  2-PARSING — the bronze filter                                     │
+│  │ 2-parsing    │  keeps only supply-chain-relevant events:                          │
+│  │              │    EventCode 190 kept · actor type MNC kept                        │
+│  │              │    ~979 events -> ~30 survive (roughly 97% dropped)                │
+│  └──────┬───────┘                                                                    │
+│         │                                                                            │
+│  ┌──────▼───────┐  3-VALIDATION — enrichment, and it OWNS the silver schema          │
+│  │ 3-validation │  Newspaper3k fetches each article URL:                             │
+│  │  _and_storage│    title    "Novo Nordisk sues Eli Lilly"                          │
+│  │              │    keywords [obesity, drug, lawsuit]                               │
+│  └──────┬───────┘  creates the tables ON CLUSTER, then writes SILVER                 │
+│         │  clickhouse-driver, port 9000                                              │
+│  ┌──────▼──────────────────────────┐   ┌───────────────────────────────┐             │
+│  │ clickhouse-s1r1                 │   │ clickhouse-keeper-1           │             │
+│  │ SILVER · columnar OLAP          │◄─►│ Raft coordination for         │             │
+│  │                                 │   │ replication + ON CLUSTER DDL. │             │
+│  │ gdelt_events                    │   │ Speaks the ZooKeeper protocol.│             │
+│  │   GLOBALEVENTID 1315499039      │   │ Alone here, so it forms a     │             │
+│  │   EventCode 190 · Day 20260727  │   │ quorum of one and elects      │             │
+│  │   ActionGeo_CountryCode IE      │   │ itself leader.                │             │
+│  │ gdelt_mentions                  │   └───────────────────────────────┘             │
+│  │   MentionIdentifier https://... │                                                 │
+│  │   MentionTimeDate 20260727113000│   1 shard x 1 replica, so the                   │
+│  │                                 │   Distributed table routes every                │
+│  │ 103,972 events / 111,430 mentions│  row to this single node.                      │
+│  └──────┬──────────────────────────┘                                                 │
+│         │  polled every 60s: has max(DATEADDED) advanced?                            │
+│  ┌──────▼───────┐  4-PROCESSING — silver -> gold, per user                           │
+│  │ 4-processing │  PySpark (SPARK_MASTER=local[*]) — the ONLY silver->gold           │
+│  │              │  path. Reads 13 of 61 event columns; joins, de-dupes per           │
+│  │              │  EVENT, filters per user, stages, publishes. See below.            │
+│  └──┬────────┬──┘  Plain Python here: 2 triggers, retention, territory seed          │
+│     │        │                                                                       │
+│  ┌──▼─────────────────┐   ┌──▼──────────────────────────────────────────┐            │
+│  │ mongo1  (rs0)      │   │ pipeline_postgres                           │            │
+│  │ PROFILES & TAGS    │   │ GOLD · row-store OLTP                       │            │
+│  │                    │   │                                             │            │
+│  │ radar.users        │   │ articles                                    │            │
+│  │   territories      │   │   doc_id  = SHA-256(url) -> fixed 32 bytes   │           │
+│  │   keywords         │   │   mention_identifier "Novo Nordisk sues..."  │           │
+│  │ radar.tags         │   │   mention_time 2026-07-27 11:30:00           │           │
+│  │   archived/needs   │   │ user_articles                               │            │
+│  │   action/monitoring│   │   (radar_pharma, doc_id)                    │            │
+│  │ radar.reference    │   │ pipeline_status                             │            │
+│  │                    │   │   (OK, 2026-08-15 14:02:33)                 │            │
+│  │ A replica set of   │   │                                             │            │
+│  │ ONE, not a stand-  │   │ 164 articles / 164 links from the seed      │            │
+│  │ alone mongod: the  │   │ agrifood 127 · electronics 21 · pharma 16   │            │
+│  │ change stream is   │   └──────────────────┬──────────────────────────┘            │
+│  │ what triggers a    │                      │                                       │
+│  │ rebuild when a     │   ┌──────────────────▼──────────────────────────┐            │
+│  │ profile is edited. │──►│ radar-backend · FastAPI :8000               │            │
+│  └────────────────────┘   │ GET /users/radar_pharma/events -> 16 cards, │            │
+│                           │ newest story first. Reads only; never writes.│           │
+│                           └──────────────────┬──────────────────────────┘            │
+│                                              │ HTTP                                  │
+│                           ┌──────────────────▼──────────────────────────┐            │
+│                           │ radar-frontend · Streamlit :8501            │            │
+│                           │ BACKEND_URL=http://host.docker.internal:8000│            │
+│                           └─────────────────────────────────────────────┘            │
+│                                                                                      │
+│  NO REDUNDANCY: one ClickHouse, one Keeper, one Mongo, one PostgreSQL.               │
+│  Losing this machine loses everything GDELT cannot be re-polled for.                 │
+│                                                                                      │
+└──────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Intended mode — 19 store tasks across 6 machines, plus the pipeline machine
+
+```
+┌─ DOCKER SWARM · overlay network `pipeline_network` ──────────────────────────────────────┐
+│ Service names resolve on EVERY machine, which is why clickhouse/cluster.xml,             │
+│ the ON CLUSTER DDL and every store address are byte-identical to testing mode.           │
+│ No store port is published anywhere. Managers = store1+2+3 (Raft, tolerates 1).          │
+└──────────────────────────────────────────────────────────────────────────────────────────┘
+
+  ── SHARD 1 · Keeper quorum · etcd quorum · PostgreSQL trio · Swarm managers ──
+
+┌─ store1 ───────────────────┐ ┌─ store2 ───────────────────┐ ┌─ store3 ───────────────────┐
+│ clickhouse-s1r1            │ │ clickhouse-s1r2            │ │ clickhouse-s1r3            │
+│   SILVER shard 1           │ │   SILVER shard 1           │ │   SILVER shard 1           │
+│   51,914 rows              │ │   51,914 rows              │ │   51,914 rows              │
+│   ReplicatedReplacing-     │ │   identical copy           │ │   identical copy           │
+│   MergeTree                │ │                            │ │                            │
+│   4 GB cap: it has the     │ │                            │ │                            │
+│   machine to itself        │ │                            │ │                            │
+│                            │ │                            │ │                            │
+│ clickhouse-keeper-1        │ │ clickhouse-keeper-2        │ │ clickhouse-keeper-3        │
+│   Raft: replication +      │ │   quorum 2 of 3            │ │                            │
+│   ON CLUSTER DDL           │ │                            │ │                            │
+│                            │ │                            │ │                            │
+│ etcd-1                     │ │ etcd-2                     │ │ etcd-3                     │
+│   holds PATRONI's          │ │   quorum 2 of 3            │ │                            │
+│   LEADER LOCK (a TTL)      │ │                            │ │                            │
+│                            │ │                            │ │                            │
+│ postgres-1  (Spilo =       │ │ postgres-2                 │ │ postgres-3                 │
+│   PostgreSQL+Patroni)      │ │                            │ │                            │
+│   GOLD · LEADER            │ │   GOLD · replica           │ │   GOLD · replica           │
+│   accepts ALL writes       │ │ ◄──────── WAL streaming    │ │ ◄──────── WAL streaming    │
+│   streams WAL ────────►    │ │   0 MB lag                 │ │   0 MB lag                 │
+│                            │ │   read-only until it is    │ │   read-only until it is    │
+│ PATRONI on each node:      │ │   promoted                 │ │   promoted                 │
+│   renews the etcd lock;    │ │                            │ │                            │
+│   if it expires, a         │ │                            │ │                            │
+│   replica promotes         │ │                            │ │                            │
+│   itself, re-points the    │ │                            │ │                            │
+│   other replica, and       │ │                            │ │                            │
+│   pg_rewind rebuilds       │ │                            │ │                            │
+│   the old leader as a      │ │                            │ │                            │
+│   replica — never two      │ │                            │ │                            │
+│   writers at once.         │ │                            │ │                            │
+│                            │ │                            │ │                            │
+│ SWARM MANAGER              │ │ SWARM MANAGER              │ │ SWARM MANAGER              │
+└────────────────────────────┘ └────────────────────────────┘ └────────────────────────────┘
+
+  ── SHARD 2 · the MongoDB replica set ────────────────────────────────────────
+
+┌─ store4 ───────────────────┐ ┌─ store5 ───────────────────┐ ┌─ store6 ───────────────────┐
+│ clickhouse-s2r1            │ │ clickhouse-s2r2            │ │ clickhouse-s2r3            │
+│   SILVER shard 2           │ │   SILVER shard 2           │ │   SILVER shard 2           │
+│   52,058 rows              │ │   52,058 rows              │ │   52,058 rows              │
+│                            │ │                            │ │                            │
+│ mongo1   rs0 PRIMARY       │ │ mongo2   secondary         │ │ mongo3   secondary         │
+│   radar.users              │ │   majority 2 of 3          │ │                            │
+│     territories+keywords   │ │   automatic election       │ │                            │
+│   radar.tags               │ │   w="majority" writes      │ │                            │
+│     archived / needs       │ │                            │ │                            │
+│     action / monitoring    │ │                            │ │                            │
+│   radar.reference          │ │                            │ │                            │
+│                            │ │                            │ │                            │
+│   CHANGE STREAM ───────►   │ │                            │ │                            │
+│   a profile edit fires     │ │                            │ │                            │
+│   a rebuild immediately,   │ │                            │ │                            │
+│   with no polling          │ │                            │ │                            │
+└────────────────────────────┘ └────────────────────────────┘ └────────────────────────────┘
+
+     51,914 + 52,058 = 103,972.  Which shard a row lands on is decided by
+     cityHash64(GLOBALEVENTID), so an event AND ALL ITS MENTIONS land together —
+     joins stay on one machine, and re-ingested copies collapse where they sit.
+
+┌─ pipeline1 — may ROAM; its volume is disposable scratch ─────────────────────────────────┐
+│ 1-ingestion -> 2-parsing -> 3-validation -> 4-processing -> radar-backend :8000          │
+│                                                                                          │
+│ SPARK CLUSTER (this tier, but UNPINNED — Swarm places it on any machine):                │
+│   spark-master  :8080 UI, :7077 submit                                                   │
+│   spark-worker  x SPARK_WORKERS, each SPARK_WORKER_CORES / _MEMORY                       │
+│   4-processing is the DRIVER: it submits to spark-master rather than                     │
+│   running the job itself, so the read/join/write spread across workers.                  │
+│   Scale live:  docker service scale radar_spark-worker=N                                 │
+│                                                                                          │
+│ Every store is addressed as a LIST, so no client is a single point of failure:           │
+│   CLICKHOUSE_ALT_HOSTS = clickhouse-s1r2:9000,clickhouse-s1r3:9000                       │
+│   MONGO_URI            = mongo1,mongo2,mongo3/?replicaSet=rs0                            │
+│   POSTGRES_DSN         = postgres-1,postgres-2,postgres-3                                │
+│                          ?target_session_attrs=read-write  <- finds the leader           │
+│                                                                                          │
+│ If THIS machine dies, Swarm re-creates the whole tier on another machine                 │
+│ labelled role=pipeline; it re-polls the current GDELT slice and continues.               │
+└──────────────────────────────────────────────────────────────────────────────────────────┘
+                    │ :8000 through Swarm's routing mesh — ANY node's port works
+   ┌────────────────┼────────────────┐
+┌──▼───────────┐ ┌──▼───────────┐ ┌──▼───────────┐
+│ user machine │ │ user machine │ │ user machine │
+│ radar-       │ │ radar-       │ │ radar-       │
+│ frontend:8501│ │ frontend:8501│ │ frontend:8501│
+└──────────────┘ └──────────────┘ └──────────────┘
+```
+
+### The silver → gold job, step by step
+
+The two drawings above show WHERE things run. This one shows WHAT the PySpark job
+actually does, because that single job is now the whole of silver → gold in both
+modes — there is no second implementation.
+
+```
+┌─ SILVER -> GOLD, the PySpark job (4-processing/spark_gold.py) ─────────────────────────┐
+│                                                                                        │
+│ Driven by the resident processing service, NOT by spark-submit. Runs whenever the      │
+│ watermark advances, or one user edits their preferences (only_user=...).               │
+│ SPARK_MASTER decides WHERE: local[*] in testing, the worker cluster in intended.       │
+│                                                                                        │
+├─ 1  READ — partitioned JDBC, column-pruned ────────────────────────────────────────────┤
+│   Asks ClickHouse for min/max GLOBALEVENTID, splits that range into                    │
+│   SPARK_READ_PARTITIONS (8) slices, and issues one concurrent query per slice          │
+│   per table. Spark pushes the projection down: ClickHouse's system.query_log           │
+│   shows it receives 13 named columns of gdelt_events' 61, not SELECT *.                │
+│   FINAL collapses re-ingested duplicates at read time.                                 │
+│     -> events   13 of 61 columns   (19% of the table's bytes)                          │
+│     -> mentions  9 of 19 columns   (84% — the text columns ARE the payload)            │
+├─ 2  JOIN — events x mentions, a distributed shuffle ───────────────────────────────────┤
+│   Inner join on GLOBALEVENTID. Rows sharing an id are moved so they meet in one        │
+│   partition; that movement is the shuffle, and SPARK_SHUFFLE_PARTITIONS sets how       │
+│   many partitions it produces (16 testing / 64 intended; Spark's default of 200        │
+│   put ~500 rows in each and cost ~3x the runtime in scheduling alone).                 │
+│   Derives the gold columns here: doc_id = SHA-256(url) via a UDF, the headline         │
+│   (enriched title, else the URL), country from ActionGeo_FullName, event_date,         │
+│   age_days (all of gold has this value updated at every 15-minute advance in the       │
+│   watermark, provided that the pipeline is operational), and mention_time from         │
+│  MentionTimeDate                                                                       │
+├─ 3  DE-DUPLICATE — twice, and BOTH scoped to one event ────────────────────────────────┤
+│   (doc_id, global_event_id)      the real grain: one row per (article, event)          │
+│   (global_event_id, _title_key)  syndication — one headline per CARD                   │
+│                                                                                        │
+│   Neither collapses a URL ACROSS events. Measured on the seed, 51.8% of URLs           │
+│   and 53.8% of titles appear under more than one GLOBALEVENTID (one URL under          │
+│   64 of them), so keying on the URL alone silently discarded most pairs.               │
+├─ 4  FILTER — each user's predicate, against the cached catalogue ──────────────────────┤
+│   The catalogue is cached once, then each profile's predicate runs across the          │
+│   cluster:   geo(CAMEO actor codes OR FIPS geo codes)  AND  keyword(URL variant        │
+│   OR all tokens present in the stemmed title+keywords).  A user receives the           │
+│   (article, event) PAIR, so one article reaches them once per matching event.          │
+│   only_user=<uid> restricts this to a single profile — the change-stream path.         │
+├─ 5  STAGE — distributed JDBC write into two scratch tables ────────────────────────────┤
+│   articles_stage and user_articles_stage are DROPped and recreated at the start        │
+│   of every run, so their column types are always the declared ones. write_gold()       │
+│   opens one connection per partition (SPARK_WRITE_PARTITIONS), so the executors        │
+│   write in parallel; mode=overwrite with truncate=true empties rather than drops.      │
+│   Each stage table carries a SQL COMMENT saying it is transient and safe to drop.      │
+├─ 6  PUBLISH — stage -> live, in ONE transaction ───────────────────────────────────────┤
+│   articles        INSERT ... SELECT ... ON CONFLICT (doc_id, global_event_id)          │
+│                   DO UPDATE  — upsert, never deletes                                   │
+│   user_articles   DELETE this run's users, then INSERT from the stage                  │
+│   orphan sweep    delete articles no user_articles row references, PROTECTING          │
+│                   events tagged requires_action / monitor (NOT archive)                │
+│   pipeline_status replaced with one row mirroring the validation status file           │
+├─ 7  DROP THE STAGE TABLES — only on success ───────────────────────────────────────────┤
+│   Left in place deliberately if publish() raised, so a failed run can be               │
+│   inspected; the next run drops and recreates them anyway.                             │
+├─ WHAT DOES NOT GO THROUGH SPARK ───────────────────────────────────────────────────────┤
+│   The watermark poll, the MongoDB change stream, the daily retention sweep and         │
+│   the status mirror stay plain Python: small transactional statements against          │
+│   ClickHouse, PostgreSQL and MongoDB with nothing to distribute.                       │
+└────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+**What each system does, in one line each.** *ClickHouse* holds silver and is scanned
+analytically, so it is columnar and sharded. *ClickHouse Keeper* is the Raft service
+that lets the six ClickHouse nodes agree on replication and `ON CLUSTER` DDL — it
+speaks the ZooKeeper protocol but is a ClickHouse component, not ZooKeeper itself.
+*MongoDB* holds user profiles, triage tags and the territory reference, and its
+**change stream** is what lets a preference edit trigger a rebuild without polling.
+*PostgreSQL* holds gold and is read by point lookup, so it is a row store with B-tree
+keys. *Patroni* is the supervisor that elects one PostgreSQL leader and fails over
+automatically; *etcd* is the quorum store holding the lock Patroni elects with;
+*Spilo* is simply the image that ships PostgreSQL and Patroni together. *Docker Swarm*
+pins each node to its machine, distributes the config files, and provides the overlay
+network that makes every service name resolve from everywhere.
+
+------------------------------------------------------------------------
+
+
 ## Deployment
 
 The system is divided into three independently deployable tiers, each with its own lifecycle:
 
 | Tier | Contents | Lifecycle and location |
 |----|----|----|
-| **Stores** | ClickHouse and Keeper, MongoDB `rs0`, Oracle (`docker-compose.stores.yml`) | Started once and left running. Owns every durable volume and the `pipeline_network`. |
+| **Stores** | ClickHouse and Keeper, MongoDB `rs0`, PostgreSQL (`docker-compose.stores.yml`) | Started once and left running. Owns every durable volume and the `pipeline_network`. |
 | **Pipeline** | Layers 1–4 and the serving **backend** (`docker-compose.yml`) | Disposable and replaceable. Owns no database. |
 | **User frontend** | The serving **frontend** only (`5-serving/docker-compose.serving.yml`) | One instance per user machine. |
 
@@ -60,26 +337,24 @@ them**: the mode is chosen entirely by the arguments passed to `docker compose`.
 |----|----|----|
 | ClickHouse | 1 server, 1 Keeper | 6 servers (2 shards × 3 replicas), 3 Keepers |
 | MongoDB | 1-node replica set | 3-node replica set |
-| Oracle | 1 instance | 1 instance |
-| Store containers | **4** | **13** |
-| Memory at idle | **≈ 3.6 GB** | **≈ 6.1 GB** |
+| Gold store | 1 PostgreSQL node | 3 PostgreSQL nodes under Patroni (+3 etcd) |
+| Store containers | **4** | **18**, spread over 6 machines |
+| Memory, all running | **≈ 2.1 GB** on one machine | **≈ 1.5 GB** per store machine |
 | Insert quorum | 1 (no redundancy) | 2 of 3 replicas |
-| Pipeline location | same machine as the stores | its own machine |
+| Pipeline location | same machine as the stores | its own machine, reschedulable by Swarm |
 | Frontend | same machine | one instance per user machine |
 
-Three mechanisms do the switching:
-
-- **`--env-file`** selects the ClickHouse cluster and Keeper topology, the
-  per-node memory cap, the insert quorum and the MongoDB member count.
-- **`--profile full`** starts the nine redundant services (five extra ClickHouse
-  servers, two extra Keepers, two extra MongoDB members). Without it they simply
-  do not start.
-- **`PIPELINE_NET_EXTERNAL`** (set in the env file) decides whether the pipeline
-  joins the network the stores created, or creates its own on a machine that runs
-  no stores.
+The modes are selected by which **files** are deployed, not by editing anything:
+testing mode uses `docker compose` with `docker-compose.stores.yml` and
+`.env.testing`; intended mode uses `docker stack deploy` with
+`docker-stack.stores.yml`, `docker-stack.pipeline.yml` and `.env.intended`. The
+env file selects the ClickHouse cluster and Keeper topology, the per-node memory
+cap, the insert quorum, the MongoDB member count and the store address lists.
 
 The application code, the cluster name, the table names and the service names are
-identical in both modes.
+identical in both modes. See
+[Every difference between testing mode and intended mode](#every-difference-between-testing-mode-and-intended-mode)
+for the complete accounting.
 
 ### A. Testing — everything on one machine
 
@@ -99,9 +374,80 @@ docker compose --env-file .env.testing up -d --build
 # 4. the three test profiles — without these the gold layer stays empty
 python3 5-serving/seed_test_users.py          # needs `requests` on the host. Also, may have to type `python` instead of `python3`.
 
-# 5. the dashboard
+# 5. the gold layer, pre-computed (optional, but it saves ~2 minutes of waiting)
+./bootstrap/gold_snapshot.sh restore
+
+# 6. the dashboard
 docker compose -f 5-serving/docker-compose.serving.yml up --build
 ```
+
+#### The gold seed, and why it is safe
+
+Step 5 is the gold counterpart of step 3. Silver restores in ~7 seconds from a
+committed snapshot; gold would otherwise take **~2 minutes** to compute from it,
+because the Spark job runs once per user profile. `gold_snapshot.sh restore` loads
+a committed dump of `articles` and `user_articles` in **under a second**.
+
+It does not weaken the rule that gold must never drift from what the pipeline would
+produce. The snapshot is only a **head start**: restoring silver advances the
+watermark, which fires a recompute, which overwrites all of it with a freshly
+computed result a couple of minutes later. If the snapshot and the pipeline ever
+disagree, the pipeline wins, automatically. What the seed buys is a dashboard with
+real cards immediately rather than an empty one that fills in.
+
+**One column has to be repaired on restore, and it is worth knowing why.** Every
+other value in gold is absolute — timestamps, ids, text — and keeps its meaning
+indefinitely. `age_days` does not: it is `today − event_date` as computed when the
+row was written, and the dashboard filters on it (`age_days <= briefing_days`). A
+dump restored a month later would make every article a month too young. So the
+restore recomputes it from `event_date`, which is absolute. Verified after a
+restore: all 607 rows satisfy `age_days = CURRENT_DATE − event_date`.
+
+**Re-export it when the filter logic changes** — `./bootstrap/gold_snapshot.sh
+export`. Gold is derived, so the committed dump is only valid for the code that
+produced it. Change the parsing filters, the per-user predicate, the deduplication
+rules or the gold schema, and the seed is stale until re-exported. Stale here means
+"briefly wrong, then corrected by the recompute", not "wrong forever".
+
+#### How long this takes
+
+Measured end to end from a **fresh clone with empty volumes**, following the steps
+above in order:
+
+| Step | What it waits for | First run | Every later run |
+|----|----|----|----|
+| 1 | ClickHouse and PostgreSQL accepting connections | 4 s | 4 s |
+| 2 | `--build`, pipeline started, silver schema created | **≈ 7 min** | 15 s |
+| 3 | 30-day silver seed restored | 7 s | 7 s |
+| 4 | three profiles created through the backend | 1 s | 1 s |
+| 5 | gold seed restored | **< 1 s** | < 1 s |
+| 6 | dashboard answering on :8501 | 8 s | 8 s |
+| | **total to a working dashboard** | **≈ 7½ min** | **≈ 35 s** |
+
+**Step 2 is the whole story on a first run, and it is a download, not a build.**
+The processing image is built on the Spark base, which is about 1.5 GB, and the
+image itself lands at ~2.7 GB. Measured here: 429 s with nothing cached, and ~7 s
+when only the build cache was reused — so essentially all of it is fetching the
+base image, and how long it takes depends on the connection rather than on this
+project.
+
+Docker reuses work at three independent levels, which is why "I deleted the image
+and it still only took 15 seconds" is misleading: `docker rmi radar-processing`
+removes only the *tag*. The base image and BuildKit's layer cache are separate and
+survive it. To reproduce a genuine first run:
+
+```bash
+docker compose --env-file .env.testing down
+docker compose --env-file .env.testing -f docker-compose.stores.yml down
+docker rmi -f radar-processing:latest bitnamilegacy/spark:3.5   # tag AND base
+docker builder prune -af                                        # layer cache
+```
+
+**Without step 5** — if you skip the gold seed — the dashboard starts empty and
+fills in over roughly **two minutes**. Creating three profiles fires the MongoDB
+change-stream trigger once per profile, so the Spark job runs three times rather
+than once; the first user's cards appear after about 40 seconds and the rest
+follow. Nothing is wrong while that happens.
 
 **The order matters.** The silver tables are owned and created by the validation
 layer, so the seed cannot be restored before step 2 has run — there would be
@@ -160,9 +506,11 @@ re-inserting the same rows collapses back to the same counts.
 This starts four store containers rather than thirteen, which is what makes the
 stack usable on a machine with 8 GB of RAM.
 
-> **`--env-file` is required on every command that talks to the stores.** Without
-> it they fall back to `CLICKHOUSE_INSERT_QUORUM=2`, which a single-replica
-> cluster can never satisfy, and every insert fails with ClickHouse error 285.
+> **`--env-file .env.testing` is required on every command that talks to the
+> stores.** Without it they fall back to `CLICKHOUSE_INSERT_QUORUM=2`, which a
+> single-replica cluster can never satisfy, and every insert fails with ClickHouse
+> error 285. The intended-mode equivalent is sourcing `.env.intended` into the
+> shell, because `docker stack deploy` takes no `--env-file` at all.
 
 
 The dashboard is then available at **http://localhost:8501**.
@@ -222,157 +570,362 @@ pipeline starts, so newer articles accumulate from then on at roughly one slice
 every 15 minutes — but everything present at first sign-in comes from that
 30-day window.
 
-> **The `--build` flag is required.** Compose reuses an existing image and does not rebuild because a source file changed. Any modification to Python code, or to `.streamlit/config.toml`, reaches a container only when `--build` is passed. Files that are *mounted* rather than copied into the image — the compose files, `clickhouse/*.xml`, `oracle-init/*.sql` — are read at container start and require no rebuild.
+> > **The first `--build` takes a while.** The processing image is built on the Spark
+> base and pulls the ClickHouse and PostgreSQL JDBC drivers, so the first build is
+> ~2.7 GB and can take several minutes on a cold cache. Later builds reuse the layers
+> and only re-copy the source.
 
-On the **first** run the stores need several minutes: Oracle creates its database files from scratch and only then executes the gold schema. This occurs once per machine per volume; subsequent starts are fast.
+**The `--build` flag is required.** Compose reuses an existing image and does not rebuild because a source file changed. Any modification to Python code, or to `.streamlit/config.toml`, reaches a container only when `--build` is passed. Files that are *mounted* rather than copied into the image — the compose files, `clickhouse/*.xml`, `postgres-init/*.sql` — are read at container start and require no rebuild.
 
-### B. Intended — one machine per tier
+The stores are ready in **seconds**. This used to take several minutes, because Oracle built its database files from scratch before running the gold schema; PostgreSQL initialises its data directory almost instantly. Measured on this machine: `pg_isready` answered and all three gold tables existed within 20 seconds of `up -d`.
 
-Every step below is a command. Nothing is edited except `.env.full`, which is a
-template where the placeholder `STORES_HOST` is replaced with a real address.
+### B. Intended — one node of each store per machine
 
-**No volume-clearing step is required**, whichever mode this machine ran before.
-Each topology owns its own ClickHouse and Keeper volumes — `radar-full_*` here,
-`radar-testing_*` in testing mode — so the two never share coordination state and
-neither disturbs the other's silver. See
-[Switching modes](#switching-modes-state-that-persists-across-the-switch) for why
-that separation is necessary.
+Testing mode puts every store container on one machine, so its redundancy is real
+only against *container* loss: that machine dying takes every ClickHouse replica,
+every MongoDB member and the gold layer with it. Intended mode places **one node of
+each storage system on a different machine**, so no two nodes of the same store
+share a failure domain. Different stores may share a machine — what must never
+share one is two nodes of the same store.
 
-**Step 1 — prepare the address file** (on both the stores and pipeline machines).
-`STORES_HOST` becomes the stores machine's address, for example `10.0.0.5`:
+The stores run as a **Docker Swarm stack** on an overlay network. That is the
+single decision the rest follows from: overlay DNS resolves service names across
+machines, so `clickhouse/cluster.xml`, the `ON CLUSTER gnews_cluster` DDL and every
+store address in `docker-compose.yml` keep working **unchanged**, and no store port
+has to be published to the host at all. There is no `STORES_HOST` to substitute.
+
+#### Choosing and preparing the machines
+
+Seven machines, plus one per dashboard user:
+
+| Machine | ClickHouse | Keeper | MongoDB | PostgreSQL | etcd | Swarm role |
+|----|----|----|----|----|----|----|
+| store1 | s1r1 | keeper-1 | — | leader | etcd-1 | **manager** |
+| store2 | s1r2 | keeper-2 | — | replica | etcd-2 | **manager** |
+| store3 | s1r3 | keeper-3 | — | replica | etcd-3 | **manager** |
+| store4 | s2r1 | — | mongo1 | — | — | worker |
+| store5 | s2r2 | — | mongo2 | — | — | worker |
+| store6 | s2r3 | — | mongo3 | — | — | worker |
+| pipeline1 | — | — | — | — | — | worker, `role=pipeline` |
+
+Shard 1 lives on store1–3 and shard 2 on store4–6, so a shard survives losing two
+**machines**. store1–3 carry four separate quorums between them — Keeper, etcd,
+the Swarm managers and Patroni's PostgreSQL trio — each of which tolerates losing
+one of its three. **Three Swarm managers, not one**: Swarm coordinates through Raft
+exactly as Keeper does, so a single manager would be a single point of failure for
+orchestration, and nothing could be rescheduled while it was down.
+
+Each machine needs:
+
+- **Docker Engine** (or Docker Desktop) with Compose v2, and **≥ 4 GB** available to
+  Docker. Measured per store machine: ≈ 1.5 GB.
+- **The repository checked out on the three managers.** Workers need nothing: the
+  ClickHouse XMLs and the gold schema travel as Swarm **configs**, distributed by
+  the manager. This is why they are configs and not bind mounts — a bind mount
+  would have to exist on whichever machine the task happened to land on.
+- **`nofile` raised to 262144** on every ClickHouse machine. Swarm **ignores** the
+  `ulimits:` key, so it must be set on the daemon instead, in
+  `/etc/docker/daemon.json`, followed by a daemon restart:
+  ```json
+  { "default-ulimits": { "nofile": { "Name": "nofile", "Soft": 262144, "Hard": 262144 } } }
+  ```
+- **Clock sync (NTP).** Keeper's Raft, etcd's Raft, Patroni's leader lease and
+  MongoDB's elections all depend on it.
+- **Ports open between the machines**: `2377/tcp` (manager), `7946/tcp+udp` (node
+  discovery) and `4789/udp` (VXLAN). Only the pipeline machine publishes anything
+  to the outside world — `8000` for the dashboard.
+- **Outbound internet on the pipeline machine**, which polls GDELT every 15 minutes.
+
+The machines must reach each other by IP; `localhost` will not do. Find a machine's
+address with `ipconfig getifaddr en0` (macOS) or `hostname -I` (Linux).
+
+#### Everything that names a machine, in one place
+
+The overlay network is what makes this list short. Because service names resolve
+swarm-wide, **no store address is configured anywhere** — not ClickHouse, not the
+MongoDB members, not PostgreSQL. The old `STORES_HOST` placeholder is gone. What
+remains is only the things Docker itself needs to know:
+
+| What | Where you set it | Value |
+|----|----|----|
+| Swarm manager address | `docker swarm init --advertise-addr <ip>` on store1 | that machine's real IP |
+| Joining the swarm | `docker swarm join --token <token> <manager-ip>:2377` on every other machine | printed by `swarm init` |
+| Extra managers | `docker node promote <store2> <store3>` | hostnames |
+| Which machine is which store node | `docker node update --label-add store=storeN <hostname>` | `store1`…`store6` |
+| Which machine runs the pipeline | `docker node update --label-add role=pipeline <hostname>` | one hostname |
+| Image registry | `REGISTRY` in the shell before `docker stack deploy` | your registry |
+| Dashboard address | `BACKEND_URL` on each user machine | `http://<any-swarm-node>:8000` |
+| ClickHouse file handles | `/etc/docker/daemon.json` on each ClickHouse machine | `nofile` 262144 |
+| Spark cluster size | `SPARK_WORKERS` / `SPARK_WORKER_CORES` / `SPARK_WORKER_MEMORY` in `.env.intended` | to taste |
+
+Find a machine's address with `ipconfig getifaddr en0` (macOS) or `hostname -I`
+(Linux). `localhost` and `127.0.0.1` will not work for `--advertise-addr`, because
+the other machines have to be able to reach it.
+
+**Nothing in `.env.intended` is a machine address.** It selects topology
+(`CH_CLUSTER_CONFIG`, `MONGO_MEMBERS`), tuning (`SPARK_*`, `CLICKHOUSE_INSERT_QUORUM`)
+and the store lists that are already service names. It needs no editing before use.
+
+**Step 1 — form the swarm.** On store1:
 
 ```bash
-sed -i 's/STORES_HOST/10.0.0.5/g' .env.full
+docker swarm init --advertise-addr <store1-ip>
+docker network create -d overlay --attachable pipeline_network
 ```
 
-On the pipeline machine, also uncomment the three store-address lines at the
-bottom of `.env.full` (`MONGO_URI`, `CLICKHOUSE_HOST`, `ORACLE_HOST`). The
-MongoDB URI must list the same addresses the replica set advertises, otherwise
-the driver is redirected to a member it cannot reach.
-
-**Step 2 — the stores machine** (13 containers):
+`docker swarm init` prints a join command. Run it on every other machine, then
+promote store2 and store3 so there are three managers:
 
 ```bash
-docker compose --env-file .env.full -f docker-compose.stores.yml --profile full up -d
+docker node promote <store2-hostname> <store3-hostname>
 ```
 
-`--profile full` is what starts the redundant nodes. Ports 27017–27019, 9000 and
-1521 must be reachable from the pipeline machine.
-
-**Step 3 — the pipeline machine**:
+**Step 2 — label the machines**, which is what the placement constraints match:
 
 ```bash
-docker compose --env-file .env.full up -d --build
+docker node update --label-add store=store1 <store1-hostname>   # …through store6
+docker node update --label-add role=pipeline <pipeline1-hostname>
 ```
 
-`.env.full` sets `PIPELINE_NET_EXTERNAL=false`, so Compose creates the network
-here instead of expecting the stores to have made it.
+Every store service is **pinned** to its machine. This is mandatory, not tidiness:
+a ClickHouse node owns a local volume *and* a replica identity registered in
+Keeper, so rescheduled elsewhere it would start with an empty volume under an
+identity Keeper already knows — a broken replica, not a fresh one. The pipeline
+tier may roam precisely because its volume is disposable scratch.
 
-**Step 4 — load the seed** (on the stores machine, after Step 3):
+**Step 3 — build and push the images** (Swarm cannot build from a Dockerfile),
+on a manager:
+
+```bash
+export REGISTRY=<your-dockerhub-user>          # or a private registry
+for l in ingestion parsing validation processing; do
+  docker build -t $REGISTRY/radar-$l:latest ./$(ls -d [1-4]-* | grep $l)
+  docker push  $REGISTRY/radar-$l:latest
+done
+docker build -t $REGISTRY/radar-backend:latest ./5-serving/backend
+docker push  $REGISTRY/radar-backend:latest
+```
+
+**Step 4 — deploy both stacks** from a manager. `docker stack deploy` accepts **no
+`--env-file`**, so the environment has to be sourced into the shell first — this is
+the single most common way an intended-mode deployment goes wrong, because the
+defaults it silently falls back to are the testing-mode ones:
+
+```bash
+set -a; . ./.env.intended; set +a
+docker stack deploy -c docker-stack.stores.yml   radar-stores
+docker stack deploy -c docker-stack.pipeline.yml radar
+docker stack ps radar-stores            # watch until every task says Running
+```
+
+**Step 5 — load the seed**, on the machine hosting `clickhouse-s1r1` (store1):
 
 ```bash
 ./bootstrap/silver_snapshot.sh restore
 ```
 
-**This must follow Step 3, not precede it.** The silver tables are created by the
-validation layer, which runs on the *pipeline* machine, so before Step 3 there is
-no schema to insert into. `restore` waits up to five minutes for it to appear.
+`docker exec` is local to one daemon, so this must run where s1r1 actually is. The
+script finds the Swarm task by service label, since Swarm ignores `container_name`.
+It must follow Step 4: the silver tables are created by the validation layer, which
+runs on the pipeline machine.
 
-It is needed here for the same reason as in testing mode: Docker volumes are not
-part of the repository, so a newly created cluster starts empty.
-`data/silver_seed/*.parquet` is the committed 30-day history, and skipping this
-leaves the dashboard blank until the live pipeline has run for days. Because
-intended mode has its own ClickHouse volumes, this runs once per machine per mode
-— restoring in testing mode does not populate intended mode's silver, or the
-other way round.
+> On a six-node cluster the row count this prints can read **low** — it is taken the
+> instant the insert returns, while the second shard and the replicas are still
+> being filled. Measured here: it printed 51,914 immediately and 103,972 a few
+> seconds later. Nothing is lost; re-run
+> `SELECT count() FROM gdelt_events FINAL` to confirm.
 
-Repeating the restore is safe: both tables are `ReplacingMergeTree`, so
-re-inserting the same rows collapses back to the same counts rather than
-duplicating them. If this cluster has already processed data **newer** than the
-seed, the watermark will not advance and gold will not rebuild by itself. Force
-one rebuild:
+**Step 6 — create the three test profiles**, once, from any machine that can reach
+the backend. The gold layer is built per user, so until a profile exists there is
+nothing to build:
+
+```bash
+BACKEND_URL=http://<any-swarm-node>:8000 python3 5-serving/seed_test_users.py
+```
+
+**Step 7 — each user machine** (any number):
+
+```bash
+BACKEND_URL=http://<any-swarm-node>:8000 \
+  docker compose -f 5-serving/docker-compose.serving.yml up --build
+```
+
+Any node's `:8000` works, because Swarm's routing mesh forwards it to a live
+backend replica wherever that happens to be running.
+
+#### Confirming it is actually distributed
+
+These are the checks that distinguish a real seven-machine deployment from six
+containers on one host:
+
+```bash
+docker node ls                              # 7 nodes, 3 of them Leader/Reachable
+docker stack ps radar-stores | grep -c Running
+
+# ClickHouse: 6 nodes across 2 shards, and rows genuinely split between them
+docker exec <s1r1-task> clickhouse-client --query \
+  "SELECT count(), uniqExact(shard_num) FROM system.clusters WHERE cluster='gnews_cluster'"
+docker exec <s1r1-task> clickhouse-client --query \
+  "SELECT hostName(), count() FROM clusterAllReplicas('gnews_cluster', default.gdelt_events_local) GROUP BY hostName() ORDER BY 1"
+
+# MongoDB: three members, on three different hosts
+docker exec <mongo1-task> mongosh --quiet --eval 'rs.status().members.map(m => m.name)'
+
+# PostgreSQL: one leader, two streaming replicas
+docker exec <postgres-1-task> patronictl -c /home/postgres/postgres.yml list
+```
+
+The ClickHouse query should report `6  2`, and the per-node counts should show two
+distinct totals appearing three times each — one per shard, replicated three ways.
+Anything else means the cluster is not laid out as intended.
+
+#### Trying intended mode on one machine, and why it refuses
+
+It is worth running this once, because it demonstrates the point of the mode
+better than any description: intended mode does not merely *prefer* seven
+machines, it declines to run on one.
+
+Point every "machine" at your own by forming a single-node swarm and deploying
+the real stack unchanged:
+
+```bash
+docker swarm init --advertise-addr 127.0.0.1
+docker network create -d overlay --attachable pipeline_network
+
+NODE=$(docker node ls -q)
+docker node update --label-add store=store1  $NODE
+docker node update --label-add role=pipeline $NODE
+
+set -a; . ./.env.intended; set +a
+docker stack deploy -c docker-stack.stores.yml radar-stores
+sleep 45
+docker stack ps radar-stores --format '{{.Name}}\t{{.CurrentState}}\t{{.Error}}'
+```
+
+**The first wall is scheduling, and it is immediate.** A Docker node holds one
+value per label key, so a single node cannot be `store1` *and* `store2`. Only the
+four services pinned to `store1` start; the other fifteen never do:
+
+```
+clickhouse-keeper-1.1   Running
+clickhouse-s1r1.1       Running
+etcd-1.1                Running
+postgres-1.1            Running
+clickhouse-s1r2.1       Pending   "no suitable node (scheduling constraints not satisfied on 1 node)"
+clickhouse-s2r1.1       Pending   "no suitable node (scheduling constraints not satisfied on 1 node)"
+mongo1.1                Pending   "no suitable node (scheduling constraints not satisfied on 1 node)"
+…
+Running: 4 / 19        Pending: 15 / 19
+```
+
+That is the placement constraints doing exactly their job. They are not a
+formality: a ClickHouse node owns a local volume *and* a replica identity
+registered in Keeper, so Swarm refusing to put two replicas of one shard on one
+machine is the mechanism that makes "a shard survives losing two machines" true.
+
+**The second wall is memory, and it is the reason the first one is not simply
+relaxed.** Suppose you delete the `placement:` blocks so everything schedules.
+Intended mode sets `CH_MEMORY_CONFIG=memory.distributed.xml`, which gives each
+ClickHouse server **4 GB**, because in intended mode each has a machine to itself.
+Confirm it on the running node:
+
+```bash
+docker exec $(docker ps -qf name=radar-stores_clickhouse-s1r1) \
+  clickhouse-client --query \
+  "SELECT value FROM system.server_settings WHERE name='max_server_memory_usage'"
+# 4000000000
+```
+
+Six of those is 24 GB before anything else starts:
+
+| Component | Each | Total |
+|----|----|----|
+| 6 × ClickHouse | 4.00 GB | **24.00 GB** |
+| 3 × PostgreSQL (Spilo) | ~0.25 GB | 0.75 GB |
+| 3 × MongoDB | ~0.20 GB | 0.60 GB |
+| 3 × ClickHouse Keeper | ~0.15 GB | 0.45 GB |
+| 3 × etcd | ~0.05 GB | 0.15 GB |
+| | | **≈ 26 GB** |
+
+Docker on the machine this was written on has **6.77 GiB**. The stores alone ask
+for close to four times that, before the pipeline tier and the dashboard. Below
+the limit ClickHouse nodes are terminated by the kernel (exit code 137) and
+restart in a loop, which surfaces as queries timing out or returning nothing
+rather than as an obvious error.
+
+**What you can genuinely rehearse on one machine.** Lowering
+`CH_MEMORY_CONFIG` to `memory.xml` (1.1 GB per node, the value written for six
+servers sharing a host) does fit six ClickHouse servers plus three Keepers here,
+which is enough to exercise the Swarm mechanics — configs delivery, overlay DNS,
+`ON CLUSTER` DDL, the shard split, `silver_snapshot.sh`'s task lookup — with the
+placement constraints removed. The three PostgreSQL nodes and three etcd nodes
+likewise fit comfortably **on their own**, which is how the Patroni failover
+behaviour described above was verified. What does not fit is all of it at once,
+which is the honest summary: the mechanisms are all testable on one machine, one
+subsystem at a time; the topology is not.
+
+Clean up afterwards:
+
+```bash
+docker stack rm radar-stores
+docker swarm leave --force
+```
+
+
+#### Which machine runs which command
+
+| Command | Where |
+|----|----|
+| `docker stack deploy` | any **manager** (store1–3) |
+| `./bootstrap/silver_snapshot.sh` (`restore`, `trim`, `export`) | the machine hosting **s1r1** (store1) |
+| `docker exec … main.recompute_all()` | the **pipeline** machine |
+| `docker compose -f docker-compose.diagnostics.yml run --rm diagnostics` | any machine on `pipeline_network`, with `.env.intended` sourced |
+| `docker compose -f docker-compose.spark.yml …` | the **pipeline** machine (it mounts that machine's `shared_data`) |
+| `seed_test_users.py` | anywhere that can reach `:8000` |
+| frontend | each user machine |
+
+
+### Returning to testing mode
+
+Remove the two Swarm stacks, then start the plain-Compose stack. Nothing is
+deleted, in either direction:
+
+```bash
+docker stack rm radar radar-stores                     # on a manager
+docker compose --env-file .env.testing -f docker-compose.stores.yml up -d
+docker compose --env-file .env.testing up -d --build
+```
+
+Leaving the swarm itself (`docker swarm leave --force`) is only necessary if the
+machines are being repurposed; an idle swarm costs nothing.
+
+Testing mode reattaches to its **own** ClickHouse and Keeper volumes
+(`radar-testing_*`), which still hold whatever silver they held when this mode was
+last used; the Swarm stack's `radar-stores_*` volumes are left exactly as they
+were. If this is the first time testing mode has run on this machine, its silver
+starts empty and needs one `./bootstrap/silver_snapshot.sh restore`.
+
+**MongoDB carries across; the gold layer does not, and does not need to.**
+`mongo-init` detects that the replica set is still configured for three members
+while only one is running — a state in which no primary can be elected and every
+write fails — and reconfigures it to a single member automatically, so **user
+profiles and tags survive the switch**. Gold is a different case: a Patroni data
+directory records the cluster identity and cannot be reused by a standalone
+server, so each mode keeps its own. That costs nothing, because gold is *derived*
+— one recompute rebuilds it from silver:
 
 ```bash
 docker exec pipeline_processing python3 -c "import main; main.recompute_all()"
 ```
 
-**Step 5 — create the three test profiles** (once, from any machine that can
-reach the backend). The gold layer is built per user, so until a profile exists
-there is nothing to build and the dashboard stays empty:
+> **Run that after any switch between the modes, and after moving gold to a new
+> store.** The watermark trigger fires only when `max(DATEADDED)` in silver
+> *increases*, and swapping the gold store leaves silver untouched — so the
+> trigger correctly declines to fire and gold would otherwise stay empty. Restarting
+> the processing container also does it, because the watermark it compares against
+> is held in memory and starts at `None`, but the command above is explicit.
 
-```bash
-BACKEND_URL=http://10.0.0.60:8000 python3 5-serving/seed_test_users.py
-```
-
-Credentials and expected contents are under
-[Signing in](#signing-in).
-
-**Step 6 — each user machine** (one frontend per machine, any number of them):
-
-```bash
-BACKEND_URL=http://10.0.0.60:8000 \
-  docker compose -f 5-serving/docker-compose.serving.yml up --build
-```
-
-**Step 7 — optional: run the pipeline under Docker Swarm.** Steps 3 and 6 give a
-working distributed system, but the pipeline is then restarted only on the machine
-it already occupies. Swarm adds machine-level failover: if the whole pipeline
-machine dies, the pipeline is re-created on another node. It cannot be enabled by
-a compose argument, because it changes the Docker daemon's own state and requires
-an image registry.
-
-```bash
-# 1. Build and push the five images (Swarm cannot build from a Dockerfile)
-export REGISTRY=<your-dockerhub-user>          # or a private registry
-for l in ingestion parsing validation processing; do
-  docker build -t $REGISTRY/radar-$l:latest ./$(ls -d [1-4]-*| grep $l)
-  docker push  $REGISTRY/radar-$l:latest
-done
-docker build -t $REGISTRY/radar-backend:latest ./5-serving/backend
-docker push  $REGISTRY/radar-backend:latest
-
-# 2. Form the swarm
-docker swarm init --advertise-addr <manager-ip>          # on the manager
-docker swarm join --token <printed-token> <manager-ip>:2377   # on each other machine
-
-# 3. Mark the machines allowed to run the pipeline
-docker node update --label-add role=pipeline <node-name>
-
-# 4. Deploy
-REGISTRY=$REGISTRY docker stack deploy -c docker-stack.pipeline.yml radar
-docker stack services radar
-```
-
-Label **at least two** nodes `role=pipeline` if Swarm is to have somewhere to move
-the pipeline to. Layers 1–4 share a local volume and therefore always run
-together on one node; the backend is stateless and spreads across the swarm.
-Leave the stores out of Swarm: they are stateful and already have their own
-replication.
-
-### Returning to testing mode
-
-Stop the current stores, then start them without `--profile full` and with the
-testing env file. Nothing is deleted, in either direction:
-
-```bash
-docker compose -f docker-compose.stores.yml --profile full down
-docker compose --env-file .env.testing -f docker-compose.stores.yml up -d
-docker compose --env-file .env.testing up -d --build
-```
-
-Testing mode reattaches to its **own** ClickHouse and Keeper volumes
-(`radar-testing_*`), which still hold whatever silver they held when this mode
-was last used; intended mode's `radar-full_*` volumes are left exactly as they
-were. If this is the first time testing mode has run on this machine, its silver
-starts empty and needs one `./bootstrap/silver_snapshot.sh restore`.
-
-MongoDB and Oracle are shared between the modes, so **user profiles, tags and the
-gold layer carry across the switch**. `mongo-init` detects that the replica set is
-still configured for three members while only one is running — a state in which no
-primary can be elected and every write fails — and reconfigures it to a single
-member automatically. The reverse switch is handled the same way.
-
-**What `BACKEND_URL` is.** The frontend holds no database credentials and never contacts ClickHouse, MongoDB or Oracle directly; every value it displays is retrieved from the serving backend's HTTP API. `BACKEND_URL` is the address of that API. Because the frontend runs on each user's machine while the backend runs on the operator's, it must be set to the operator machine's address and the backend's published port 8000.
+**What `BACKEND_URL` is.** The frontend holds no database credentials and never contacts ClickHouse, MongoDB or PostgreSQL directly; every value it displays is retrieved from the serving backend's HTTP API. `BACKEND_URL` is the address of that API. Because the frontend runs on each user's machine while the backend runs on the operator's, it must be set to the operator machine's address and the backend's published port 8000.
 
 | Situation | Value |
 |----|----|
@@ -381,7 +934,7 @@ member automatically. The reverse switch is handled the same way.
 
 If the address is unreachable, the dashboard reports that the backend is unavailable rather than displaying data.
 
-**One frontend runs per user machine.** The frontend is stateless and holds no data; any number of instances may run concurrently against a single backend. Ports 8000 (backend) and 27017–27019, 9000, 1521 (stores) must be reachable between the machines.
+**One frontend runs per user machine.** The frontend is stateless and holds no data; any number of instances may run concurrently against a single backend. The only port a user machine needs to reach is **8000**, on any swarm node — the routing mesh forwards it to a live backend replica. The stores publish nothing: they are reachable only from inside the overlay network, which is why they need no firewall rules of their own beyond the three Swarm ports between machines.
 
 ------------------------------------------------------------------------
 
@@ -398,10 +951,10 @@ There is a gap between the end of the bootstrap history and the moment the pipel
 ## Shutting down while preserving all data
 
 Stop the tiers in the reverse of their start order. The commands differ per mode,
-because a tier must be shut down with the same arguments that started it: omitting
-`--profile full`, for instance, leaves the nine redundant containers running.
+because each is torn down with the tool that started it: `docker compose down` in
+testing mode, `docker stack rm` in intended mode.
 
-**Optional first — keep only the shipped 30-day history.** The pipeline polls
+**Optional first (for testing mode) — keep only the shipped 30-day history.** The pipeline polls
 continuously, so a store that has been running holds the seed *plus* everything
 since. Stop the ingest path before trimming, or the next poll lands mid-clean-up
 and puts the excess straight back:
@@ -413,8 +966,30 @@ docker exec pipeline_processing python3 -c "import main; main.recompute_all()"  
 ```
 
 `seed` resolves to the last slice in `data/silver_seed`; `trim <YYYYMMDDHHMMSS>`
-takes an explicit cutoff. Skip all three to keep the live history. In intended
-mode the first command uses `--env-file .env.full`.
+takes an explicit cutoff. Skip all three to keep the live history.
+
+**Testing mode:**
+
+```bash
+docker compose -f 5-serving/docker-compose.serving.yml down
+docker compose --env-file .env.testing down
+docker compose --env-file .env.testing -f docker-compose.stores.yml down
+```
+
+**In intended mode these three commands run on three different machines**, which
+is easy to miss because they read as one sequence:
+
+```bash
+# pipeline machine — stop new data arriving
+docker service scale radar_ingestion=0 radar_parsing=0 radar_validation=0
+
+# the machine hosting clickhouse-s1r1 (store1) — docker exec is daemon-local
+./bootstrap/silver_snapshot.sh trim seed
+
+# pipeline machine again — propagate the trim into gold
+docker exec $(docker ps -qf name=radar_processing) \
+  python3 -c "import main; main.recompute_all()"
+```
 
 **What the third command does to the gold layer, precisely.** `trim` only touches
 silver, so the rebuild is what propagates the change into gold:
@@ -430,34 +1005,31 @@ recompute — full or single-user — so it also fires when someone narrows thei
 preferences on the dashboard, not only after a trim. See
 [Orphaned gold rows](#orphaned-gold-rows-and-why-they-can-be-removed-safely).
 
-**Testing mode:**
-
-```bash
-docker compose -f 5-serving/docker-compose.serving.yml down
-docker compose --env-file .env.testing down
-docker compose --env-file .env.testing -f docker-compose.stores.yml down
-```
-
-**Intended mode** — each command on the machine that runs that tier:
+**Intended mode** — the stacks are removed from a manager, so there is no
+per-machine sequence to get right; Swarm stops the tasks wherever they run:
 
 ```bash
 # each user machine
 docker compose -f 5-serving/docker-compose.serving.yml down
 
-# pipeline machine
-docker compose --env-file .env.full down
-
-# stores machine — --profile full is required, or the nine extra containers remain
-docker compose --env-file .env.full -f docker-compose.stores.yml --profile full down
+# any manager — removes both tiers across all seven machines
+docker stack rm radar radar-stores
 ```
 
-**If the pipeline was deployed under Swarm** (step 5 of the intended-mode setup),
-remove the stack instead. Leave the swarm itself only if the machines are being
-repurposed:
+`docker stack rm` removes services, tasks and the stack's networks. It does **not**
+remove volumes or configs, so all durable data survives. Leave the swarm itself
+only if the machines are being repurposed:
 
 ```bash
-docker stack rm radar          # on the manager
-docker swarm leave --force     # optional, on each machine
+docker swarm leave --force     # on each machine
+```
+
+The overlay network is created by hand and is not owned by either stack, so it
+survives `stack rm` and is reused on the next deploy. Recreate it only if it was
+explicitly removed:
+
+```bash
+docker network create -d overlay --attachable pipeline_network
 ```
 
 `down` removes containers and networks. It does not affect named volumes, so all durable data survives and is available at the next start:
@@ -466,8 +1038,8 @@ docker swarm leave --force     # optional, on each machine
 |----|----|----|
 | User profiles — territories, keywords | `mongo1/2/3_data` (`radar.users`) | Yes |
 | Per-user tags — archived, needs action, monitoring | `mongo1/2/3_data` (`radar.tags`) | Yes |
-| Gold — `articles`, `user_articles` | `oracle_data` | Yes |
-| Silver — `gdelt_events`, `gdelt_mentions` | `radar-testing_ch_*_data` / `radar-full_ch_*_data` (per mode) | Yes |
+| Gold — `articles`, `user_articles` | `postgres_data` (testing) / `radar-stores_pg_*_data` (intended) | Yes |
+| Silver — `gdelt_events`, `gdelt_mentions` | `radar-testing_ch_*_data` (testing) / `radar-stores_ch_*_data` (intended) | Yes |
 | In-flight raw and parsed slices | `shared_data` | Yes, and disposable in any case |
 
 > **The `-v` flag must never be used.** `docker compose … down -v` deletes the volumes, permanently destroying every user profile, every tag, and the entire silver and gold history. Only the most recent 15-minute GDELT slice could be re-retrieved.
@@ -481,7 +1053,7 @@ Passing `--build` at the next start is safe: it rebuilds images from source and 
 Both steps belong to the **stores** tier, so the pipeline never repeats them, and both are idempotent:
 
 - **MongoDB replica set** — the `mongo-init` service executes `rs.initiate(rs0)`, guarded by `rs.status()`, and is a no-operation once the set exists.
-- **Oracle gold schema** — `oracle-init/01_schema.sql` is executed once, as SYSDBA, at first database creation. The `radar` user is created by the image from `APP_USER`; the service (PDB) is `FREEPDB1`.
+- **PostgreSQL gold schema** — `postgres-init/01_schema.sql` is executed once, at first database creation. In testing mode the image's own `/docker-entrypoint-initdb.d` hook runs it; in intended mode Patroni runs `postgres-init/init-gold.sh` from its `bootstrap.post_init` hook instead, because Patroni performs `initdb` itself and never invokes that entrypoint hook.
 - The processing layer publishes the territory table to MongoDB at startup, retrying until MongoDB is available; the frontend retrieves it from the backend via `GET /territories`.
 
 Three test accounts are defined in `5-serving/frontend/auth.py`. Their profiles are created by running, once, after the backend is available:
@@ -502,149 +1074,344 @@ The following section records the reasoning behind the storage and pipeline deci
 
 The two modes run **identical application code**. No Python file, table name,
 cluster name or service name differs between them. Everything that changes is
-configuration, and all of it is selected by command-line arguments.
+configuration and topology.
+
+The two modes are also driven by **different files**, which is the clearest way to
+hold the distinction:
+
+| | Testing | Intended |
+|----|----|----|
+| Orchestrator | plain `docker compose` | **Docker Swarm** (`docker stack deploy`) |
+| Stores file | `docker-compose.stores.yml` | `docker-stack.stores.yml` |
+| Pipeline file | `docker-compose.yml` | `docker-stack.pipeline.yml` |
+| Env file | `.env.testing` | `.env.intended` |
+| Network | local bridge `pipeline_network` | **attachable overlay** `pipeline_network` |
+| Machines | 1 | 7, plus one per user |
+
+### Why the overlay network is the decision everything else follows from
+
+An overlay network gives every machine the same DNS namespace: `clickhouse-s1r1`
+resolves to the same node from anywhere in the swarm. That single property is why
+almost nothing else had to change to go distributed:
+
+- `clickhouse/cluster.xml` still names hosts as `clickhouse-s1r1`…`s2r3`.
+- `storage.py` still issues `CREATE TABLE … ON CLUSTER gnews_cluster`.
+- `docker-compose.yml`'s store addresses still default to service names.
+- **No store port is published at all.** ClickHouse, MongoDB and PostgreSQL are
+  reachable only from inside the overlay; only the backend's `8000` faces users.
+
+The earlier single-machine arrangement needed a `STORES_HOST` placeholder edited
+into an env file, and published ports for every store. Both are gone.
+
+### `endpoint_mode: dnsrr` — mandatory, and silent when wrong
+
+Swarm's default endpoint mode is `vip`: a service name resolves to a virtual IP
+that load-balances across tasks. That is **wrong** for ClickHouse and Keeper, and it
+fails in a way that looks like nothing happening at all.
+
+ClickHouse works out *which node it is* by matching its own interface addresses
+against the `<replica><host>` entries in `cluster.xml`; Keeper does the same against
+`<raft_configuration>`. Under `vip` the service name resolves to a virtual address
+that belongs to no container, so **no node ever recognises itself**. An `ON CLUSTER`
+statement is then accepted, written to the Keeper queue, and never claimed:
+
+```
+Code: 159. Distributed DDL task /clickhouse/task_queue/ddl/query-0000000002
+is not finished on 6 of 6 hosts (0 of them are currently executing the task,
+0 are inactive)
+```
+
+The tables are silently never created. `endpoint_mode: dnsrr` resolves the name
+straight to the task's own container IP, which is what both self-identification and
+replica-to-replica part fetches need; `hostname:` makes the container agree about
+its own name. This was reproduced and then fixed on a real swarm.
+
+### What Swarm ignores from a Compose file
+
+| Key | What happens | Replacement |
+|----|----|----|
+| `container_name` | ignored — tasks are `<stack>_<service>.<slot>.<id>` | `silver_snapshot.sh` resolves s1r1 by service label |
+| `profiles` | ignored | not needed: the Swarm stack *is* intended mode |
+| `depends_on` | ignored | already safe — every layer retries its store indefinitely |
+| `restart` | ignored | `deploy.restart_policy` |
+| `ulimits` | **ignored** | `/etc/docker/daemon.json` per machine, daemon restarted |
+| bind mounts | need the file on the target machine | Swarm **configs**, distributed by the manager |
+
+`docker stack deploy` additionally accepts **no `--env-file`**: variables must be
+sourced into the shell (`set -a; . ./.env.intended; set +a`) or the defaults quietly
+apply — which are the testing-mode ones.
+
+### Why store nodes are pinned and the pipeline is not
+
+Every store service carries `placement.constraints: [node.labels.store == storeN]`.
+A ClickHouse node owns a local volume *and* a replica identity registered in Keeper,
+so rescheduling it onto another machine would produce a node with an empty volume
+claiming an identity Keeper already knows — a broken replica, not a fresh one. The
+same is true of a Patroni data directory and a MongoDB member's local oplog.
+
+The pipeline tier is the opposite and roams freely, because `shared_data` holds only
+the in-flight slice: a rescheduled pipeline re-polls GDELT and continues.
+
+### One idea, three times: every store is addressed as a list
+
+This is the single most useful thing to know about how the tiers connect. No client
+holds one address for a store; each holds **all** of them, and the driver finds a
+live node:
+
+| Store | Variable | Mechanism |
+|----|----|----|
+| ClickHouse | `CLICKHOUSE_ALT_HOSTS` | clickhouse-driver tries the alternates when the entry node is unreachable |
+| MongoDB | `MONGO_URI` (three members) | PyMongo discovers the primary and follows elections |
+| PostgreSQL | `POSTGRES_DSN` (three members, `target_session_attrs=read-write`) | libpq skips read-only standbys and finds the leader |
+
+Without the first of these, losing s1r1's *machine* would stop the pipeline even
+though the shard's other two replicas hold every row — the data would survive a
+failure the connection could not. In testing mode all three degenerate to a single
+address and behave exactly as before.
 
 ### Services that exist only in intended mode
 
-Nine services carry `profiles: ["full"]` in `docker-compose.stores.yml` and
-therefore start only when `--profile full` is passed:
-
 | Service | Purpose |
 |----|----|
-| `clickhouse-s1r2`, `clickhouse-s1r3` | replicas 2 and 3 of shard 1 |
-| `clickhouse-s2r1`, `clickhouse-s2r2`, `clickhouse-s2r3` | the whole of shard 2 |
-| `clickhouse-keeper-2`, `clickhouse-keeper-3` | the other two Keeper nodes |
+| `clickhouse-s1r2`, `s1r3` | replicas 2 and 3 of shard 1 |
+| `clickhouse-s2r1`, `s2r2`, `s2r3` | the whole of shard 2 |
+| `clickhouse-keeper-2`, `-3` | the other two Keeper nodes |
 | `mongo2`, `mongo3` | the other two replica-set members |
+| `postgres-2`, `postgres-3` | the two PostgreSQL replicas |
+| `etcd-1`, `etcd-2`, `etcd-3` | Patroni's leader lock |
 
-Compose refuses to start a service whose dependency is disabled by a profile, so
-`depends_on` was narrowed: every ClickHouse server now depends on
-`clickhouse-keeper-1` alone, and `mongo-init` on `mongo1` alone. The additional
-nodes join the ensemble and the replica set when they start; nothing needs to
-wait for them.
+In `docker-compose.stores.yml` the first four rows are gated behind
+`profiles: ["full"]`, so testing mode simply does not start them. The Swarm stack
+has no profiles and always deploys everything.
 
-### Configuration files that exist in two versions
+### Configuration files that exist in more than one version
 
-| Setting | Testing (`*.local.xml`) | Intended | Consequence |
+| Setting | Testing | Intended | Consequence |
 |----|----|----|----|
-| `clickhouse/cluster*.xml` — `<remote_servers>` | 1 shard, 1 replica | 2 shards, 3 replicas each | Testing has neither sharding nor redundancy; a query scans one node rather than two shards in parallel |
-| `clickhouse/cluster*.xml` — `<zookeeper>` | 1 Keeper node listed | 3 Keeper nodes listed | The list must match the running ensemble, or servers block trying to reach absent coordinators |
-| `clickhouse/keeper-1*.xml` — `<raft_configuration>` | 1 server | 3 servers | A single-server ensemble forms a quorum of one and elects itself; the three-server ensemble survives losing one member |
-| `clickhouse/memory*.xml` — `max_server_memory_usage` | 2.5 GB | 1.1 GB | Six nodes must share the host, so each is capped tightly; one node may take far more. Using the cluster cap on a single node causes ClickHouse error 241 (memory limit exceeded) under normal load |
-| `clickhouse/memory*.xml` — `mark_cache_size` | 256 MB | 128 MB | Same reasoning: the cache is per node |
-
-The cluster is named `gnews_cluster` in both versions, so every
-`ON CLUSTER gnews_cluster` statement in the validation layer works unchanged.
-`internal_replication` remains `true` in both.
+| `cluster*.xml` `<remote_servers>` | 1 shard, 1 replica | 2 shards × 3 replicas | testing has neither sharding nor redundancy |
+| `cluster*.xml` `<zookeeper>` | 1 Keeper | 3 Keepers | the list must match the running ensemble |
+| `keeper-1*.xml` `<raft_configuration>` | 1 server | 3 servers | a lone server forms a quorum of one and elects itself |
+| `memory*.xml` `max_server_memory_usage` | 2.5 GB (`memory.local.xml`) | **4 GB** (`memory.distributed.xml`) | one node per machine, so it may take most of it. `memory.xml`'s 1.1 GB exists only for the six-on-one-host case |
+| gold schema | image entrypoint hook | Patroni `bootstrap.post_init` | Patroni runs `initdb` itself and never invokes the image's hook |
 
 ### Settings that differ in value only
 
 | Variable | Testing | Intended | Why |
 |----|----|----|----|
-| `CLICKHOUSE_INSERT_QUORUM` | `1` | `2` | The number of replicas that must acknowledge an append. With one replica a quorum of two can never be met, and every insert fails with ClickHouse error 285, *"Number of alive replicas (1) is less than requested quorum (2)"*. It is set on the validation and processing services in `docker-compose.yml`, on the loader in `docker-compose.bootstrap.yml`, and in the shared environment of `docker-stack.pipeline.yml`, so all four paths agree |
-| `MONGO_MEMBERS` | `1` | `3` | Drives whether `mongo-init` configures a one- or three-member replica set |
-| `MONGO_MEMBER_0/1/2` | Docker service names | the stores machine's real addresses | Clients are redirected to the addresses the set advertises, so they must be reachable from the pipeline machine |
-| `MONGO_URI`, `CLICKHOUSE_HOST`, `ORACLE_HOST` | unset (Docker service names apply) | the stores machine's address | Only needed when the tiers are on separate machines |
-| `BACKEND_URL` | `host.docker.internal:8000` | `http://<pipeline-host>:8000` | The frontend runs on a different machine from the backend |
-| `STORE_VOLUMES` | `radar-testing` | `radar-full` | Names this mode's ClickHouse and Keeper volumes, so the two topologies never share coordination state. See [Switching modes](#switching-modes-state-that-persists-across-the-switch) |
+| `CLICKHOUSE_INSERT_QUORUM` | `1` | `2` | one replica can never satisfy a quorum of two — every insert would fail with error 285 |
+| `CLICKHOUSE_ALT_HOSTS` | unset | `clickhouse-s1r2:9000,clickhouse-s1r3:9000` | see above |
+| `MONGO_MEMBERS` | `1` | `3` | drives whether `mongo-init` configures a one- or three-member set |
+| `POSTGRES_DSN` | one host | three hosts + `target_session_attrs=read-write` | finds the Patroni leader without reconfiguration |
+| `CH_MEMORY_CONFIG` | `memory.local.xml` | `memory.distributed.xml` | see above |
+| `STORE_VOLUMES` | `radar-testing` | n/a — the Swarm stack names its own | keeps the two topologies' coordination state apart |
 
-### Structural differences
+### Sharding, and the one query shape it forbids
 
-- **The network.** `pipeline_network` is declared
-  `external: ${PIPELINE_NET_EXTERNAL:-true}`. When the variable is `true` the
-  pipeline joins the network the stores created; when `.env.full` sets it to
-  `false`, the `external` key disappears from the merged configuration entirely
-  and Compose creates the network itself, which is what a machine running no
-  stores requires. This is done with a variable rather than an override file
-  because Compose **merges** the files given with `-f`: an override can add or
-  change a key, but there is no way to remove one, so an override could never
-  turn `external: true` off.
-- **Frontend instances.** One in testing; one per user machine in intended mode.
-  The frontend is stateless, so any number may run against a single backend.
-- **`mongo-init` behaviour.** It no longer only initiates a new set. It compares
-  the configured member count against `MONGO_MEMBERS` and, when they differ, runs
-  `rs.reconfig(…, {force: true})`. This matters when switching modes: a set still
-  configured for three members with only one running has no majority, so no
-  primary is elected and **every write fails**. `force` is required precisely
-  because there is no primary to accept an ordinary reconfiguration.
+Only intended mode actually shards. Both silver tables are `Distributed` routers over
+`ReplicatedReplacingMergeTree` locals, sharded on `cityHash64(GLOBALEVENTID)`, which
+is chosen so that **an event and all of its mentions land on the same shard** — joins
+stay local, and repeated copies of an event collapse on the node that holds them.
+`internal_replication=true` means the Distributed table writes to one replica per
+shard and lets ReplicatedMergeTree copy it onward; with `false` it would write to all
+three itself and triple-insert.
+
+Measured on a real two-shard cluster, restoring the seed: shard 1 took 51,914 rows
+and shard 2 took 52,058 — 103,972 together, each replicated identically to its three
+nodes.
+
+The constraint this creates: ClickHouse refuses a **distributed subquery nested
+inside a distributed query** (`distributed_product_mode = 'deny'`), so
+`… WHERE GLOBALEVENTID IN (SELECT … FROM gdelt_mentions …)` fails with
+`Code: 288`. Every query in the project therefore uses plain aggregates and literal
+id lists — see [Retention](#retention-the-ten-year-rule), where this is worked
+through in full. In testing mode the planner has one shard and nothing to distribute,
+so the restriction never bites and a bad query shape would pass unnoticed.
+
+### Operations that behave differently, without any code change
+
+- **`mutations_sync = 2`** waits for *every* replica to apply a mutation, which is
+  what makes the counts reported by retention and `trim` final. With one replica it
+  returns instantly; with three it waits for all of them, and if one is down it
+  blocks until `replication_wait_for_inactive_replica_timeout` (120 s) and then
+  errors. Nothing is lost — the retention job writes its marker only after a
+  successful run, so the next daily pass retries.
+- **Row counts read immediately after an insert can be low** on six nodes, while the
+  second shard and the replicas are still being filled. `silver_snapshot.sh restore`
+  printed 51,914 and then 103,972 seconds later. Testing mode is exact.
+- **`ON CLUSTER` DDL** has to reach six nodes through Keeper rather than one, so the
+  first schema creation takes seconds rather than being instantaneous.
 
 ### Switching modes: state that persists across the switch
 
-Two stores record their own cluster membership on disk. That record survives a
-mode change, and if it disagrees with the topology now running, the store fails
-in a way that looks like a network fault rather than a configuration error.
+Three stores record their own cluster membership on disk. That record survives a
+mode change, and if it disagrees with the topology now running, the store fails in a
+way that looks like a network fault rather than a configuration error.
 
-**MongoDB — handled automatically, no action required.** A replica set still
-configured for three members while only one is running has no majority, so no
-primary is elected and every write fails with `NotWritablePrimary`. `mongo-init`
-compares the configured member count against `MONGO_MEMBERS` on every start and
-issues `rs.reconfig(…, {force: true})` when they differ. `force` is required
-precisely because there is no primary to accept an ordinary reconfiguration.
+**MongoDB — handled automatically.** A set still configured for three members while
+one is running has no majority, so no primary is elected and every write fails with
+`NotWritablePrimary`. `mongo-init` compares the configured count against
+`MONGO_MEMBERS` on every start and issues `rs.reconfig(…, {force: true})` when they
+differ. `force` is required precisely because there is no primary to accept an
+ordinary reconfiguration.
 
-**ClickHouse Keeper — resolved by giving each mode its own volumes.** Keeper
-persists its Raft membership in its data volume. A Keeper whose volume says it
-belongs to a three-node ensemble cannot elect a leader when started alone, and
-rejects every connection with `Coordination::Exception: Keeper server rejected the
-connection during the handshake … doesn't see leader or stale`. ClickHouse then
-retries indefinitely, so the symptom is a pipeline that appears to hang at 0% CPU
-rather than an error. The ClickHouse data volumes are affected too, because the
-replicated tables' coordination lives in Keeper and their metadata is orphaned
-without it.
+**ClickHouse Keeper — resolved by giving each mode its own volumes.** Keeper persists
+its Raft membership. A Keeper whose volume says it belongs to a three-node ensemble
+cannot elect a leader when started alone, and rejects every connection with
+`Coordination::Exception: … doesn't see leader or stale`. ClickHouse then retries
+indefinitely, so the symptom is a pipeline that hangs at 0% CPU rather than an error.
+This cannot be fixed by *clearing* a volume from a compose argument — Compose has no
+conditional "empty this volume" directive — but it can be fixed by never sharing
+them. Testing mode's volumes are named `${STORE_VOLUMES:-radar-testing}_*`; the Swarm
+stack names its own.
 
-This cannot be fixed by *clearing* the volumes from a compose argument, because
-Compose has no conditional "empty this volume" directive: a volume is either
-mounted or it is not. It can, however, be fixed by never sharing them. Each of the
-nine ClickHouse and Keeper volumes is declared with an interpolated name:
+**PostgreSQL — same reasoning.** A Patroni data directory records the cluster
+identity and cannot be reused by a standalone server, so each mode keeps its own gold
+volume. This costs nothing, because gold is derived: one `recompute_all()` rebuilds
+it from silver.
 
-```yaml
-  ch_s1r1_data:
-    name: ${STORE_VOLUMES:-radar-testing}_ch_s1r1_data
-```
-
-`.env.testing` sets `STORE_VOLUMES=radar-testing` and `.env.full` sets
-`radar-full`, so the two topologies address entirely separate volumes. Switching
-modes is then purely a matter of compose arguments, with **no manual step and no
-data destroyed in either direction** — each mode simply reattaches to the silver
-it last had. The cost is that each mode keeps its own copy of silver, filled
-independently by `./bootstrap/silver_snapshot.sh restore`; at 15 MiB and about
-three seconds from the committed seed, that is a better trade than a destructive
-manual step.
-
-MongoDB and Oracle are deliberately **not** mode-scoped. MongoDB reconciles its
-own member count as described above, and Oracle runs as a single instance in both
-modes, so both can safely share one volume — which means user profiles, tags and
-the gold layer survive a mode switch intact.
-
-Docker Swarm is the third thing that cannot be a compose argument: it changes the
-Docker daemon's own state and requires an image registry, so it is an explicit
-operator step (Step 5 of the intended-mode setup).
+MongoDB is deliberately **not** mode-scoped, so user profiles and tags survive the
+switch intact.
 
 ### Capabilities that testing mode does not have
 
-- **No redundancy.** Losing the single ClickHouse node loses the silver layer;
-  losing the single MongoDB node loses profiles and tags. In intended mode a
-  shard survives losing two of its three replicas, and MongoDB retains a majority
-  when one member is lost.
-- **No sharding**, so no parallel scan across shards.
-- **No automatic MongoDB failover**, as there is no second member to promote.
-- **No quorum-acknowledged writes**, since there is no second replica to
-  acknowledge them.
-- **A single Keeper**, which is a single point of failure for coordination.
-
-Oracle is a single instance in **both** modes: the free edition supports neither
-RAC nor Data Guard, so the gold layer is not replicated in either configuration.
+- **No redundancy of any kind.** Losing the single ClickHouse node loses silver;
+  losing the single MongoDB node loses profiles and tags; losing the single
+  PostgreSQL node loses gold until it is recomputed.
+- **No sharding**, so no parallel scan across shards — and no exposure to the
+  `distributed_product_mode` restriction, which is why a query shape that would fail
+  in intended mode can pass here.
+- **No automatic failover** anywhere: no second MongoDB member to promote, and no
+  Patroni or etcd at all.
+- **No quorum-acknowledged writes**, since there is no second replica to acknowledge.
+- **A single Keeper**, a single point of failure for coordination.
+- **No machine-level failover of the pipeline**, which Swarm provides in intended
+  mode by rescheduling it onto another node.
 
 Everything else — the filters, the deduplication rules, the retry behaviour, the
 triggers, the schemas and the enrichment — is byte-for-byte identical.
+
 
 ## Why three different databases
 
 Each store was selected for the access pattern of the data it holds.
 
-**ClickHouse holds the silver layer** — every event and every article mention GDELT publishes, appended continuously and never updated in place. Queries over it are analytical: filter millions of rows by country code, by keyword, by date. A columnar engine reads only the columns a query touches, and the repeated low-cardinality values that dominate this data (country codes, CAMEO event codes) compress extremely well. Scans are parallelised across shards, and skip indexes prune blocks that cannot contain a match. This is the canonical OLAP workload.
+**ClickHouse holds the silver layer** — every event and every article mention GDELT
+publishes, appended continuously and never updated in place. The case for a columnar
+engine here rests on the SHAPE of the data and the queries, not on how many rows there
+happen to be, so it holds identically at a few hundred rows and at tens of millions.
+Three properties, each measured on the shipped seed:
 
-**Oracle holds the gold layer** — the finished, per-user article sets the dashboard reads. Those queries are selective point lookups: retrieve one user's articles, by index, returning complete rows. They are transactional, and they upsert. A row-oriented store with B-tree indexes is the correct instrument for retrieving whole rows by key. This is the canonical OLTP workload.
+**1. The table is far wider than any query needs — 61 columns, 13 used.** GDELT's event
+schema has 61 columns. The silver-to-gold job needs thirteen of them (`GLOBALEVENTID`,
+`Day`, `EventCode`, `GoldsteinScale`, `Actor1Name`, the geo columns and the actor country
+codes). Spark pushes that projection down, and ClickHouse's own `system.query_log`
+confirms what it receives is not `SELECT *` but exactly those thirteen names. Those
+columns are **2.05 MiB of the table's 10.90 MiB — 19%**. A row store must read all 61
+columns to reach 13, because a row is one contiguous record on disk; a column store reads
+thirteen files and ignores forty-eight. That 13-of-61 ratio is a property of the schema:
+it is the same on the first slice ingested as on the ten-millionth.
+
+**2. The most frequent query reads exactly one column.** The processing layer polls
+`SELECT max(DATEADDED) FROM gdelt_events` every 60 seconds to decide whether silver has
+advanced. That is one column out of 61, and in a column store it touches one file and
+skips the rest of the table entirely. In a row store the same aggregate walks every row in
+full to read one field from each. The daily retention sweep is the same shape — it groups
+on `GLOBALEVENTID` and aggregates `MentionTimeDate`, two columns out of nineteen. These
+are cheap in absolute terms today, but they are the queries that run constantly, and
+their cost scales with the table while the work they do does not.
+
+**3. Storing one column together compresses it.** Values in a column are the same type
+and often repeat, so they compress far better stored together than interleaved with
+unrelated fields. Measured: **3.2× on events (35.33 MiB → 10.90 MiB)** and **3.3× on
+mentions (75.27 MiB → 22.99 MiB)**. That is a per-column property and holds at any row
+count.
+
+**Two honest qualifications**, because the picture is not uniform:
+
+- **Pruning barely helps on `gdelt_mentions`.** The job reads **84% of that table's
+  bytes**, because the columns it wants *are* the expensive ones: `MentionIdentifier`
+  6.25 MiB, `article_keywords` 6.07 MiB, `article_title` 4.40 MiB — 16.7 of 23 MiB. You
+  cannot prune away the payload. Columnar earns its place on the wide events table and on
+  the narrow repeated aggregates, not here.
+- **The compression is ordinary, not spectacular.** 3.2× is LZ4 on mostly high-cardinality
+  free text. The low-cardinality codes (country, CAMEO) do compress beautifully, but they
+  are a small share of the bytes.
+
+**The justification has also changed shape.** It used to be that ClickHouse itself did the
+per-user filtering — each user's geo and keyword predicate was pushed into SQL. That work
+now happens in Spark, and ClickHouse's role has narrowed to serving pruned column ranges
+in parallel to the executors. That is a legitimate and common role — it is what a columnar
+source does for a distributed compute engine — but the accurate claim today is **wide-table
+column pruning plus parallel range reads**, not "an analytical filtering engine".
+
+**Measured on both tables.** Reading only the columns the job needs, versus reading the
+whole row:
+
+| Table | Columns read | Bytes | Time |
+|----|----|----|----|
+| `gdelt_events` | 13 of 61 | **22.15 MiB** vs 89.85 MiB | **46 ms** vs 185 ms |
+| `gdelt_mentions` | 9 of 19 | 240.54 MiB vs 311.90 MiB | 1,149 ms vs **930 ms** |
+
+Events is a **4× win on both counts** — a quarter of the bytes in a quarter of the time.
+Mentions is the honest counterexample: pruning saves only 23% of the bytes, and the pruned
+read came out **slower than reading everything**. Fewer columns did not help, because the
+`FINAL` merge dominates the cost and the columns the job wants are most of the table.
+Columnar storage earns its keep on `gdelt_events` and on the narrow repeated aggregates; on
+`gdelt_mentions` it is at best a wash.
+
+**Why both tables are sorted on `GLOBALEVENTID` first.**
+
+```
+gdelt_events_local     ORDER BY (GLOBALEVENTID, ActionGeo_CountryCode)
+gdelt_mentions_local   ORDER BY (GLOBALEVENTID, MentionIdentifier)
+```
+
+In a MergeTree the sorting key *is* the primary index, and a query can only skip granules
+when it filters on a **prefix** of it. The query this is chosen for runs on every
+15-minute slice: the validation layer checks that each arriving mention refers to an event
+that already exists —
+
+```sql
+SELECT DISTINCT GLOBALEVENTID FROM gdelt_events WHERE GLOBALEVENTID IN (…)
+```
+
+(`storage.existing_event_ids`, the referential-integrity check). Leading with
+`GLOBALEVENTID` makes that an index seek instead of a scan.
+
+The events table used to lead with `ActionGeo_CountryCode`, and the cost was measurable.
+Looking up 3 ids, before and after the reorder:
+
+| Sort key | Rows read | Bytes | Time |
+|----|----|----|----|
+| `(ActionGeo_CountryCode, GLOBALEVENTID)` | 253,131 | 1.93 MiB | — |
+| `(GLOBALEVENTID, ActionGeo_CountryCode)` | **30,156** | **235 KiB** | **6 ms** |
+
+An 8.4× reduction on a query that runs every fifteen minutes. It does not fall to 3 rows
+because the index addresses granules of 8,192 rows, and `FINAL` reads across parts — but
+the difference between scanning the table and touching a few granules is the whole point.
+
+Applying a changed sort key to an existing volume takes a deliberate step, because the
+schema is created with `CREATE TABLE IF NOT EXISTS` and ClickHouse cannot `ALTER` a sorting
+key into a different order: `./bootstrap/silver_snapshot.sh recreate`, restart the
+validation layer (it owns the schema and calls `ensure_tables()` once, at startup), then
+`restore`. A fresh clone needs none of this — it creates the tables correctly the first
+time. That ordering existed to help per-user geographic filtering, which no
+longer reaches ClickHouse at all: the geo predicate is now a Spark expression evaluated in
+memory (`spark_gold.user_predicate`). Nothing was given up by reordering, because geographic
+filtering never relied on the sort key anyway — it has a dedicated skip index,
+`INDEX idx_action_cc ActionGeo_CountryCode TYPE set(0)`, which is untouched. Deduplication
+is also unaffected: `ReplacingMergeTree` collapses rows whose sorting-key *tuple* is equal,
+and reordering the columns does not change the set being compared.
+
+One cost remains. Every read uses `FINAL`, which forces merge-on-read across parts and
+partly offsets the scan speed — the price of using `ReplacingMergeTree` to absorb
+re-ingested slices.
+
+**PostgreSQL holds the gold layer** — the finished, per-user article sets the dashboard reads. Those queries are selective point lookups: retrieve one user's articles, by index, returning complete rows. They are transactional, and they upsert. A row-oriented store with B-tree indexes is the correct instrument for retrieving whole rows by key. This is the canonical OLTP workload.
 
 The division can be stated in one sentence: **columnar storage where the system scans, row storage where it looks up.** The expensive columnar scan is paid once, during processing, so that every dashboard read is an inexpensive indexed lookup.
+
+The gold layer was originally Oracle, and moved to PostgreSQL for one reason: Oracle Database Free supports neither RAC nor Data Guard, so it could not be replicated across machines at all. That was tolerable while every store sat on one host, and untenable once each store had to span machines — it would have left gold as the single component with no redundancy. Nothing in the design depended on Oracle specifically, and the row-store argument above applies unchanged.
 
 **MongoDB holds user profiles, per-user tags and the territory reference table.** These are small, self-contained documents whose shape varies: a profile contains a list of territories and a nested dictionary of five keyword groups, none of which is naturally relational. A document store fits without an object-relational mapping. MongoDB was also chosen for a second, operational reason: its **change streams** allow the processing layer to react the instant a user modifies their preferences, without polling.
 
@@ -654,10 +1421,12 @@ The system is distributed at the storage layer.
 
 - **ClickHouse — 6 data nodes plus 3 Keeper nodes.** The data is divided into **2 shards** by `cityHash64(GLOBALEVENTID)`, and each shard is held by **3 replicas** running `ReplicatedReplacingMergeTree`. A shard therefore survives the loss of two of its three nodes without data loss. The 3-node Keeper ensemble coordinates replication and `ON CLUSTER` DDL, and retains a quorum when one node is lost. The sharding key is deliberate: an event and all of its mentions hash to the same shard, so joins are local rather than cross-node, and repeated copies of an event from successive batches land on the same node, where the `ReplacingMergeTree` can collapse them.
 - **MongoDB — 3 nodes** in replica set `rs0`. A majority is retained when one node is lost, and PyMongo performs primary failover automatically. Writes are issued with `w="majority"`.
-- **Oracle — a single node.** This is a deliberate and acknowledged limitation: the free Oracle edition supports neither RAC nor Data Guard, so the gold layer cannot be replicated across machines without a licensed edition. Its resilience is restricted to container restart with a persistent volume. Were multi-machine redundancy of the gold layer required, PostgreSQL with streaming replication would be the pragmatic substitute; nothing in the design depends on Oracle specifically.
-- **Hand-offs.** The pipeline writes to ClickHouse with `insert_quorum`, so an append is acknowledged only once it has reached a quorum of replicas. MongoDB writes use majority acknowledgement. Oracle writes are committed transactionally, and the row counts the server reports are compared against the counts submitted.
+- **PostgreSQL — 3 nodes under Patroni**, on three machines, with a 3-node etcd ensemble holding the leader lock. One leader accepts writes and streams to two replicas. If the leader is lost, Patroni promotes a replica automatically, re-points the survivor at it, and rebuilds the old leader with `pg_rewind` when it returns rather than admitting a second writer. Clients need no reconfiguration: `POSTGRES_DSN` lists all three members with `target_session_attrs=read-write`, so libpq finds whichever node currently leads. Measured on a live cluster: killing the leader promoted a replica on a new timeline, and the same unchanged DSN reconnected to it with the pre-failover write intact.
+- **Hand-offs.** The pipeline writes to ClickHouse with `insert_quorum`, so an append is acknowledged only once it has reached a quorum of replicas. MongoDB writes use majority acknowledgement. PostgreSQL writes are committed transactionally, and the row counts the server reports are compared against the counts submitted.
 
-**PySpark** provides the horizontally distributed path from silver to gold, as an alternative to the in-process implementation. Its parallelism is genuine at all three stages: the read is a **partitioned JDBC read**, in which Spark divides the `GLOBALEVENTID` range into `numPartitions` disjoint ranges and issues one concurrent query per range, so each executor retrieves only its own slice; the events-to-mentions join is a distributed shuffle join; and `df.write.jdbc()` opens one connection per partition, so the write is executed by the executors in parallel. Because no result is materialised centrally, no row cap is required. Spark's JDBC writer offers only `append` and `overwrite` and cannot upsert, so the job writes to staging tables that it creates and drops itself, and a single subsequent SQL statement publishes them into the live tables with precisely the semantics of the in-process path: `MERGE` for `articles`, delete-and-reinsert per user for `user_articles`, and then the same anti-join sweep of orphaned `articles` rows — inside the one publish transaction, after `user_articles` has been rebuilt, so both paths leave byte-for-byte the same gold.
+**PySpark is the silver-to-gold path** — the only one. There used to be a second, in-process pandas implementation of the same rules; keeping two hand-written versions of one intent meant every rule had to be changed in both, and they had in fact diverged. Its parallelism is genuine at all three stages: the read is a **partitioned JDBC read**, in which Spark divides the `GLOBALEVENTID` range into `SPARK_READ_PARTITIONS` disjoint ranges and issues one concurrent query per range, so each executor retrieves only its own slice (and ClickHouse's own `system.query_log` confirms the projection is pushed down — it receives 13 named columns of `gdelt_events`' 61, not `SELECT *`); the events-to-mentions join is a distributed shuffle join across `SPARK_SHUFFLE_PARTITIONS`; and `df.write.jdbc()` opens one connection per partition, so the write is executed by the executors in parallel. Because no result is materialised centrally, **no row cap is required** — the old `GOLD_EVENTS_LIMIT` of 20,000 has been removed, and it had been silently truncating: one seeded account matched 45,381 events against that ceiling. Spark's JDBC writer offers only `append` and `overwrite` and cannot upsert, so the job writes to staging tables that it creates and drops itself, and a single subsequent SQL statement publishes them into the live tables: `INSERT … ON CONFLICT (doc_id, global_event_id)` for `articles`, delete-and-reinsert per user for `user_articles`, and then the anti-join sweep of orphaned rows — all inside one publish transaction, after `user_articles` has been rebuilt.
+
+**Where it runs is the only thing that differs between the modes.** `SPARK_MASTER` is `local[*]` in testing mode, so the job runs inside the processing container with no cluster to deploy, and `spark://spark-master:7077` in intended mode, where Swarm spreads the master and `SPARK_WORKERS` workers across machines with no placement constraint. Each compose file already defaults to the right one, so the switch needs no action beyond deploying the right file.
 
 ## Why the pre-loaded silver is small, and why it took so long to produce
 
@@ -894,17 +1663,29 @@ replication and failover.
   `w="majority"`, so an acknowledged write is held by a majority. `mongo-init`
   additionally repairs the configuration when the member count changes, a state
   in which no primary can be elected and every write would otherwise fail.
-- **Oracle.** A single instance in both modes; the free edition supports neither
-  RAC nor Data Guard. Its resilience is limited to container restart with a
-  persistent volume. Writes are committed transactionally and the row counts the
-  server reports are compared against the counts submitted, so a partial write is
-  detected rather than assumed successful.
+- **PostgreSQL.** Three nodes under Patroni in intended mode (one in testing),
+  coordinated through a 3-node etcd ensemble. A replica is promoted automatically
+  when the leader is lost, and the multi-host `POSTGRES_DSN` means no client is
+  reconfigured when that happens. Writes are committed transactionally and the row
+  counts the server reports are compared against the counts submitted, so a partial
+  write is detected rather than assumed successful. The honest limit: replication
+  is asynchronous, so a promotion can lose writes the old leader had acknowledged
+  but not yet shipped. Gold is derived from silver, so the repair is a recompute,
+  not a restore.
 - **All three** keep their data in named Docker volumes, which survive
   `docker compose down`.
 
 ## Why the pipeline itself runs on a single machine
 
 Layers 1 to 4 hand data to one another as **files on a shared volume**: ingestion writes to `/data/raw/csv`, parsing publishes to `/data/latest_files`, validation consumes from there. A local volume exists on exactly one host, so those four layers must be co-located.
+
+**The heavy work no longer runs here, though.** Layers 1 to 4 must stay co-located
+because they hand files to one another, and that is unchanged — four services mount the
+same `shared_data` volume. But layer 4's expensive step, silver → gold, is now submitted
+to Spark: in intended mode the processing container is only the *driver*, and the read,
+the join and the write execute on worker containers that Swarm places on any machine.
+So "the pipeline runs on a single machine" remains true of the file hand-off and of the
+triggers, retention and status writer — and is no longer true of the computation itself.
 
 This is a deliberate choice rather than an oversight, because the volume of traffic does not justify anything more elaborate: four CSV files every fifteen minutes. The relevant question is not how to distribute that trickle, but what happens when the machine carrying it fails.
 
@@ -926,13 +1707,13 @@ This is sound because the bronze layer is not a source of truth but a staging ar
 
 Deletion is also what applies back-pressure: parsing publishes a new pair only when `latest_files` is empty, so a slow validation cycle throttles the upstream stages instead of allowing work to accumulate.
 
-## Oracle B-trees and the choice of index key
+## B-trees and the choice of index key
 
-Oracle's primary keys are B-tree indexes, and a B-tree key has a maximum length of approximately 6,398 bytes on a default 8 KB block.
+PostgreSQL's primary keys are B-tree indexes, and a B-tree index entry must fit within roughly 2,704 bytes — a third of an 8 KB page. (Under Oracle the equivalent ceiling was about 6,398 bytes on an 8 KB block: a different number, but the same problem, and the URL can exceed both.)
 
 The natural key for an article is its URL, held as `document_identifier VARCHAR2(2000)`. Under the `AL32UTF8` character set a single character may occupy up to four bytes, so 2,000 characters may occupy 8,000 bytes — in excess of the limit, raising `ORA-01450`. The composite key `(user_id, document_identifier)` in `user_articles` would be larger still.
 
-The key is therefore **`doc_id RAW(32)`**, the SHA-256 digest of the URL: a fixed 32 bytes irrespective of URL length, deterministic, and collision-resistant. The full URL is retained alongside it as ordinary, non-indexed data, so nothing is lost for display purposes. The hash is computed at the Oracle boundary only; every other layer continues to handle URLs.
+The key is therefore **`doc_id BYTEA`**, the SHA-256 digest of the URL: a fixed 32 bytes irrespective of URL length, deterministic, and collision-resistant. The full URL is retained alongside it as ordinary, non-indexed data, so nothing is lost for display purposes. The hash is computed at the gold-store boundary only; every other layer continues to handle URLs.
 
 ## Keeping validation within the 15-minute cadence
 
@@ -963,7 +1744,7 @@ everything hanging off them:
 | Store | What is removed |
 |----|----|
 | ClickHouse | the event from `gdelt_events`, and all of its `gdelt_mentions` |
-| Oracle | its rows in `user_articles`, then in `articles` |
+| PostgreSQL | its rows in `user_articles`, then in `articles` |
 | MongoDB | any user's tag pointing at it |
 
 **Ten years is a starting point, not a fixed constant.** It is set by
@@ -1001,7 +1782,7 @@ as a story's earliest coverage aged out from under it.
 **Order matters in both stores.** Mentions are deleted before events, so a crash
 between the two statements leaves a harmless mention-less event rather than
 mentions whose event has vanished — the state the referential-integrity check
-assumes cannot happen. In Oracle, `user_articles` goes before `articles`, so the
+assumes cannot happen. In PostgreSQL, `user_articles` goes before `articles`, so the
 join never briefly points at rows that are already gone.
 
 **No query here nests one silver table inside another**, and on a sharded cluster
@@ -1056,13 +1837,18 @@ mentions, left no survivor past the cutoff, and left no mention orphaned from it
 event.
 
 Every page that lists event cards says so in small print, because a card
-disappearing is normal behaviour rather than a fault.
+disappearing is normal behaviour rather than a fault. The wording differs by page,
+because the *second* reason a card can vanish does not apply everywhere: the Radar
+View and the Archive follow the user's preferences, so both say an event that no
+longer matches will be removed, while Needs action and Monitoring are pinned
+against the orphan sweep and say instead that what is filed there stays. See
+[Orphaned gold rows](#orphaned-gold-rows-and-why-they-can-be-removed-safely).
 
 ## Orphaned gold rows, and why they can be removed safely
 
-The gold layer is normalised into `articles` (one row per document) and
-`user_articles` (the `(user_id, doc_id)` join). The two are written with different
-semantics, and that asymmetry used to leave rubbish behind:
+The gold layer is normalised into `articles` (one row per **(article, event) pair**)
+and `user_articles` (the `(user_id, doc_id, global_event_id)` join). The two are
+written with different semantics, and that asymmetry used to leave rubbish behind:
 
 - `user_articles` is **rebuilt** per user on every recompute, so a user's set is
   always exactly what their current preferences select;
@@ -1087,31 +1873,47 @@ recompute: user A dropping an article that user B still holds does not remove it
 layer. No volume has to be recreated — an earlier version of this document
 claimed otherwise, and was wrong.
 
-**An orphan is never removed if any user has tagged it.** This is the one
+**An orphan is never removed if any user is TRACKING it.** This is the one
 exception to the rule above, and it is not optional. If a user has filed an event
-as **red** (*Needs action from us*), **yellow** (*Look out for developments*) or
-archived it, every article of that event is kept — whether or not it still
-appears in anyone's `user_articles`, and whether the tag belongs to the user
-whose recompute triggered the sweep or to somebody else entirely.
+as **red** (*Needs action from us*) or **yellow** (*Look out for developments*),
+every article of that event is kept — whether or not it still appears in anyone's
+`user_articles`, and whether the tag belongs to the user whose recompute
+triggered the sweep or to somebody else entirely.
 
-The reason is how the triage pages read. They fetch cards **straight from
-`articles`, deliberately without joining `user_articles`**, so that a filed card
+The reason is how those two triage pages read. They fetch cards **straight from
+`articles`, deliberately without joining `user_articles`**, so that a tracked card
 survives the user later dropping the territory that first brought it in. Such a
 row is legitimately unreferenced — precisely what the anti-join targets. Without
 this guard the sweep would delete it and leave the tag in MongoDB pointing at
 nothing: the card would vanish from the red or yellow page while still counted as
-tagged. The query therefore also excludes any article whose `global_event_id`
-appears in any user's tag set.
+tagged.
 
-Measured: narrowing one account's perimeter until its pool was empty removed 126
-rows and kept the 1 belonging to its tagged event, and the card stayed on the
-Needs action page.
+**Archiving is deliberately NOT protection.** Archiving an event says it is *not*
+important — it is how a user pushes something off the Radar View. There is
+therefore nothing worth preserving once that event also stops matching their
+registered territories and keywords: the row is swept like any other orphan and
+the card leaves the Archive page. Protecting it would mean an event a user
+explicitly dismissed outlived events they never dismissed, which is backwards.
+
+The tag itself is left in MongoDB when this happens, which is deliberate and
+useful rather than an oversight: if the user later re-adds the territory or
+keyword, the next recompute re-creates the article row and their archive entry
+simply reappears.
+
+Only the tag **value** counts, not its presence. A cleared tag is stored as a key
+with a null value, and reading the keys alone would protect events whose tag the
+user has removed. `mongo_reader.PROTECTED_TAGS` matches on the value, so
+`requires_action` and `monitor` protect and nothing else does.
+
+Measured, on the three seeded accounts: an event tagged `monitor` and an event
+tagged `archive` were both removed from a user's pool, then the sweep was run —
+the archived event's article row was deleted and the monitored event's was kept.
 
 If the tag list cannot be read, the sweep is **skipped entirely** rather than run
 unguarded. Leaving a few unreachable rows costs a little space; deleting a card
 someone filed loses their work.
 
-`NOT EXISTS` rather than `NOT IN`: Oracle optimises the anti-join, and `NOT IN`
+`NOT EXISTS` rather than `NOT IN`: the planner optimises the anti-join, and `NOT IN`
 would silently match nothing at all if any `doc_id` were ever NULL.
 
 **Measured.** Narrowing `radar_agrifood` to a single territory and one keyword
@@ -1156,18 +1958,50 @@ allocation order, arbitrary to a reader. The confidence and tone keys that used 
 sit beside it still order the articles **within** a card, which is why the top
 article is the highest-confidence one.
 
-## Why an article never appears twice in the gold layer
+## Why the gold layer is keyed on (article, event)
 
-The gold layer is normalised. **`articles` holds one row per document**, keyed on `doc_id`; the article's content and metadata are therefore stored exactly once, regardless of how many users receive it. **`user_articles` is a join table** holding only `(user_id, doc_id)` — approximately 32 bytes per interested user. Adding a user to an article adds one narrow row, never a copy.
+The gold layer is normalised, and its grain is a **mention** — an (article, event)
+pair — not an article. `articles` holds one row per `(doc_id, global_event_id)`, and
+`user_articles` is a join table of `(user_id, doc_id, global_event_id)`. Adding a user
+to a mention adds one narrow row, never a copy of the content. As for the multiple
+rows with the same article, each will have a different score on some values, like the
+`Confidence` score, based on the event it is paired with.
+
+**It cannot be one row per article**, because one URL is routinely a mention of many
+GDELT events. Measured on the shipped seed: **27,132 of 52,359 distinct URLs (51.8%)
+appear under more than one `GLOBALEVENTID`**, one of them under 64; headlines behave the
+same way, 53.8% spanning several events. Keying on `doc_id` alone kept one of those
+pairs and discarded the rest, so an article belonging to six cards appeared on one,
+chosen arbitrarily.
+
+This matches silver exactly: `gdelt_mentions` is sorted on
+`(GLOBALEVENTID, MentionIdentifier)` for the same reason. Gold used to be narrower than
+its own source, and that mismatch was where the loss happened.
 
 ## Deduplication, in full
 
 Duplicates are eliminated at four distinct points, because they arise for four distinct reasons.
 
 1. **Re-ingested slices.** Both silver tables are `ReplacingMergeTree`. `gdelt_events` is keyed on `GLOBALEVENTID` with `DATEADDED` as the version, so the most recent copy of an event survives. `gdelt_mentions` is keyed on `(GLOBALEVENTID, MentionIdentifier)` with `enriched` as the version, so an enriched row supersedes an unenriched one. All readers query with `FINAL`, which collapses duplicates at query time rather than waiting for a background merge.
-2. **The same URL cited repeatedly.** When gold rows are constructed, a URL already seen is skipped, so one article yields one row.
-3. **Syndicated stories.** The same report is frequently republished under different URLs, which produce different keys but an identical headline. Rows are therefore also deduplicated by `(event, normalised headline)`, compared case-insensitively and with whitespace collapsed. The same filter is applied on the read path, so gold written before this rule was introduced also displays correctly.
-4. **The `user_articles` primary key.** Document identifiers are deduplicated before insertion, since a URL may be reachable through several events.
+2. **The same (URL, event) pair seen twice.** When gold rows are constructed the pair
+   is deduplicated — `dropDuplicates(["doc_id", "global_event_id"])` — and **only** the
+   pair. Collapsing on the URL alone would discard the majority of legitimate rows (see
+   the section above), so two mentions may be merged only when they share an event id
+   as well as a URL.
+3. **Syndicated stories, on the READ path only.** The same report is republished under
+   different URLs, producing different keys but an identical headline, so a card should
+   list it once. That is done by the serving layer when it builds each card
+   (`postgres_store._dedupe_by_title`, case-insensitive, whitespace collapsed) — which is
+   the only place it is meaningful, since "one headline per card" is a property of a
+   card. It used to *also* run in the write path, and that was a bug: it ran on the
+   shared catalogue **before** any user's filter, and two rows sharing an event and a
+   headline can differ in URL and keywords — exactly the fields the keyword predicate
+   reads. Whichever row survived therefore decided whether a user matched at all, which
+   showed up as identical runs producing different totals. Removing it made consecutive
+   recomputes reproducible.
+4. **The `user_articles` primary key.** Rows are deduplicated on the whole key,
+   `(user_id, doc_id, global_event_id)`, before insertion. A URL reachable through
+   several events is deliberately **several rows** — one per card the user sees it on.
 
 ## Watermarking: how the pipeline knows it is making progress
 
@@ -1214,7 +2048,7 @@ four ways the pipeline can go quiet:
 The last of these is the reason the backend does not simply trust the stored
 status. The processing layer writes `ERROR` when it *notices* silver has stopped
 advancing — but if that layer is the thing that died, it writes nothing at all,
-and the last row it wrote says `OK` for as long as Oracle keeps answering.
+and the last row it wrote says `OK` for as long as PostgreSQL keeps answering.
 Comparing the timestamp against the clock is what catches a pipeline with nobody
 left to report on it.
 
@@ -1262,7 +2096,7 @@ Every dependency that may be temporarily unavailable is retried rather than allo
 - **Validation → ClickHouse.** Table creation retries every five seconds until the cluster responds, tolerating Compose start-up ordering.
 - **Processing → MongoDB.** The territory table is published from a background thread that retries every five seconds until the replica set has elected a primary. A single attempt would frequently lose that race and leave the picker empty.
 - **Processing triggers.** Both the MongoDB change stream and the ClickHouse watermark poll run in supervised loops that log and continue rather than terminating.
-- **Backend → Oracle and MongoDB.** Both clients retry with exponential backoff, distinguishing transient failures (connection loss, timeout) from permanent ones (invalid SQL, authentication), which are re-raised immediately.
+- **Backend → PostgreSQL and MongoDB.** Both clients retry with exponential backoff, distinguishing transient failures (connection loss, timeout) from permanent ones (invalid SQL, authentication), which are re-raised immediately.
 - **Ingestion → GDELT.** A 404 for a release that is still being published is retried three times at five-second intervals, since the file appears shortly afterwards.
 - **Frontend → backend.** Every call is wrapped, and an unreachable backend produces an explanatory banner rather than an error page.
 - **Bootstrap loader.** Waits for ClickHouse in the same five-second retry loop before loading.
@@ -1287,12 +2121,18 @@ it by re-deriving the decision for every article in gold:
 docker compose -f docker-compose.diagnostics.yml run --rm diagnostics
 ```
 
-**In intended mode, run this on the stores machine.** It reaches ClickHouse,
-MongoDB and Oracle by their Docker service names, which resolve only where those
-containers run; from the pipeline machine the names do not resolve and it cannot
-connect. The same applies to `docker-compose.bootstrap.yml` and
-`docker-compose.spark.yml`. In testing mode everything is on one machine, so the
-distinction does not arise.
+**In intended mode, run this from any machine on `pipeline_network`, with
+`.env.intended` sourced.** It reaches the stores by their Docker service names,
+which the overlay resolves swarm-wide, so no machine is privileged — but the
+container must be attached to that network, and `docker compose` will only attach
+it if the network exists on the machine you run from.
+
+Two related tools have stricter homes: `docker-compose.bootstrap.yml` needs the
+GDELT ZIPs on the machine it runs on, and `docker-compose.spark.yml` must run on
+the **pipeline** machine, because it mounts that machine's `shared_data` volume to
+read the status file. Spark also reads ClickHouse over JDBC on the HTTP port 8123,
+which is never published to any host — another reason it has to be inside the
+network rather than merely able to reach a published port.
 
 It reads all three stores read-only, writes no store, and produces
 `gold_provenance.csv` — one row per article per user, naming the parsing
@@ -1393,7 +2233,7 @@ nothing for a given user. That is expected behaviour, not a fault.
 
 Two earlier rules were removed because they were measurably wrong. Keywords were matched as **contiguous phrases**, so `silicon wafers` matched 0 of 99,175 enriched mentions — a headline says "chip firm buys wafer plant", never the procurement phrase verbatim. And each row was routed to exactly **one** field depending on its `enriched` flag, which meant that of the 99,175 enriched rows, the 170 whose URL contained a supply-chain term were never checked against it — enrichment was actively destroying matches.
 
-**Tables retained on failure.** The PySpark path writes to `articles_stage` and `user_articles_stage`, which it creates at the start of each run and drops after a successful publication. They are deliberately **not** dropped when publication fails, so the staged result remains available for inspection; the next run drops and recreates them. Each carries an Oracle table comment recording its purpose and that it may safely be dropped. These are the only Oracle objects left behind on purpose: unreferenced rows inside `articles` itself are removed automatically, as described under [Orphaned gold rows](#orphaned-gold-rows-and-why-they-can-be-removed-safely).
+**Tables retained on failure.** The PySpark path writes to `articles_stage` and `user_articles_stage`, which it creates at the start of each run and drops after a successful publication. They are deliberately **not** dropped when publication fails, so the staged result remains available for inspection; the next run drops and recreates them. Each carries a table comment recording its purpose and that it may safely be dropped. These are the only database objects left behind on purpose: unreferenced rows inside `articles` itself are removed automatically, as described under [Orphaned gold rows](#orphaned-gold-rows-and-why-they-can-be-removed-safely).
 
 ## Data persistence
 

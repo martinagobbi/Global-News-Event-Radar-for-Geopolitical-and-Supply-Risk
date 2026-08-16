@@ -13,7 +13,7 @@
 #
 # If this machine dies, a replacement just runs `docker compose up -d` again with
 # its own fresh `shared_data`: it re-polls the latest GDELT slice at startup and
-# reconnects to the SAME ClickHouse / Mongo / Oracle. Nothing is re-created and
+# reconnects to the SAME ClickHouse / Mongo / PostgreSQL. Nothing is re-created and
 # no data is deleted.
 # ═════════════════════════════════════════════════════════════════════════════
 services:
@@ -77,19 +77,22 @@ services:
     networks:
       - pipeline_network
 
-  # Layer 4: Processing — pure reader of the silver store; writes the Oracle gold
+  # Layer 4: Processing — pure reader of the silver store; writes the PostgreSQL gold
   # and publishes the territory table to Mongo on startup.
   processing:
     build:
       context: ./4-processing
       dockerfile: Dockerfile
+    # Tagged so docker-compose.spark.yml's one-shot submitter can build FROM it
+    # rather than duplicating the Spark base, the jars and the code.
+    image: radar-processing:latest
     container_name: pipeline_processing
     restart: unless-stopped
     depends_on:
       - validation
     environment:
       # Every store address is env-overridable: same defaults for a same-machine
-      # stack, but export MONGO_URI / CLICKHOUSE_HOST / ORACLE_HOST (etc.) before
+      # stack, but export MONGO_URI / CLICKHOUSE_HOST / POSTGRES_DSN (etc.) before
       # `docker compose up` to point this pipeline at stores on other machines.
       CLICKHOUSE_HOST: ${CLICKHOUSE_HOST:-clickhouse-s1r1}
       CLICKHOUSE_PORT: ${CLICKHOUSE_PORT:-9000}
@@ -98,20 +101,36 @@ services:
       MONGO_URI: ${MONGO_URI:-mongodb://mongo1:27017,mongo2:27017,mongo3:27017/?replicaSet=rs0}
       MONGO_DB: ${MONGO_DB:-radar}
       MONGO_COLLECTION: ${MONGO_COLLECTION:-users}
-      # Oracle = the gold sink that serving reads. FREEPDB1 is the PDB shipped by
-      # the gvenzl/oracle-free image in the stores tier.
-      ORACLE_HOST: ${ORACLE_HOST:-pipeline_oracle}
-      ORACLE_PORT: ${ORACLE_PORT:-1521}
-      ORACLE_SERVICE: ${ORACLE_SERVICE:-FREEPDB1}
-      ORACLE_USER: ${ORACLE_USER:-radar}
-      ORACLE_PASSWORD: ${ORACLE_PASSWORD:-radar}
+      # PostgreSQL = the gold sink that serving reads.
+      # One DSN instead of host/port/service: in intended mode it lists all
+      # three PostgreSQL members with target_session_attrs=read-write, so libpq
+      # finds whichever node Patroni has made leader and a failover needs no
+      # configuration change here.
+      POSTGRES_DSN: ${POSTGRES_DSN:-postgresql://radar:radar@pipeline_postgres:5432/radar}
+      # WHERE the silver -> gold Spark job runs. `local[*]` keeps it inside this
+      # container, which is what testing mode wants: one code path, no cluster.
+      # .env.intended overrides it to spark://spark-master:7077.
+      SPARK_MASTER: ${SPARK_MASTER:-local[*]}
+      # How the silver -> gold job is parallelised. All four are read by
+      # spark_gold.py and must be passed in explicitly, or the code defaults
+      # silently apply and the env file appears to do nothing.
+      #   READ    concurrent JDBC range queries against ClickHouse
+      #   SHUFFLE partitions each shuffle produces (join, dropDuplicates, ...)
+      #   WRITE   concurrent JDBC writers into PostgreSQL
+      SPARK_READ_PARTITIONS: ${SPARK_READ_PARTITIONS:-8}
+      SPARK_SHUFFLE_PARTITIONS: ${SPARK_SHUFFLE_PARTITIONS:-16}
+      SPARK_WRITE_PARTITIONS: ${SPARK_WRITE_PARTITIONS:-4}
+      # The HTTP port, for the Spark job's JDBC reads. Distinct from
+      # CLICKHOUSE_PORT above, which is the native port the driver-based code
+      # uses; JDBC against 9000 fails with "Connection reset".
+      CLICKHOUSE_HTTP_PORT: ${CLICKHOUSE_HTTP_PORT:-8123}
     volumes:
       - shared_data:/data
     networks:
       - pipeline_network
 
   # Layer 5 (operator side): serving BACKEND — a stateless reader of the stores
-  # (Mongo profiles + reference, Oracle gold). It mounts NO volume at all, so it
+  # (Mongo profiles + reference, PostgreSQL gold). It mounts NO volume at all, so it
   # can run on any machine / be replicated behind a load balancer. The FRONTEND is
   # the only piece that runs on each user's machine — see
   # 5-serving/docker-compose.serving.yml.
@@ -129,13 +148,13 @@ services:
       MONGO_URI: ${MONGO_URI:-mongodb://mongo1:27017,mongo2:27017,mongo3:27017/?replicaSet=rs0}
       MONGO_DB: ${MONGO_DB:-radar}
       MONGO_TIMEOUT: "5"
-      ORACLE_HOST: ${ORACLE_HOST:-pipeline_oracle}
-      ORACLE_PORT: ${ORACLE_PORT:-1521}
-      ORACLE_SERVICE: ${ORACLE_SERVICE:-FREEPDB1}
-      ORACLE_USER: ${ORACLE_USER:-radar}
-      ORACLE_PASSWORD: ${ORACLE_PASSWORD:-radar}
-      ORACLE_TIMEOUT: "10"
-      ORACLE_RETRIES: "3"
+      # One DSN instead of host/port/service: in intended mode it lists all
+      # three PostgreSQL members with target_session_attrs=read-write, so libpq
+      # finds whichever node Patroni has made leader and a failover needs no
+      # configuration change here.
+      POSTGRES_DSN: ${POSTGRES_DSN:-postgresql://radar:radar@pipeline_postgres:5432/radar}
+      POSTGRES_TIMEOUT: "10"
+      POSTGRES_RETRIES: "3"
     ports:
       - "8000:8000"
     networks:
@@ -147,16 +166,19 @@ volumes:
   shared_data:
 
 networks:
-  # PIPELINE_NET_EXTERNAL decides whether this tier JOINS the stores' network or
-  # CREATES its own, and is the only thing that differs between the two modes.
+  # PIPELINE_NET_EXTERNAL decides whether this tier JOINS an existing
+  # `pipeline_network` or CREATES one.
   #
-  #   true  (default, and .env.testing)  — the stores run on this machine and have
-  #         already created `pipeline_network`; the pipeline attaches to it.
-  #   false (.env.full)                  — this machine runs only the pipeline, so
-  #         no such network exists and Compose must create one. Setting the
-  #         variable to false makes the `external` key vanish entirely, which is
-  #         what Compose needs; an override file could not achieve this, because
-  #         Compose MERGES files and can add or change a key but never remove one.
+  #   true  (default, .env.testing and .env.intended) — the network already
+  #         exists and the pipeline attaches to it. In testing mode the stores
+  #         compose project created it as a local bridge; in intended mode it is
+  #         the attachable OVERLAY created once by hand
+  #         (`docker network create -d overlay --attachable pipeline_network`),
+  #         which is what lets service names resolve across machines.
+  #   false — nothing has created it and Compose must. Setting the variable to
+  #         false makes the `external` key vanish entirely, which is what Compose
+  #         needs; an override file could not achieve this, because Compose
+  #         MERGES files and can add or change a key but never remove one.
   pipeline_network:
     external: ${PIPELINE_NET_EXTERNAL:-true}
     name: pipeline_network

@@ -12,15 +12,22 @@
 # Scale the compute out (this is the point of the exercise):
 #   docker compose -f docker-compose.spark.yml up -d --scale spark-worker=4
 # On several MACHINES, run the workers on those machines with
-# SPARK_MASTER_URL=spark://<master-host>:7077 and open ports 7077/8080.
+#   SPARK_MASTER_URL=spark://<master-host>:7077 \
+#     docker compose -f docker-compose.spark.yml up -d --no-deps spark-worker
+# and open ports 7077/8080. --no-deps is what stops Compose starting a second,
+# local master on the worker machine.
 #
-# It joins `pipeline_network`, so it reaches ClickHouse and Oracle by the same
+# It joins `pipeline_network`, so it reaches ClickHouse and PostgreSQL by the same
 # service names the pipeline uses (override with the usual env vars otherwise).
+# That network membership is load-bearing, not a convenience: the job reads
+# ClickHouse over JDBC on the HTTP port 8123, which the stores tier does not
+# publish to the host, so `clickhouse-s1r1:8123` resolves only from inside the
+# network. It must therefore run on a machine attached to it.
 # ═════════════════════════════════════════════════════════════════════════════
 services:
 
   spark-master:
-    image: bitnami/spark:3.5
+    image: bitnamilegacy/spark:3.5
     container_name: radar_spark_master
     environment:
       SPARK_MODE: master
@@ -30,11 +37,11 @@ services:
     networks: [pipeline_network]
 
   spark-worker:
-    image: bitnami/spark:3.5
+    image: bitnamilegacy/spark:3.5
     depends_on: [spark-master]
     environment:
       SPARK_MODE: worker
-      SPARK_MASTER_URL: spark://spark-master:7077
+      SPARK_MASTER_URL: ${SPARK_MASTER_URL:-spark://spark-master:7077}
       SPARK_WORKER_CORES: "2"
       SPARK_WORKER_MEMORY: 2G
     deploy:
@@ -49,24 +56,20 @@ services:
       dockerfile: Dockerfile.spark
     depends_on: [spark-master]
     environment:
-      SPARK_MASTER: spark://spark-master:7077
+      SPARK_MASTER: ${SPARK_MASTER_URL:-spark://spark-master:7077}
       SPARK_READ_PARTITIONS: "8"
       SPARK_WRITE_PARTITIONS: "4"
       # ClickHouse JDBC speaks HTTP (8123), not the native 9000 port.
       CLICKHOUSE_HOST: ${CLICKHOUSE_HOST:-clickhouse-s1r1}
       CLICKHOUSE_PORT: "8123"
-      ORACLE_HOST: ${ORACLE_HOST:-pipeline_oracle}
-      ORACLE_PORT: ${ORACLE_PORT:-1521}
-      ORACLE_SERVICE: ${ORACLE_SERVICE:-FREEPDB1}
-      ORACLE_USER: ${ORACLE_USER:-radar}
-      ORACLE_PASSWORD: ${ORACLE_PASSWORD:-radar}
+      POSTGRES_DSN: ${POSTGRES_DSN:-postgresql://radar:radar@pipeline_postgres:5432/radar}
       MONGO_URI: ${MONGO_URI:-mongodb://mongo1:27017,mongo2:27017,mongo3:27017/?replicaSet=rs0}
       MONGO_DB: ${MONGO_DB:-radar}
       MONGO_COLLECTION: ${MONGO_COLLECTION:-users}
       STATUS_DIR: /data/status
     volumes:
       # Read-only view of the pipeline's scratch volume, purely so the job can
-      # read /data/status/pipeline_status.json and mirror it into Oracle — the
+      # read /data/status/pipeline_status.json and mirror it into PostgreSQL — the
       # last thing recompute_all does. Nothing is written to the volume.
       - shared_data:/data:ro
     networks: [pipeline_network]

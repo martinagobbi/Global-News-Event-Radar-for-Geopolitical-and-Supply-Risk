@@ -1,0 +1,507 @@
+# ═════════════════════════════════════════════════════════════════════════════
+# STORES TIER as a DOCKER SWARM STACK — one node of each store per machine.
+#
+# This is what makes intended mode actually distributed. docker-compose.stores.yml
+# (still used, unchanged, by TESTING mode) puts all the store containers on ONE
+# machine: the redundancy there is real only against container loss, because a
+# single machine failure takes every ClickHouse replica, every Keeper and every
+# MongoDB member with it. Here each node of a given store is pinned to a
+# different machine, so no two nodes of one store share a failure domain.
+#
+#   set -a; . ./.env.intended; set +a      # stack deploy has no --env-file
+#   docker stack deploy -c docker-stack.stores.yml radar-stores
+#
+# ── Why an overlay network changes almost nothing else ───────────────────────
+# Overlay DNS resolves service names across machines, so `clickhouse-s1r1` means
+# the same thing on every host. That is why clickhouse/cluster.xml, the
+# `ON CLUSTER gnews_cluster` DDL in 3-validation_and_storage/storage.py, and the
+# store addresses in docker-compose.yml all work here UNCHANGED, and why no store
+# port has to be published to the host at all. Create it once, by hand:
+#
+#   docker network create -d overlay --attachable pipeline_network
+#
+# Swarm needs these ports open between machines: 2377/tcp (manager), 7946/tcp+udp
+# (node discovery), 4789/udp (VXLAN data plane).
+#
+# ── Placement: why store nodes are pinned and the pipeline is not ────────────
+# Every service here carries a placement constraint naming its machine. This is
+# mandatory, not tidiness: a ClickHouse node owns a LOCAL volume *and* a replica
+# identity registered in Keeper. Rescheduled onto another machine it would come
+# up with an empty volume under an identity Keeper already knows — a broken
+# replica, not a fresh one. The pipeline tier may roam between machines precisely
+# because its volume is disposable scratch.
+#
+# Label the machines once:
+#   docker node update --label-add store=store1 <hostname>     # …through store6
+#
+# ── What Swarm ignores from the Compose file ─────────────────────────────────
+#   container_name  — tasks are <stack>_<service>.<slot>.<id>. bootstrap/
+#                     silver_snapshot.sh resolves s1r1 by service label instead.
+#   profiles        — not needed: this stack IS intended mode, so it always
+#                     deploys every node. `--profile full` belongs to the
+#                     compose file, where the extra nodes are optional.
+#   depends_on      — ignored. Already safe: ClickHouse retries Keeper and the
+#                     validation layer retries ClickHouse, indefinitely.
+#   restart         — replaced by deploy.restart_policy.
+#   ulimits         — IGNORED, and ClickHouse needs nofile=262144. It must be set
+#                     per machine in /etc/docker/daemon.json ("default-ulimits")
+#                     and the daemon restarted. See the README.
+#
+# ── Configs instead of bind mounts ───────────────────────────────────────────
+# A bind mount needs the file present on whichever machine the task lands on.
+# Swarm configs are distributed by the manager, so only the manager needs the
+# repository checked out. Configs are immutable: to change one, add a new
+# versioned name (ch_cluster_v2) and update the reference.
+# ═════════════════════════════════════════════════════════════════════════════
+version: "3.8"
+
+# ── Reusable fragments ───────────────────────────────────────────────────────
+# NOTE: only MAPPINGS can be shared by anchor (<<: *name). The per-service
+# `configs:` lists are written out in full because a YAML anchor used as a
+# sequence item inserts the whole list as ONE element, which Compose rejects
+# with "configs.0 must be a string".
+# ── endpoint_mode: dnsrr, and why it is mandatory here ───────────────────────
+# Swarm's DEFAULT endpoint mode is `vip`: a service name resolves to a virtual IP
+# that load-balances to the tasks. That is wrong for these services, and it fails
+# in a way that looks like nothing at all.
+#
+# ClickHouse works out WHICH node it is by matching its own interface addresses
+# against the <replica><host> entries in cluster.xml, and Keeper does the same
+# against <raft_configuration>. Under vip, `clickhouse-s1r1` resolves to a VIP
+# that is not any container's address, so no node ever recognises itself. An
+# `ON CLUSTER` statement is then accepted, written to the Keeper queue, and never
+# claimed by anybody: it times out with
+#   Code: 159 ... is not finished on 6 of 6 hosts (0 of them are currently
+#   executing the task, 0 are inactive)
+# and the tables are silently never created.
+#
+# `dnsrr` resolves the service name straight to the task's own container IP,
+# which is what both self-identification and replica-to-replica traffic need.
+# `hostname:` additionally makes the container agree about its own name, which is
+# what ReplicatedMergeTree advertises to its peers for part fetches.
+
+x-ch-deploy: &ch-deploy
+  replicas: 1
+  restart_policy: { condition: any, delay: 5s }
+
+x-etcd-env: &etcd-env
+  ETCD_INITIAL_CLUSTER: etcd-1=http://etcd-1:2380,etcd-2=http://etcd-2:2380,etcd-3=http://etcd-3:2380
+  ETCD_INITIAL_CLUSTER_STATE: new
+  ETCD_INITIAL_CLUSTER_TOKEN: radar-etcd
+  ETCD_LISTEN_PEER_URLS: http://0.0.0.0:2380
+  ETCD_LISTEN_CLIENT_URLS: http://0.0.0.0:2379
+  ETCD_DATA_DIR: /etcd-data
+
+services:
+
+  # ══ Coordination: 3-node ClickHouse Keeper ensemble ════════════════════════
+  # Co-located with ClickHouse s1r1/s1r2/s1r3. A different storage system on the
+  # same machine is fine — what must never share a machine is two nodes of the
+  # SAME system, and these three are on three different ones.
+  clickhouse-keeper-1:
+    hostname: clickhouse-keeper-1
+    image: clickhouse/clickhouse-keeper:24.3
+    configs:
+      - source: ch_keeper_1
+        target: /etc/clickhouse-keeper/keeper_config.xml
+    volumes: [keeper_1_data:/var/lib/clickhouse-keeper]
+    networks: [pipeline_network]
+    deploy:
+      <<: *ch-deploy
+      endpoint_mode: dnsrr
+      placement: { constraints: ["node.labels.store == store1"] }
+
+  clickhouse-keeper-2:
+    hostname: clickhouse-keeper-2
+    image: clickhouse/clickhouse-keeper:24.3
+    configs:
+      - source: ch_keeper_2
+        target: /etc/clickhouse-keeper/keeper_config.xml
+    volumes: [keeper_2_data:/var/lib/clickhouse-keeper]
+    networks: [pipeline_network]
+    deploy:
+      <<: *ch-deploy
+      endpoint_mode: dnsrr
+      placement: { constraints: ["node.labels.store == store2"] }
+
+  clickhouse-keeper-3:
+    hostname: clickhouse-keeper-3
+    image: clickhouse/clickhouse-keeper:24.3
+    configs:
+      - source: ch_keeper_3
+        target: /etc/clickhouse-keeper/keeper_config.xml
+    volumes: [keeper_3_data:/var/lib/clickhouse-keeper]
+    networks: [pipeline_network]
+    deploy:
+      <<: *ch-deploy
+      endpoint_mode: dnsrr
+      placement: { constraints: ["node.labels.store == store3"] }
+
+  # ══ Silver: 2 shards × 3 replicas, one server per machine ══════════════════
+  # Shard 1 = s1r1 + s1r2 + s1r3 (store1/2/3), shard 2 = s2r1 + s2r2 + s2r3
+  # (store4/5/6). A shard now survives losing two MACHINES, which is the whole
+  # point of the change — under docker-compose.stores.yml it survived losing two
+  # containers on one machine.
+  clickhouse-s1r1:
+    hostname: clickhouse-s1r1
+    image: clickhouse/clickhouse-server:24.3
+    configs:
+      - source: ch_cluster
+        target: /etc/clickhouse-server/config.d/cluster.xml
+      - source: ch_memory
+        target: /etc/clickhouse-server/config.d/memory.xml
+      - source: ch_users
+        target: /etc/clickhouse-server/users.d/zz-network-access.xml
+      - source: ch_macros_s1r1
+        target: /etc/clickhouse-server/config.d/macros.xml
+    volumes: [ch_s1r1_data:/var/lib/clickhouse]
+    networks: [pipeline_network]
+    deploy:
+      <<: *ch-deploy
+      endpoint_mode: dnsrr
+      placement: { constraints: ["node.labels.store == store1"] }
+
+  clickhouse-s1r2:
+    hostname: clickhouse-s1r2
+    image: clickhouse/clickhouse-server:24.3
+    configs:
+      - source: ch_cluster
+        target: /etc/clickhouse-server/config.d/cluster.xml
+      - source: ch_memory
+        target: /etc/clickhouse-server/config.d/memory.xml
+      - source: ch_users
+        target: /etc/clickhouse-server/users.d/zz-network-access.xml
+      - source: ch_macros_s1r2
+        target: /etc/clickhouse-server/config.d/macros.xml
+    volumes: [ch_s1r2_data:/var/lib/clickhouse]
+    networks: [pipeline_network]
+    deploy:
+      <<: *ch-deploy
+      endpoint_mode: dnsrr
+      placement: { constraints: ["node.labels.store == store2"] }
+
+  clickhouse-s1r3:
+    hostname: clickhouse-s1r3
+    image: clickhouse/clickhouse-server:24.3
+    configs:
+      - source: ch_cluster
+        target: /etc/clickhouse-server/config.d/cluster.xml
+      - source: ch_memory
+        target: /etc/clickhouse-server/config.d/memory.xml
+      - source: ch_users
+        target: /etc/clickhouse-server/users.d/zz-network-access.xml
+      - source: ch_macros_s1r3
+        target: /etc/clickhouse-server/config.d/macros.xml
+    volumes: [ch_s1r3_data:/var/lib/clickhouse]
+    networks: [pipeline_network]
+    deploy:
+      <<: *ch-deploy
+      endpoint_mode: dnsrr
+      placement: { constraints: ["node.labels.store == store3"] }
+
+  clickhouse-s2r1:
+    hostname: clickhouse-s2r1
+    image: clickhouse/clickhouse-server:24.3
+    configs:
+      - source: ch_cluster
+        target: /etc/clickhouse-server/config.d/cluster.xml
+      - source: ch_memory
+        target: /etc/clickhouse-server/config.d/memory.xml
+      - source: ch_users
+        target: /etc/clickhouse-server/users.d/zz-network-access.xml
+      - source: ch_macros_s2r1
+        target: /etc/clickhouse-server/config.d/macros.xml
+    volumes: [ch_s2r1_data:/var/lib/clickhouse]
+    networks: [pipeline_network]
+    deploy:
+      <<: *ch-deploy
+      endpoint_mode: dnsrr
+      placement: { constraints: ["node.labels.store == store4"] }
+
+  clickhouse-s2r2:
+    hostname: clickhouse-s2r2
+    image: clickhouse/clickhouse-server:24.3
+    configs:
+      - source: ch_cluster
+        target: /etc/clickhouse-server/config.d/cluster.xml
+      - source: ch_memory
+        target: /etc/clickhouse-server/config.d/memory.xml
+      - source: ch_users
+        target: /etc/clickhouse-server/users.d/zz-network-access.xml
+      - source: ch_macros_s2r2
+        target: /etc/clickhouse-server/config.d/macros.xml
+    volumes: [ch_s2r2_data:/var/lib/clickhouse]
+    networks: [pipeline_network]
+    deploy:
+      <<: *ch-deploy
+      endpoint_mode: dnsrr
+      placement: { constraints: ["node.labels.store == store5"] }
+
+  clickhouse-s2r3:
+    hostname: clickhouse-s2r3
+    image: clickhouse/clickhouse-server:24.3
+    configs:
+      - source: ch_cluster
+        target: /etc/clickhouse-server/config.d/cluster.xml
+      - source: ch_memory
+        target: /etc/clickhouse-server/config.d/memory.xml
+      - source: ch_users
+        target: /etc/clickhouse-server/users.d/zz-network-access.xml
+      - source: ch_macros_s2r3
+        target: /etc/clickhouse-server/config.d/macros.xml
+    volumes: [ch_s2r3_data:/var/lib/clickhouse]
+    networks: [pipeline_network]
+    deploy:
+      <<: *ch-deploy
+      endpoint_mode: dnsrr
+      placement: { constraints: ["node.labels.store == store6"] }
+
+  # ══ Profiles and tags: 3-member MongoDB replica set ════════════════════════
+  # One member per machine, on store4/5/6. All three advertise plain service
+  # names now (MONGO_MEMBER_* in .env.intended), because the overlay resolves
+  # them everywhere — the old arrangement had to advertise host:port pairs.
+  mongo1:
+    hostname: mongo1
+    image: mongo:7
+    command: ["--replSet", "rs0", "--bind_ip_all"]
+    volumes: [mongo1_data:/data/db]
+    networks: [pipeline_network]
+    deploy:
+      <<: *ch-deploy
+      endpoint_mode: dnsrr
+      placement: { constraints: ["node.labels.store == store4"] }
+
+  mongo2:
+    hostname: mongo2
+    image: mongo:7
+    command: ["--replSet", "rs0", "--bind_ip_all"]
+    volumes: [mongo2_data:/data/db]
+    networks: [pipeline_network]
+    deploy:
+      <<: *ch-deploy
+      endpoint_mode: dnsrr
+      placement: { constraints: ["node.labels.store == store5"] }
+
+  mongo3:
+    hostname: mongo3
+    image: mongo:7
+    command: ["--replSet", "rs0", "--bind_ip_all"]
+    volumes: [mongo3_data:/data/db]
+    networks: [pipeline_network]
+    deploy:
+      <<: *ch-deploy
+      endpoint_mode: dnsrr
+      placement: { constraints: ["node.labels.store == store6"] }
+
+  # Swarm has no run-once job, so this is a service with restart_policy: none —
+  # it runs, initiates or reconfigures rs0, exits, and stays "Complete". Its
+  # rs.status() guard already makes repetition harmless, which is what allows a
+  # redeploy of the stack to re-run it safely.
+  mongo-init:
+    image: mongo:7
+    networks: [pipeline_network]
+    environment:
+      MONGO_MEMBERS: ${MONGO_MEMBERS:-3}
+      MONGO_MEMBER_0: ${MONGO_MEMBER_0:-mongo1:27017}
+      MONGO_MEMBER_1: ${MONGO_MEMBER_1:-mongo2:27017}
+      MONGO_MEMBER_2: ${MONGO_MEMBER_2:-mongo3:27017}
+    entrypoint:
+      - bash
+      - -c
+      - |
+        until mongosh --host mongo1:27017 --quiet --eval 'db.runCommand({ping:1})' >/dev/null 2>&1; do
+          echo "waiting for mongo1..."; sleep 2;
+        done
+        if [ "$$MONGO_MEMBERS" = "1" ]; then
+          MEMBERS="[{_id:0,host:'$$MONGO_MEMBER_0'}]"
+        else
+          MEMBERS="[{_id:0,host:'$$MONGO_MEMBER_0'},{_id:1,host:'$$MONGO_MEMBER_1'},{_id:2,host:'$$MONGO_MEMBER_2'}]"
+        fi
+        mongosh --host mongo1:27017 --quiet --eval "
+          var want = $$MONGO_MEMBERS;
+          var members = $$MEMBERS;
+          try {
+            var st = rs.status();
+            if (st.members.length != want) {
+              print('reconfiguring rs0: ' + st.members.length + ' -> ' + want + ' member(s)');
+              var cfg = rs.conf();
+              cfg.members = members;
+              cfg.version = cfg.version + 1;
+              rs.reconfig(cfg, {force: true});
+            } else {
+              print('replica set already has ' + want + ' member(s) - nothing to do');
+            }
+          } catch (e) {
+            print('initiating replica set rs0 with ' + want + ' member(s)...');
+            rs.initiate({_id: 'rs0', members: members});
+          }"
+    deploy:
+      replicas: 1
+      restart_policy: { condition: none }
+      placement: { constraints: ["node.labels.store == store4"] }
+
+  # ══ Gold: 3-node PostgreSQL under Patroni ══════════════════════════════════
+  # etcd holds Patroni's leader lock. Three nodes, one per machine, on store1/2/3
+  # — the same three machines as the Keeper ensemble and the Swarm managers,
+  # because all four are Raft quorums that tolerate losing one of three.
+  etcd-1:
+    image: quay.io/coreos/etcd:v3.5.15
+    command: ["etcd"]
+    environment:
+      <<: *etcd-env
+      ETCD_NAME: etcd-1
+      ETCD_INITIAL_ADVERTISE_PEER_URLS: http://etcd-1:2380
+      ETCD_ADVERTISE_CLIENT_URLS: http://etcd-1:2379
+    volumes: [etcd_1_data:/etcd-data]
+    networks: [pipeline_network]
+    deploy:
+      <<: *ch-deploy
+      endpoint_mode: dnsrr
+      placement: { constraints: ["node.labels.store == store1"] }
+
+  etcd-2:
+    image: quay.io/coreos/etcd:v3.5.15
+    command: ["etcd"]
+    environment:
+      <<: *etcd-env
+      ETCD_NAME: etcd-2
+      ETCD_INITIAL_ADVERTISE_PEER_URLS: http://etcd-2:2380
+      ETCD_ADVERTISE_CLIENT_URLS: http://etcd-2:2379
+    volumes: [etcd_2_data:/etcd-data]
+    networks: [pipeline_network]
+    deploy:
+      <<: *ch-deploy
+      endpoint_mode: dnsrr
+      placement: { constraints: ["node.labels.store == store2"] }
+
+  etcd-3:
+    image: quay.io/coreos/etcd:v3.5.15
+    command: ["etcd"]
+    environment:
+      <<: *etcd-env
+      ETCD_NAME: etcd-3
+      ETCD_INITIAL_ADVERTISE_PEER_URLS: http://etcd-3:2380
+      ETCD_ADVERTISE_CLIENT_URLS: http://etcd-3:2379
+    volumes: [etcd_3_data:/etcd-data]
+    networks: [pipeline_network]
+    deploy:
+      <<: *ch-deploy
+      endpoint_mode: dnsrr
+      placement: { constraints: ["node.labels.store == store3"] }
+
+  # Spilo = PostgreSQL + Patroni in one image. Patroni elects a leader through
+  # the etcd lock above; if the leader stops renewing it, a replica promotes
+  # itself, re-points the other replica, and rebuilds the old leader with
+  # pg_rewind when it returns. Those last two steps are exactly the error-prone
+  # parts of a manual `pg_ctl promote`, and are why the component earns its place.
+  #
+  # No HAProxy: clients use a multi-host conninfo with
+  # target_session_attrs=read-write (POSTGRES_DSN in .env.intended), so libpq
+  # finds the leader itself. Gold is therefore addressed as a LIST of nodes, the
+  # same shape as CLICKHOUSE_ALT_HOSTS and the three-member MONGO_URI.
+  #
+  # bootstrap.post_init runs the gold schema ONCE, when Patroni initialises the
+  # cluster — the equivalent of the image entrypoint hook that testing mode uses,
+  # which Patroni bypasses because it runs initdb itself.
+  postgres-1: &patroni-node
+    image: ghcr.io/zalando/spilo-16:3.2-p3
+    environment: &patroni-env
+      SCOPE: radar
+      PGVERSION: "16"
+      ETCD3_HOSTS: "'etcd-1:2379','etcd-2:2379','etcd-3:2379'"
+      PGPASSWORD_SUPERUSER: ${POSTGRES_SUPERUSER_PASSWORD:-radar_sys}
+      PGPASSWORD_ADMIN: ${POSTGRES_ADMIN_PASSWORD:-radar_admin}
+      PGPASSWORD_STANDBY: ${POSTGRES_STANDBY_PASSWORD:-radar_standby}
+      POSTGRES_DB: ${POSTGRES_DB:-radar}
+      POSTGRES_USER: ${POSTGRES_USER:-radar}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-radar}
+      # Creates the `radar` role and database, then applies the gold schema.
+      SPILO_CONFIGURATION: |
+        bootstrap:
+          dcs:
+            postgresql:
+              parameters:
+                max_connections: 200
+          # post_init creates the radar role itself. It runs BEFORE Patroni
+          # applies `bootstrap.users`, so a role declared there would not yet
+          # exist when the script needs it.
+          post_init: /bootstrap/init-gold.sh
+    configs:
+      - source: pg_gold_schema
+        target: /bootstrap/01_schema.sql
+      - source: pg_init_script
+        target: /bootstrap/init-gold.sh
+        mode: 0755
+    volumes: [pg_1_data:/home/postgres/pgdata]
+    networks: [pipeline_network]
+    deploy:
+      <<: *ch-deploy
+      endpoint_mode: dnsrr
+      placement: { constraints: ["node.labels.store == store1"] }
+
+  postgres-2:
+    <<: *patroni-node
+    volumes: [pg_2_data:/home/postgres/pgdata]
+    deploy:
+      <<: *ch-deploy
+      endpoint_mode: dnsrr
+      placement: { constraints: ["node.labels.store == store2"] }
+
+  postgres-3:
+    <<: *patroni-node
+    volumes: [pg_3_data:/home/postgres/pgdata]
+    deploy:
+      <<: *ch-deploy
+      endpoint_mode: dnsrr
+      placement: { constraints: ["node.labels.store == store3"] }
+
+# ── Configs ──────────────────────────────────────────────────────────────────
+# Immutable once created: to change one, give it a new name and update the
+# reference above. Only the manager machine needs these files on disk.
+configs:
+  ch_cluster:      { file: ./clickhouse/cluster.xml }
+  ch_memory:       { file: ./clickhouse/memory.distributed.xml }
+  ch_users:        { file: ./clickhouse/users.xml }
+  ch_keeper_1:     { file: ./clickhouse/keeper-1.xml }
+  ch_keeper_2:     { file: ./clickhouse/keeper-2.xml }
+  ch_keeper_3:     { file: ./clickhouse/keeper-3.xml }
+  ch_macros_s1r1:  { file: ./clickhouse/macros-s1r1.xml }
+  ch_macros_s1r2:  { file: ./clickhouse/macros-s1r2.xml }
+  ch_macros_s1r3:  { file: ./clickhouse/macros-s1r3.xml }
+  ch_macros_s2r1:  { file: ./clickhouse/macros-s2r1.xml }
+  ch_macros_s2r2:  { file: ./clickhouse/macros-s2r2.xml }
+  ch_macros_s2r3:  { file: ./clickhouse/macros-s2r3.xml }
+  pg_gold_schema:  { file: ./postgres-init/01_schema.sql }
+  pg_init_script:  { file: ./postgres-init/init-gold.sh }
+
+# ── Volumes ──────────────────────────────────────────────────────────────────
+# Local to the machine each service is pinned to, which is why the pinning is
+# not optional. Names are NOT mode-scoped here: this stack has no testing-mode
+# counterpart to collide with, since testing mode uses docker-compose.stores.yml
+# and its own radar-testing_* volumes.
+volumes:
+  keeper_1_data: {}
+  keeper_2_data: {}
+  keeper_3_data: {}
+  ch_s1r1_data: {}
+  ch_s1r2_data: {}
+  ch_s1r3_data: {}
+  ch_s2r1_data: {}
+  ch_s2r2_data: {}
+  ch_s2r3_data: {}
+  mongo1_data: {}
+  mongo2_data: {}
+  mongo3_data: {}
+  etcd_1_data: {}
+  etcd_2_data: {}
+  etcd_3_data: {}
+  pg_1_data: {}
+  pg_2_data: {}
+  pg_3_data: {}
+
+networks:
+  # Created by hand, shared with docker-stack.pipeline.yml. Attachable so a plain
+  # `docker compose` tool (diagnostics, bootstrap, Spark) can join it too.
+  pipeline_network:
+    external: true
+    name: pipeline_network

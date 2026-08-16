@@ -5,7 +5,7 @@
         Selected by CH_KEEPER1_CONFIG=keeper-1.local.xml (the default). Identical
         to keeper-1.xml except that <raft_configuration> lists only this server,
         so it forms a quorum of one and elects itself leader. The three-node
-        ensemble (keeper-1/2/3.xml) is selected by .env.full.
+        ensemble (keeper-1/2/3.xml) is selected by .env.intended.
     -->
     <logger>
         <level>warning</level>

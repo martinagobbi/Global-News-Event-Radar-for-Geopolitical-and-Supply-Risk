@@ -66,7 +66,7 @@ def recompute_pending(live_version: str | None) -> bool:
       * MAX_WAIT_SECONDS passes — the rebuild finished without changing which
         articles were selected, so the fingerprint never moves (see above).
 
-    A fingerprint that cannot be read (Oracle unreachable) does not clear the
+    A fingerprint that cannot be read (the gold store unreachable) does not clear the
     notice early: the page already shows a database error in that case, and
     dropping this one would imply the rebuild had finished when it is unknown.
     """
@@ -117,7 +117,7 @@ def gold_never_built(system_status: dict) -> bool:
     """
     if not system_status:
         return False
-    # An Oracle outage is reported separately and must not be mistaken for this.
+    # A gold-store outage is reported separately and must not be mistaken for this.
     if system_status.get("code"):
         return False
     return system_status.get("timestamp_of_last_update") in (None, "", "None")

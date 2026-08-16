@@ -21,7 +21,26 @@
 # ═════════════════════════════════════════════════════════════════════════════
 set -euo pipefail
 
-CH_CONTAINER="${CH_CONTAINER:-pipeline_clickhouse_s1r1}"
+# Which container to run clickhouse-client in. Testing mode uses plain Compose,
+# where the container is named exactly this. Intended mode runs the stores as a
+# SWARM STACK, and Swarm ignores `container_name` — the task is called something
+# like radar-stores_clickhouse-s1r1.1.<taskid>, with a different id every time it
+# is rescheduled, so the name cannot be hard-coded. Resolve it by service label
+# instead, and fall back to the Compose name.
+#
+# Run this on the machine hosting s1r1: `docker exec` is local to one daemon, so
+# the container has to be here. (Which machine that is, is fixed by the placement
+# constraint in docker-stack.stores.yml.)
+_resolve_ch_container() {
+  if [ -n "${CH_CONTAINER:-}" ]; then printf '%s' "$CH_CONTAINER"; return; fi
+  local swarm_task
+  swarm_task=$(docker ps -q \
+    --filter "label=com.docker.swarm.service.name=${STORES_STACK:-radar-stores}_clickhouse-s1r1" \
+    | head -1)
+  if [ -n "$swarm_task" ]; then printf '%s' "$swarm_task"; return; fi
+  printf 'pipeline_clickhouse_s1r1'
+}
+CH_CONTAINER="$(_resolve_ch_container)"
 SEED_DIR="${SEED_DIR:-data/silver_seed}"
 TABLES=(gdelt_events gdelt_mentions)
 # The last 15-minute slice covered by the committed seed. `trim seed` uses it, so
@@ -88,9 +107,48 @@ case "${1:-}" in
       # collapse genuine duplicate rows by key at merge/FINAL time.
       ch --query "INSERT INTO $t SETTINGS insert_deduplicate = 0 FORMAT Parquet" < "$f"
       rows=$(ch --query "SELECT count() FROM $t FINAL")
+      # On a MULTI-SHARD cluster this count can read LOW — it is taken the moment
+      # the insert returns, while the Distributed table is still handing rows to
+      # the second shard and ReplicatedMergeTree is still copying them between
+      # replicas. Measured on the six-node cluster: it printed 51,914 immediately
+      # after restoring, and 103,972 (the true total) a few seconds later. The
+      # data is not lost and nothing needs re-running; only the figure below is
+      # premature. Testing mode has one shard and one replica, so it is exact
+      # there. Re-run `SELECT count() FROM gdelt_events FINAL` to confirm.
       printf '  %-16s now %s rows\n' "$t" "$rows"
     done
     echo "silver restored — the processing watermark trigger will build the gold"
+    ;;
+
+  recreate)
+    # Apply a CHANGED table definition — a new ORDER BY, a new column, a new
+    # index — to a volume that already holds the old one.
+    #
+    # Needed because the schema is created with CREATE TABLE IF NOT EXISTS, so on
+    # an existing volume a changed definition is simply ignored: the tables keep
+    # whatever shape they were first created with. ClickHouse also cannot ALTER a
+    # sorting key into a different order (only append columns to it), so the
+    # tables have to be dropped and rebuilt.
+    #
+    # Safe, because silver is reproducible: the committed seed restores in seconds
+    # and the live pipeline re-polls anything newer from GDELT.
+    echo "dropping the silver tables (both local and Distributed, ON CLUSTER) ..."
+    for t in gdelt_events gdelt_mentions; do
+      ch --query "DROP TABLE IF EXISTS ${t} ON CLUSTER gnews_cluster SYNC" >/dev/null
+      ch --query "DROP TABLE IF EXISTS ${t}_local ON CLUSTER gnews_cluster SYNC" >/dev/null
+      printf '  %-16s dropped\n' "$t"
+    done
+    echo
+    echo "Now restart the VALIDATION layer — it owns the schema and calls"
+    echo "ensure_tables() once, at startup, so nothing recreates the tables until"
+    echo "it restarts:"
+    echo
+    echo "    docker compose --env-file .env.testing restart validation     # testing"
+    echo "    docker service update --force radar_validation                # intended"
+    echo
+    echo "then re-fill silver:"
+    echo
+    echo "    ./bootstrap/silver_snapshot.sh restore"
     ;;
 
   wipe)
@@ -132,7 +190,7 @@ case "${1:-}" in
     ;;
 
   *)
-    echo "usage: $0 {export|restore|wipe|trim {seed|<YYYYMMDDHHMMSS>}}" >&2
+    echo "usage: $0 {export|restore|recreate|wipe|trim {seed|<YYYYMMDDHHMMSS>}}" >&2
     exit 1
     ;;
 esac

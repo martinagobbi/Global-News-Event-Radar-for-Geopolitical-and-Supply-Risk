@@ -1,0 +1,35 @@
+<clickhouse>
+    <!--
+        INTENDED topology, one ClickHouse node PER MACHINE.
+
+        Selected by CH_MEMORY_CONFIG=memory.distributed.xml (set in .env.intended)
+        and used by docker-stack.stores.yml.
+
+        The other two files in this directory cap a node because it is SHARING a
+        host, and neither cap is right here:
+
+          * memory.xml (1.1 GB) assumed six ClickHouse servers on one machine,
+            splitting roughly 4.2 GB between them. With one node per machine that
+            is needlessly tight — the node would spill or fail large queries while
+            most of its machine sat idle.
+          * memory.local.xml (2.5 GB) is the single-node testing cap, sized to
+            leave room for MongoDB, Keeper, the gold store and the whole pipeline
+            on the SAME machine.
+
+        Here a store machine runs one ClickHouse server plus at most one Keeper
+        (~150 MB) and one MongoDB member (~200 MB) or one PostgreSQL node, so the
+        server can be given the clear majority of the machine. 4 GB assumes a
+        machine with 8 GB of RAM; raise it in proportion on larger machines, which
+        is the whole reason this is a separate file rather than a hard-coded value.
+
+        NOTE: only SERVER-level settings belong in this file. Per-query limits
+        such as max_memory_usage are profile settings and live in users.xml;
+        placing them here prevents the server from starting.
+    -->
+    <max_server_memory_usage>4000000000</max_server_memory_usage>
+
+    <!-- Caches are per node, and this node no longer shares its page cache with
+         five siblings, so it can afford a larger mark cache than memory.xml. -->
+    <mark_cache_size>536870912</mark_cache_size>
+    <uncompressed_cache_size>0</uncompressed_cache_size>
+</clickhouse>

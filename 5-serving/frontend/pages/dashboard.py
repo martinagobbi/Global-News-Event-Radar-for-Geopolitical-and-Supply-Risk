@@ -52,12 +52,12 @@ except BackendUnavailable:
 
 status_code = system_status.get("code")
 
-if status_code == "503-ORACLE":
+if status_code == "503-POSTGRES":
     st.error(
         "🔴 **503 — Database unavailable.** "
         + system_status.get(
             "message",
-            "The backend could not reach the Oracle database after multiple attempts.",
+            "The backend could not reach the PostgreSQL database after multiple attempts.",
         )
         + " Event data cannot be loaded right now. Please try again shortly."
     )
@@ -103,7 +103,7 @@ elif (
 header_left, header_right = st.columns([3, 1])
 with header_left:
     st.caption("Events are filtered according to your registered territories and supply-chain keywords.")
-    render_retention_notice()
+    render_retention_notice(preferences="follows")
 with header_right:
     manual_refresh = st.button("Refresh now")
 

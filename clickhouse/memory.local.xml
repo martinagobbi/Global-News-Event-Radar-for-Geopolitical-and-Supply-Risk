@@ -3,15 +3,35 @@
         TESTING topology: a SINGLE ClickHouse node, so it may take a far larger
         share than any one node of the six-node cluster.
 
-        Selected by CH_MEMORY_CONFIG=memory.local.xml (the default). The
-        six-node cap lives in memory.xml and is selected by .env.full.
+        Selected by CH_MEMORY_CONFIG=memory.local.xml (the default). The six-node
+        cap lives in memory.xml, and the one-node-per-machine cap for intended
+        mode lives in memory.distributed.xml (selected by .env.intended).
 
-        2.5 GB leaves room for Oracle (~1.1 GB), MongoDB, Keeper and the pipeline
-        within a 6 GB Docker allocation. With the 1.1 GB cluster cap in place a
-        single node ran out of memory (error 241) as soon as it handled the whole
-        workload alone.
+        RAISED from 2.5 GB to 3.5 GB when the gold layer moved from Oracle to
+        PostgreSQL. The old figure was chosen to "leave room for Oracle (~1.1 GB)"
+        alongside MongoDB, Keeper and the pipeline; PostgreSQL holds ~26 MB in the
+        same role, so that GB is now free and ClickHouse is the only component
+        that can use it.
+
+        The raise is not cosmetic. The widest per-user query — radar_agrifood's
+        100-keyword filter, a multiSearchAny plus an arrayExists over the stemmed
+        article text — peaks at about 2.5 GB on the 30-day seed, which is exactly
+        at the old ceiling. It therefore failed intermittently, and then
+        reproducibly, with:
+
+            Code: 241. DB::Exception: Memory limit (total) exceeded:
+            would use 2.47 GiB ..., maximum: 2.33 GiB
+
+        (`maximum` reads below the configured cap because the server reserves a
+        slice for itself.) Gold was never wrong when this happened — the recompute
+        simply aborted and left the previous gold in place — but a recompute that
+        cannot finish is not something to leave in the default configuration.
+
+        Measured after the change: the whole testing stack runs at ~2.1 GB total,
+        so 3.5 GB for ClickHouse stays inside a 6 GB Docker allocation with room
+        for MongoDB, Keeper, PostgreSQL and all five pipeline layers.
     -->
-    <max_server_memory_usage>2500000000</max_server_memory_usage>
+    <max_server_memory_usage>3500000000</max_server_memory_usage>
     <mark_cache_size>268435456</mark_cache_size>
     <uncompressed_cache_size>0</uncompressed_cache_size>
 </clickhouse>

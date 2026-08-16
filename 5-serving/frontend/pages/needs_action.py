@@ -20,7 +20,7 @@ try:
         "Events you flagged with 'Needs action from us' in the Radar View. "
         "This list is yours alone."
     )
-    render_retention_notice()
+    render_retention_notice(preferences="pinned")
     events = get_tagged_events(user_id, "requires_action")
 except BackendUnavailable:
     st.error("🔴 The backend is unreachable. Please try again shortly.")

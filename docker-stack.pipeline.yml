@@ -1,7 +1,6 @@
 # ═════════════════════════════════════════════════════════════════════════════
 # DOCKER SWARM stack for the PIPELINE tier (auto-restart / auto-reschedule on
-# node failure). This REPLACES hand-rolled failover (the Redis idea) with Swarm's
-# built-in orchestration.
+# node failure). This uses Swarm's built-in orchestration.
 #
 # ── Prerequisites (Swarm differs from plain compose) ─────────────────────────
 #   1. Swarm needs PRE-BUILT, PUSHED images — it can't `build:`. On a build host:
@@ -17,8 +16,12 @@
 #        docker node update --label-add role=pipeline <node-name>
 #      Label exactly ONE node to keep 1-4 together. Label a second node too if you
 #      want Swarm to be ABLE to move the whole unit there on failure.
-#   4. The STORES stay OUT of Swarm — run docker-compose.stores.yml on their own
-#      machine(s). Set the store addresses via the environment (MONGO_URI, etc.).
+#      The Spark master and workers carry NO constraint: they hold no durable
+#      state, so Swarm may place and move them freely.
+#   4. Deploy the STORES stack too (docker-stack.stores.yml) — in intended mode
+#      the stores are a Swarm stack as well, one node of each store per machine.
+#      Both stacks share the external overlay `pipeline_network`, which is what
+#      lets this tier resolve store service names across machines.
 #
 # ── Deploy ───────────────────────────────────────────────────────────────────
 #      docker stack deploy -c docker-stack.pipeline.yml radar
@@ -49,11 +52,14 @@ x-store-env: &store-env
   # 2x3 cluster, so 2 is correct here; a single-replica cluster would
   # reject every insert with error 285 (alive replicas < requested quorum).
   CLICKHOUSE_INSERT_QUORUM: ${CLICKHOUSE_INSERT_QUORUM:-2}
-  ORACLE_HOST: ${ORACLE_HOST:-pipeline_oracle}
-  ORACLE_PORT: ${ORACLE_PORT:-1521}
-  ORACLE_SERVICE: ${ORACLE_SERVICE:-FREEPDB1}
-  ORACLE_USER: ${ORACLE_USER:-radar}
-  ORACLE_PASSWORD: ${ORACLE_PASSWORD:-radar}
+  # One DSN rather than host/port/service. In intended mode it lists all three
+  # PostgreSQL members with target_session_attrs=read-write, so libpq connects to
+  # whichever node Patroni currently leads and a failover changes nothing here.
+  #
+  # NOTE: `docker stack deploy` accepts no --env-file, so these substitutions come
+  # from the SHELL. Source the env file before deploying:
+  #     set -a; . ./.env.intended; set +a
+  POSTGRES_DSN: ${POSTGRES_DSN:-postgresql://radar:radar@pipeline_postgres:5432/radar}
 
 services:
 
@@ -61,7 +67,7 @@ services:
     image: ${REGISTRY:-localhost:5000}/radar-ingestion:latest
     volumes:
       - shared_data:/data
-    networks: [pipeline_net]
+    networks: [pipeline_network]
     deploy:
       replicas: 1
       placement:
@@ -74,7 +80,7 @@ services:
     image: ${REGISTRY:-localhost:5000}/radar-parsing:latest
     volumes:
       - shared_data:/data
-    networks: [pipeline_net]
+    networks: [pipeline_network]
     deploy:
       replicas: 1
       placement:
@@ -94,11 +100,50 @@ services:
       ENRICH_TIMEOUT_SECONDS: "600"
     volumes:
       - shared_data:/data
-    networks: [pipeline_net]
+    networks: [pipeline_network]
     deploy:
       replicas: 1
       placement:
         constraints: ["node.labels.role == pipeline"]
+      restart_policy: { condition: any, delay: 5s }
+
+  # ── Spark cluster: the silver -> gold compute ──────────────────────────────
+  # Intended mode is the reason this exists as a cluster at all. Testing mode
+  # runs the SAME job with SPARK_MASTER=local[*], inside the processing
+  # container, so it needs neither of these two services.
+  #
+  # These may roam: they hold no durable state, so Swarm can reschedule them
+  # anywhere. That is the opposite of the store nodes, every one of which is
+  # pinned (see docker-stack.stores.yml).
+  spark-master:
+    image: bitnamilegacy/spark:3.5
+    hostname: spark-master
+    environment:
+      SPARK_MODE: master
+    ports:
+      - "8080:8080"    # master web UI — watch partitions and executors here
+    networks: [pipeline_network]
+    deploy:
+      replicas: 1
+      endpoint_mode: dnsrr
+      restart_policy: { condition: any, delay: 5s }
+
+  spark-worker:
+    image: bitnamilegacy/spark:3.5
+    environment:
+      SPARK_MODE: worker
+      SPARK_MASTER_URL: ${SPARK_MASTER:-spark://spark-master:7077}
+      # Size each worker to the machine it lands on. These are what actually
+      # decide how much of a machine Spark may use; the partition counts above
+      # decide how the work is divided between them.
+      SPARK_WORKER_CORES: ${SPARK_WORKER_CORES:-2}
+      SPARK_WORKER_MEMORY: ${SPARK_WORKER_MEMORY:-2G}
+    networks: [pipeline_network]
+    deploy:
+      # One executor host per replica. Set SPARK_WORKERS before deploying, or
+      # scale live with `docker service scale radar_spark-worker=N` — Swarm
+      # places them on any machine, since they hold no durable state.
+      replicas: ${SPARK_WORKERS:-2}
       restart_policy: { condition: any, delay: 5s }
 
   processing:
@@ -107,9 +152,23 @@ services:
       <<: *store-env
       STATUS_DIR: /data/status
       MONGO_COLLECTION: ${MONGO_COLLECTION:-users}
+      # Distributed here; local[*] in testing mode. The only difference.
+      SPARK_MASTER: ${SPARK_MASTER:-spark://spark-master:7077}
+      # How the silver -> gold job is parallelised. All four are read by
+      # spark_gold.py and must be passed in explicitly, or the code defaults
+      # silently apply and the env file appears to do nothing.
+      #   READ    concurrent JDBC range queries against ClickHouse
+      #   SHUFFLE partitions each shuffle produces (join, dropDuplicates, ...)
+      #   WRITE   concurrent JDBC writers into PostgreSQL
+      SPARK_READ_PARTITIONS: ${SPARK_READ_PARTITIONS:-8}
+      SPARK_SHUFFLE_PARTITIONS: ${SPARK_SHUFFLE_PARTITIONS:-16}
+      SPARK_WRITE_PARTITIONS: ${SPARK_WRITE_PARTITIONS:-4}
+      # The HTTP port, for the Spark job's JDBC reads — distinct from
+      # CLICKHOUSE_PORT, which is the native port used by the driver-based code.
+      CLICKHOUSE_HTTP_PORT: ${CLICKHOUSE_HTTP_PORT:-8123}
     volumes:
       - shared_data:/data
-    networks: [pipeline_net]
+    networks: [pipeline_network]
     deploy:
       replicas: 1
       placement:
@@ -124,11 +183,11 @@ services:
       <<: *store-env
       USE_MOCK: "false"
       MONGO_TIMEOUT: "5"
-      ORACLE_TIMEOUT: "10"
-      ORACLE_RETRIES: "3"
+      POSTGRES_TIMEOUT: "10"
+      POSTGRES_RETRIES: "3"
     ports:
       - "8000:8000"
-    networks: [pipeline_net]
+    networks: [pipeline_network]
     deploy:
       replicas: 3
       restart_policy: { condition: any, delay: 5s }
@@ -139,5 +198,12 @@ volumes:
   shared_data:
 
 networks:
-  pipeline_net:
-    driver: overlay
+  # The SAME attachable overlay the stores stack uses, created once by hand:
+  #   docker network create -d overlay --attachable pipeline_network
+  # Sharing it is what lets this tier reach clickhouse-s1r1, mongo1 and
+  # postgres-1 by service name across machines, with no published store ports.
+  # It is external because neither stack owns it — `docker stack rm` on either
+  # one must not take it away from the other.
+  pipeline_network:
+    external: true
+    name: pipeline_network

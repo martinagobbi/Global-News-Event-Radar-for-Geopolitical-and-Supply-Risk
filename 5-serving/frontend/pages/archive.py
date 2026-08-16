@@ -17,7 +17,7 @@ if is_first_login(user_id):
     st.stop()
 
 st.caption("Events removed from the main Radar Briefing with the 'Not important / Archive' tag.")
-render_retention_notice()
+render_retention_notice(preferences="follows")
 
 archived = get_archived_events(user_id)
 

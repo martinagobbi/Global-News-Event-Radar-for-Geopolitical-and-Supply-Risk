@@ -178,6 +178,13 @@ class Storage:
             self._client = Client(
                 host=self.host, port=self.port, database=self.database,
                 user=self.user, password=self.password,
+                # Entry nodes to fall back on when `host` cannot be reached. In
+                # intended mode the six servers sit on six different machines, so
+                # losing the one named here would otherwise stop ingestion
+                # outright even though the shard's other two replicas hold every
+                # row — the data survives the failure but the connection does
+                # not. Empty in testing mode, which has a single node.
+                alt_hosts=os.getenv("CLICKHOUSE_ALT_HOSTS", "") or None,
                 # Socket timeout sits just above the server-side cap below.
                 send_receive_timeout=_OP_TIMEOUT + 10,
                 # insert_distributed_sync: an INSERT into a Distributed table
@@ -210,7 +217,7 @@ class Storage:
             f"ENGINE = ReplicatedReplacingMergeTree("
             f"'/clickhouse/tables/{{shard}}/gdelt_events_local', '{{replica}}', DATEADDED) "
             f"PARTITION BY substring(Day, 1, 6) "
-            f"ORDER BY (ActionGeo_CountryCode, GLOBALEVENTID) "
+            f"ORDER BY (GLOBALEVENTID, ActionGeo_CountryCode) "
             f"SETTINGS index_granularity = 8192"
         )
         client.execute(

@@ -64,3 +64,7 @@ Thumbs.db
 # at startup.
 **/data/raw/mentions/*
 **/data/release/*
+
+# 9. SMALL
+# Sometimes I will render a README.html from README.md
+README.html

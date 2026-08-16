@@ -3,7 +3,7 @@
         TESTING topology: 1 shard × 1 replica, coordinated by a single Keeper.
 
         Selected by CH_CLUSTER_CONFIG=cluster.local.xml (the default). The full
-        2 × 3 topology lives in cluster.xml and is selected by .env.full.
+        2 × 3 topology lives in cluster.xml and is selected by .env.intended.
 
         The cluster keeps the name `gnews_cluster` in both modes, so every
         `ON CLUSTER gnews_cluster` statement in the validation layer works

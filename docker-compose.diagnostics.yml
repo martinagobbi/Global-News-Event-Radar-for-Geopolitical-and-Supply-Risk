@@ -3,7 +3,7 @@
 #
 #     docker compose -f docker-compose.diagnostics.yml run --rm diagnostics
 #
-# Reads Oracle, ClickHouse and MongoDB read-only and writes a single file,
+# Reads PostgreSQL, ClickHouse and MongoDB read-only and writes a single file,
 # dev_tools_for_filter_diagnostics/gold_provenance.csv. It changes no store, so
 # it is safe to run at any time, including while the pipeline is running.
 #
@@ -21,11 +21,11 @@ services:
       CLICKHOUSE_PORT: ${CLICKHOUSE_PORT:-9000}
       MONGO_URI: ${MONGO_URI:-mongodb://mongo1:27017,mongo2:27017,mongo3:27017/?replicaSet=rs0}
       MONGO_DB: ${MONGO_DB:-radar}
-      ORACLE_HOST: ${ORACLE_HOST:-pipeline_oracle}
-      ORACLE_PORT: ${ORACLE_PORT:-1521}
-      ORACLE_SERVICE: ${ORACLE_SERVICE:-FREEPDB1}
-      ORACLE_USER: ${ORACLE_USER:-radar}
-      ORACLE_PASSWORD: ${ORACLE_PASSWORD:-radar}
+      # One DSN instead of host/port/service: in intended mode it lists all
+      # three PostgreSQL members with target_session_attrs=read-write, so libpq
+      # finds whichever node Patroni has made leader and a failover needs no
+      # configuration change here.
+      POSTGRES_DSN: ${POSTGRES_DSN:-postgresql://radar:radar@pipeline_postgres:5432/radar}
     volumes:
       # The CSV lands on the host, next to the script that produced it.
       - ./dev_tools_for_filter_diagnostics:/app/dev_tools_for_filter_diagnostics

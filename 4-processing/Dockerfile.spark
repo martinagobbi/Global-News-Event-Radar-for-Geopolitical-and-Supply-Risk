@@ -1,28 +1,14 @@
-# Submitter image for the distributed silver -> gold job (spark_gold.py).
-# Separate from the normal processing Dockerfile so the pandas path is untouched.
-FROM bitnami/spark:3.5
-
-USER root
-WORKDIR /app
-
-# pymongo for the user profiles, oracledb for the driver-side publish step
-# (the MERGE / DELETE+INSERT that moves the staged rows into the live tables).
-# pyspark itself ships with the base image.
-RUN pip install --no-cache-dir "pymongo>=4.6.0" "oracledb>=2.3.0"
-
-# JDBC drivers: ClickHouse (source) and Oracle (sink). Spark loads them from
-# --jars at submit time.
-ENV IVY_DIR=/opt/bitnami/spark/jars
-RUN curl -fsSL -o $IVY_DIR/clickhouse-jdbc.jar \
-      https://repo1.maven.org/maven2/com/clickhouse/clickhouse-jdbc/0.6.3/clickhouse-jdbc-0.6.3-all.jar && \
-    curl -fsSL -o $IVY_DIR/ojdbc11.jar \
-      https://repo1.maven.org/maven2/com/oracle/database/jdbc/ojdbc11/23.4.0.24.05/ojdbc11-23.4.0.24.05.jar
-
-# The job plus the modules it imports (countries, processor, mongo_reader).
-COPY . .
+# Submitter image for a MANUAL, one-shot run of the distributed silver -> gold
+# job. Identical to the processing image — same code, same jars — differing only
+# in that it runs the job once and exits instead of serving the API.
+#
+# The normal path does NOT use this file: the resident processing container runs
+# the same job itself, on whatever SPARK_MASTER names. This exists for a
+# deliberate batch run (docker-compose.spark.yml), which is useful for a
+# one-off rebuild or for watching the job in the Spark UI.
+FROM radar-processing:latest
 
 CMD ["spark-submit", \
-     "--master", "spark://spark-master:7077", \
-     "--jars", "/opt/bitnami/spark/jars/clickhouse-jdbc.jar,/opt/bitnami/spark/jars/ojdbc11.jar", \
+     "--jars", "/opt/bitnami/spark/jars/clickhouse-jdbc.jar,/opt/bitnami/spark/jars/postgresql-jdbc.jar", \
      "--conf", "spark.sql.shuffle.partitions=16", \
      "spark_gold.py"]

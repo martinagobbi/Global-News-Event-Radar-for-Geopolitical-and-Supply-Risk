@@ -11,7 +11,7 @@ hanging off them:
     an event whose MOST RECENT article is older than RETENTION_YEARS
       -> delete the event      from ClickHouse gdelt_events
       -> delete its mentions   from ClickHouse gdelt_mentions
-      -> delete its articles   from Oracle articles / user_articles
+      -> delete its articles   from PostgreSQL articles / user_articles
       -> drop any user's tag   pointing at it, in MongoDB
 
 Why the newest article and not the event date
@@ -60,8 +60,6 @@ RETENTION_STATE_FILE = STATE_DIR / "retention.json"
 # How often the scheduler re-checks whether midnight has passed. Short enough to
 # start the run promptly, long enough to cost nothing.
 TICK_SECONDS = int(os.getenv("RETENTION_TICK_SECONDS", "300"))
-# Oracle's IN list caps at 1000 entries.
-_ORACLE_IN_CHUNK = 900
 # Ids per ClickHouse statement. Well under the ~21,800 that max_query_size allows,
 # so a batch cannot approach the limit even if ids grow longer.
 ID_CHUNK = int(os.getenv("RETENTION_ID_CHUNK", "10000"))
@@ -232,32 +230,32 @@ def delete_from_silver(ch, event_ids: list[int]) -> None:
 
 def delete_from_gold(event_ids: list[int]) -> tuple[int, int]:
     """
-    Remove the expired events' articles from Oracle.
+    Remove the expired events' articles from the gold store.
 
     user_articles FIRST, then articles: the reverse order would briefly leave
     user_articles rows pointing at articles that no longer exist, which is
     exactly the dangling state the serving join assumes cannot happen.
+
+    Both statements take the whole id set as a single array parameter. Oracle
+    needed the set split into 900-entry chunks because its IN list caps at 1000;
+    PostgreSQL has no such limit, so the chunking loop is gone. The ClickHouse
+    deletes above are still batched, for an unrelated reason: there the ids are
+    substituted into the SQL text and bounded by max_query_size.
     """
-    import oracle_writer
+    import postgres_writer
 
     ids = [str(e) for e in event_ids]
-    removed_links = removed_articles = 0
-    with oracle_writer._connect() as conn:
+    with postgres_writer._connect() as conn:
         cur = conn.cursor()
-        for start in range(0, len(ids), _ORACLE_IN_CHUNK):
-            chunk = ids[start:start + _ORACLE_IN_CHUNK]
-            binds = {f"e{n}": v for n, v in enumerate(chunk)}
-            placeholders = ", ".join(f":{k}" for k in binds)
+        cur.execute(
+            "DELETE FROM user_articles WHERE doc_id IN "
+            "(SELECT doc_id FROM articles WHERE global_event_id = ANY(%(ids)s))",
+            {"ids": ids})
+        removed_links = cur.rowcount
 
-            cur.execute(
-                f"DELETE FROM user_articles WHERE doc_id IN "
-                f"(SELECT doc_id FROM articles WHERE global_event_id IN ({placeholders}))",
-                binds)
-            removed_links += cur.rowcount
-
-            cur.execute(
-                f"DELETE FROM articles WHERE global_event_id IN ({placeholders})", binds)
-            removed_articles += cur.rowcount
+        cur.execute(
+            "DELETE FROM articles WHERE global_event_id = ANY(%(ids)s)", {"ids": ids})
+        removed_articles = cur.rowcount
         conn.commit()
 
     logger.info("gold: deleted %d articles and %d user_articles links",
@@ -270,7 +268,7 @@ def delete_tags(event_ids: list[int]) -> int:
     Drop every user's tag pointing at an expired event.
 
     Without this a triaged card becomes a permanent dead reference: the tag stays
-    in MongoDB, the article is gone from Oracle, and the triage page silently
+    in MongoDB, the article is gone from PostgreSQL, and the triage page silently
     shows one fewer item than the user filed, forever.
     """
     import mongo_reader

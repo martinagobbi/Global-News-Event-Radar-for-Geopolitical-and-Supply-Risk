@@ -3,7 +3,7 @@ service_errors.py
 ==================
 Shared error codes for backend → frontend communication.
 
-When a data store (Oracle or MongoDB) fails after all retry attempts, the
+When a data store (PostgreSQL or MongoDB) fails after all retry attempts, the
 backend raises one of these structured errors instead of a generic 500/503.
 The frontend reads the "code" field and shows a specific, human-readable
 banner instead of a blank failure.
@@ -17,7 +17,7 @@ from __future__ import annotations
 
 class ServiceUnavailableError(Exception):
     """
-    Raised when a backing store (Oracle or MongoDB) could not be reached
+    Raised when a backing store (PostgreSQL or MongoDB) could not be reached
     after exhausting all retry attempts.
     """
 
@@ -38,7 +38,7 @@ class ServiceUnavailableError(Exception):
 
 # ── Defined error codes ─────────────────────────────────────────────────────
 
-ORACLE_UNAVAILABLE = "503-ORACLE"
-MONGO_UNAVAILABLE  = "503-MONGO"
-ORACLE_QUERY_ERROR = "500-ORACLE"
+POSTGRES_UNAVAILABLE = "503-POSTGRES"
+MONGO_UNAVAILABLE    = "503-MONGO"
+POSTGRES_QUERY_ERROR = "500-POSTGRES"
 MONGO_QUERY_ERROR  = "500-MONGO"

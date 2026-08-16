@@ -58,5 +58,5 @@ def get_gold_layer_status(user_id: str) -> str:
 
 
 def get_events_version(user_id: str) -> str | None:
-    """Cheap fingerprint of the user's gold set (None if Oracle is unreachable)."""
+    """Cheap fingerprint of the user's gold set (None if the gold store is unreachable)."""
     return get_json(f"/users/{user_id}/events-version").get("version")

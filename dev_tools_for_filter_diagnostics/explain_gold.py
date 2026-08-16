@@ -11,7 +11,7 @@ particular articles through, and which rule is rejecting the rest? This tool
 answers the first half by re-deriving the decision for every row that survived.
 
 It is DIAGNOSTIC ONLY:
-    * it opens Oracle, ClickHouse and MongoDB read-only,
+    * it opens PostgreSQL, ClickHouse and MongoDB read-only,
     * it writes nothing to any store,
     * its only output is gold_provenance.csv, next to this file.
 
@@ -26,7 +26,7 @@ Usage (from the repository root, with the stores running):
 
     python3 dev_tools_for_filter_diagnostics/explain_gold.py
 
-Environment variables mirror the pipeline's own (CLICKHOUSE_HOST, ORACLE_HOST,
+Environment variables mirror the pipeline's own (CLICKHOUSE_HOST, POSTGRES_DSN,
 MONGO_URI, …); the defaults target the stores on this machine, reached through
 the published ports rather than the Docker network.
 """
@@ -54,11 +54,14 @@ OUT_FILE = Path(__file__).resolve().parent / "gold_provenance.csv"
 
 CLICKHOUSE_HOST = os.getenv("CLICKHOUSE_HOST", "localhost")
 CLICKHOUSE_PORT = int(os.getenv("CLICKHOUSE_PORT", "9000"))
-ORACLE_HOST = os.getenv("ORACLE_HOST", "localhost")
-ORACLE_PORT = int(os.getenv("ORACLE_PORT", "1521"))
-ORACLE_SERVICE = os.getenv("ORACLE_SERVICE", "FREEPDB1")
-ORACLE_USER = os.getenv("ORACLE_USER", "radar")
-ORACLE_PASSWORD = os.getenv("ORACLE_PASSWORD", "radar")
+POSTGRES_HOST = os.getenv("POSTGRES_HOST", "localhost")
+POSTGRES_PORT = os.getenv("POSTGRES_PORT", "5432")
+POSTGRES_DB = os.getenv("POSTGRES_DB", "radar")
+POSTGRES_USER = os.getenv("POSTGRES_USER", "radar")
+POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "radar")
+POSTGRES_DSN = os.getenv("POSTGRES_DSN") or (
+    f"postgresql://{POSTGRES_USER}:{POSTGRES_PASSWORD}"
+    f"@{POSTGRES_HOST}:{POSTGRES_PORT}/{POSTGRES_DB}")
 MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017/?directConnection=true")
 MONGO_DB = os.getenv("MONGO_DB", "radar")
 
@@ -207,14 +210,13 @@ def explain_keyword(mention: dict, keywords: list) -> dict:
 
 def main() -> None:
     import clickhouse_driver
-    import oracledb
+    import psycopg
     from pymongo import MongoClient
 
     # ── Read the gold pairs (user_id, doc_id) and the article rows ────────────
-    dsn = f"{ORACLE_HOST}:{ORACLE_PORT}/{ORACLE_SERVICE}"
-    log.info("Oracle  %s", dsn)
-    ora = oracledb.connect(user=ORACLE_USER, password=ORACLE_PASSWORD, dsn=dsn)
-    cur = ora.cursor()
+    log.info("PostgreSQL  %s", POSTGRES_DSN)
+    pg = psycopg.connect(POSTGRES_DSN)
+    cur = pg.cursor()
     # NOTE the column names, which do not mean what they appear to mean:
     # `document_identifier` holds the article URL — the same value as silver's
     # MentionIdentifier, and the key to join on — while `mention_identifier`
@@ -222,7 +224,7 @@ def main() -> None:
     # (see 4-processing/gold.py). Joining on the wrong one silently matches only
     # the rows whose headline extraction failed and fell back to the URL.
     cur.execute("""
-        SELECT ua.user_id, RAWTOHEX(a.doc_id), a.document_identifier,
+        SELECT ua.user_id, upper(encode(a.doc_id, 'hex')), a.document_identifier,
                a.global_event_id
         FROM user_articles ua JOIN articles a ON a.doc_id = ua.doc_id
         ORDER BY ua.user_id
@@ -314,7 +316,7 @@ def main() -> None:
                     "'(silver row gone)')", orphaned)
 
     cur.close()
-    ora.close()
+    pg.close()
     mongo.close()
     ch.disconnect()
 

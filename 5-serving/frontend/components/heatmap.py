@@ -12,8 +12,7 @@ def render_heatmap(summary: list[dict], selected_countries: list[str]) -> None:
     frame = pd.DataFrame(filtered)
     st.pydeck_chart(
         pdk.Deck(
-            map_provider="carto",
-            map_style="light",   # oppure "dark", "voyager", "positron"
+            map_style="mapbox://styles/mapbox/light-v9",
             initial_view_state=pdk.ViewState(latitude=20, longitude=10, zoom=1.1, pitch=0),
             layers=[
                 pdk.Layer(

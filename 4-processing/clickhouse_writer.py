@@ -111,11 +111,20 @@ class ClickHouseWriter:
                 database=self.database,
                 user=self.user,
                 password=self.password,
+                # Entry nodes to fall back on when `host` cannot be reached. In
+                # intended mode the six ClickHouse servers sit on six different
+                # machines, so losing the one named here would otherwise stop the
+                # pipeline even though the shard's other two replicas hold every
+                # row — the data survives the failure but the connection does not.
+                # Empty in testing mode, where there is only one node to address.
+                alt_hosts=os.getenv("CLICKHOUSE_ALT_HOSTS", "") or None,
                 settings={"use_numpy": False},
             )
             logger.info(
-                "ClickHouse client connected to %s:%d/%s",
+                "ClickHouse client connected to %s:%d/%s%s",
                 self.host, self.port, self.database,
+                f" (alt_hosts={os.getenv('CLICKHOUSE_ALT_HOSTS')})"
+                if os.getenv("CLICKHOUSE_ALT_HOSTS") else "",
             )
         return self._client
 
@@ -261,58 +270,6 @@ class ClickHouseWriter:
         )
         return pd.DataFrame(data, columns=[c[0] for c in cols])
 
-    def query_user_documents(
-        self,
-        cameo_codes=None,
-        fips_codes=None,
-        keywords=None,
-        event_limit: int = 20000,
-        mention_limit: int = 50000,
-    ):
-        """
-        Per-user filter, pushed down into ClickHouse (the scalable path).
-
-        1. Geographic filter on gdelt_events (FINAL): keep events whose
-           Actor1/Actor2CountryCode is in the user's CAMEO set OR whose
-           ActionGeo_/Actor1Geo_/Actor2Geo_CountryCode is in the FIPS set
-           (match if EITHER standard hits). No geo codes -> all recent events.
-        2. Keyword filter on gdelt_mentions (FINAL, so re-ingested duplicates are
-           collapsed) for those events via build_keyword_clause. Every row is
-           searched in all three fields — URL (ngrambf-backed LIKE), article title
-           and article keywords — and a keyword matches when ALL of its tokens are
-           present. No keywords -> every mention of the events.
-
-        Returns (events_df, mentions_df), ready for gold.build_article_rows().
-        """
-        from processor import build_keyword_clause  # local: avoid import cycle
-
-        client = self._get_client()
-
-        geo_sql, geo_params = _build_geo_clause(cameo_codes, fips_codes)
-        ev_params = {**geo_params, "elim": int(event_limit)}
-        ev_sql = (
-            f"SELECT * FROM gdelt_events FINAL WHERE {geo_sql or '1=1'} "
-            f"ORDER BY DATEADDED DESC LIMIT %(elim)s"
-        )
-        edata, ecols = client.execute(ev_sql, ev_params, with_column_types=True)
-        events_df = pd.DataFrame(edata, columns=[c[0] for c in ecols])
-
-        if events_df.empty:
-            mdata, mcols = client.execute(
-                "SELECT * FROM gdelt_mentions LIMIT 0", with_column_types=True)
-            return events_df, pd.DataFrame(mdata, columns=[c[0] for c in mcols])
-
-        event_ids = [int(i) for i in events_df["GLOBALEVENTID"].tolist() if i]
-        kw_sql, kw_params = build_keyword_clause(keywords or [])
-        m_where = "GLOBALEVENTID IN %(ids)s"
-        m_params = {"ids": event_ids, "mlim": int(mention_limit)}
-        if kw_sql:
-            m_where += f" AND {kw_sql}"
-            m_params.update(kw_params)
-        m_sql = f"SELECT * FROM gdelt_mentions FINAL WHERE {m_where} LIMIT %(mlim)s"
-        mdata, mcols = client.execute(m_sql, m_params, with_column_types=True)
-        return events_df, pd.DataFrame(mdata, columns=[c[0] for c in mcols])
-
     def silver_watermark(self):
         """
         Max DATEADDED on gdelt_events — advances each time the validation layer
@@ -368,26 +325,3 @@ def _event_to_row(event: dict) -> tuple:
     )
 
 
-def _build_geo_clause(cameo_codes, fips_codes):
-    """
-    Build the per-user geographic WHERE fragment for gdelt_events.
-
-    CAMEO codes match the actor-affiliation columns (Actor1/Actor2CountryCode);
-    FIPS codes match the geo columns (ActionGeo_/Actor1Geo_/Actor2Geo_CountryCode).
-    Match if EITHER standard hits. Returns ("", {}) when there is no geo filter.
-    """
-    parts: list[str] = []
-    params: dict = {}
-    if cameo_codes:
-        params["cameo"] = list(cameo_codes)
-        parts.append("(Actor1CountryCode IN %(cameo)s OR Actor2CountryCode IN %(cameo)s)")
-    if fips_codes:
-        params["fips"] = list(fips_codes)
-        parts.append(
-            "(ActionGeo_CountryCode IN %(fips)s "
-            "OR Actor1Geo_CountryCode IN %(fips)s "
-            "OR Actor2Geo_CountryCode IN %(fips)s)"
-        )
-    if not parts:
-        return "", {}
-    return "(" + " OR ".join(parts) + ")", params
