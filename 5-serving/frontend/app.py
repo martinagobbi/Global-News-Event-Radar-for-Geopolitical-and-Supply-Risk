@@ -14,8 +14,8 @@ from components.branding import use_neutral_spinner
 
 st.set_page_config(
     page_title="Global News Event Radar for Geopolitical and Supply Risk",
-    page_icon="📡",
     layout="wide",
+    page_icon="favicon.png",
     initial_sidebar_state="expanded",
 )
 
@@ -31,26 +31,33 @@ else:
  
     st.sidebar.title("Global News Event Radar")
     st.sidebar.caption(
-        "Continuously ingests GDELT streams, filtering media noise to isolate "
-        "high-probability events threatening supply chain stability."
+        "Ingests new GDELT data every 15 minutes, filtering media "
+        "noise to isolate events threatening your supply chain stability."
     )
     st.sidebar.write(f"Signed in as `{user_id}`")
-    if st.sidebar.button("Sign out"):
-        logout()
-        st.rerun()
+    
+    # Place Sign Out and Preferences side-by-side using columns
+    col1, col2 = st.sidebar.columns(2)
+    with col1:
+        if st.button("Sign out", use_container_width=True):
+            logout()
+            st.rerun()
+    with col2:
+        if st.button("Preferences", use_container_width=True):
+            st.switch_page("pages/preferences.py")
+            
     st.sidebar.caption(
         f"Inactive users are logged out after {IDLE_TIMEOUT_SECONDS // 60} minutes."
     )
 
-    # Preferences stays in the sidebar: it is the single place where the
-    # perimeter (territories + keywords) is edited, for first-time setup and for
-    # later changes alike. Pages not listed here are not routable at all.
+    # Preferences stays in the sidebar list to remain routable[cite: 1]. 
+    # Use the CSS snippet in components/branding.py to visually hide it from the auto-generated menu.
     page = st.navigation([
-        st.Page("pages/dashboard.py",     title="Radar View", icon="📊", default=True),
-        st.Page("pages/needs_action.py",  title="Needs action", icon="🔴"),
-        st.Page("pages/monitoring.py",    title="Looking out for developments", icon="🟡"),
-        st.Page("pages/archive.py",       title="Archive", icon="🗂️"),
-        st.Page("pages/onboarding.py",    title="Preferences", icon="🧭"),
+        st.Page("pages/dashboard.py",     title="Radar View", default=True),
+        st.Page("pages/needs_action.py",  title="Needs action from us"),
+        st.Page("pages/monitoring.py",    title="Looking out for developments"),
+        st.Page("pages/archive.py",       title="Archive: Not important"),
+        st.Page("pages/preferences.py",   title="Preferences"),
     ])
  
 page.run()

@@ -5,7 +5,7 @@ Two different things can make a card disappear, and a user has no way to tell
 them apart from the outside, so both are stated wherever cards are shown:
 
 1. **Age.** The processing layer deletes events whose most recent article is more
-   than ten years old, from silver and gold alike (4-processing/retention.py).
+   than 365 days old, from silver and gold alike (4-processing/retention.py).
    This applies on every page, without exception.
 
 2. **Preferences.** Gold is rebuilt per user from the territories and keywords
@@ -28,12 +28,12 @@ the wrong sentence.
 
 import streamlit as st
 
-_AGE = ("Any events whose most recent articles are older than 10 years "
+_AGE = ("Any events whose most recent articles are older than 365 days "
         "are automatically removed.")
 
 _FOLLOWS = ("Events that no longer match the territories and keywords you "
-            "registered are also removed from this page — update your "
-            "preferences to change what appears here.")
+            "registered are also removed from this page — thus, update "
+            "your preferences to change what appears here.")
 
 _PINNED = ("Events you file here stay, regardless of any later change to the "
            "territories and keywords you registered.")

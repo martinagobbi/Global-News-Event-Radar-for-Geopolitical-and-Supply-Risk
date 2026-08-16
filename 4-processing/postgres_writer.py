@@ -33,6 +33,8 @@ from datetime import datetime, timezone
 
 import psycopg
 
+from contextlib import contextmanager # For the advisory lock to prevent collision
+
 logger = logging.getLogger("processing.postgres")
 
 _HOST     = os.getenv("POSTGRES_HOST", "pipeline_postgres")
@@ -100,7 +102,19 @@ _ADDED_COLUMNS = [
     ("mention_time", "TIMESTAMP"),
 ]
 
+# Same idea, for pipeline_status. postgres-init/01_schema.sql declares this column
+# too, but that file runs ONLY at first database initialisation, so a volume
+# created before the column existed would never gain it.
+_ADDED_STATUS_COLUMNS = [
+    ("silver_watermark", "VARCHAR(14)"),
+]
+
 _schema_checked = False
+
+# Distinguishes "leave the stored watermark alone" from "set it to NULL". Public
+# because callers pass it explicitly when they tried to read the watermark and
+# failed — see main.recompute_all(). See write_pipeline_status().
+KEEP = object()
 
 
 def ensure_schema() -> None:
@@ -122,6 +136,10 @@ def ensure_schema() -> None:
             for column, ddl_type in _ADDED_COLUMNS:
                 cur.execute(
                     f"ALTER TABLE articles ADD COLUMN IF NOT EXISTS {column} {ddl_type}")
+            for column, ddl_type in _ADDED_STATUS_COLUMNS:
+                cur.execute(
+                    f"ALTER TABLE pipeline_status "
+                    f"ADD COLUMN IF NOT EXISTS {column} {ddl_type}")
             _migrate_to_pair_key(cur)
             conn.commit()
         _schema_checked = True
@@ -333,15 +351,48 @@ def mark_pipeline_stale() -> None:
     logger.warning("Marked pipeline_status=ERROR (silver stopped advancing)")
 
 
-def write_pipeline_status(status: str, ts: datetime | None = None) -> None:
-    """Replace pipeline_status with a single (status, timestamp) row."""
+def write_pipeline_status(status: str, ts: datetime | None = None,
+                          watermark: str | None | object = KEEP) -> None:
+    """
+    Replace pipeline_status with a single (status, timestamp, watermark) row.
+
+    `watermark` defaults to the KEEP sentinel, meaning "carry the stored value
+    forward". That is not the same as None, and the distinction matters: this
+    table holds one row and is rewritten rather than updated, so a plain None
+    default would silently erase the watermark on every status write made by a
+    caller that does not happen to know it — which is most of them.
+    """
     with _connect() as conn:
         cur = conn.cursor()
+        if watermark is KEEP:
+            cur.execute("SELECT silver_watermark FROM pipeline_status LIMIT 1")
+            row = cur.fetchone()
+            watermark = row[0] if row else None
         cur.execute("DELETE FROM pipeline_status")
         cur.execute(
-            "INSERT INTO pipeline_status (status, timestamp_of_last_update) "
-            "VALUES (%(s)s, %(t)s)",
-            {"s": status, "t": _naive_utc(ts or datetime.now(timezone.utc))},
+            "INSERT INTO pipeline_status "
+            "(status, timestamp_of_last_update, silver_watermark) "
+            "VALUES (%(s)s, %(t)s, %(w)s)",
+            {"s": status, "t": _naive_utc(ts or datetime.now(timezone.utc)),
+             "w": watermark},
         )
         conn.commit()
-    logger.info("Wrote pipeline_status=%s to PostgreSQL", status)
+    logger.info("Wrote pipeline_status=%s (silver watermark %s) to PostgreSQL",
+                status, watermark or "unknown")
+
+@contextmanager
+def advisory_lock(lock_id: int = 8273645):
+    """
+    Acquires an exclusive Postgres advisory lock.
+    Forces overlapping recompute tasks to run sequentially to prevent collisions.
+    """
+    # Open a connection strictly to hold the lock using the existing helper
+    with _connect() as conn:
+        cur = conn.cursor()
+        try:
+            # This blocks if another job already holds the lock
+            cur.execute("SELECT pg_advisory_lock(%s)", (lock_id,))
+            yield
+        finally:
+            # Safely release the lock once the job completes or crashes
+            cur.execute("SELECT pg_advisory_unlock(%s)", (lock_id,))

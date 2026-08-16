@@ -17,7 +17,7 @@ def _tag_badge(tag: str | None) -> str:
         return ":orange[Look out for developments]"
     if tag == "archive":
         return ":green[Archived]"
-    return "Untagged"
+    return "You did not apply a tag"
 
 
 def render_event_card(event: dict, context: str = "main") -> None:
@@ -63,35 +63,43 @@ def render_event_card(event: dict, context: str = "main") -> None:
             )
         elif articles and all(a.get("in_raw_text") == 0 for a in articles):
             st.warning(
-                "⚠️ No article for this event was explicitly read by GDELT. "
-                "Sources below are inferred associations and may not directly "
-                "report on this event."
+                "⚠️ Sources on this card are inferred associations and may not directly "
+                "report on a relevant event."
             )
 
-        meta = st.columns(4)
-        meta[0].metric("Articles", len(articles))
-        meta[1].metric("Top confidence", articles[0]["confidence"] if articles else "N/A")
-        meta[2].metric("Goldstein", event["goldstein"])
-        meta[3].metric("CAMEO", event["cameo_code"])
+        meta = st.columns(2)
+        meta[0].metric("Number of articles", len(articles))
+        #meta[1].metric("Top confidence", articles[0]["confidence"] if articles else "N/A")
+        meta[1].metric("Goldstein score", event["goldstein"])
+        #meta[3].metric("General event", event["cameo_label"])
 
-        st.write(f"Risk category: `{event.get('risk_category', 'Not classified')}`")
-        st.write(f"Event date: `{event['event_date']}`")
+        #st.write(f"Risk category: `{event.get('risk_category', 'Not classified')}`") # If we ever want to bring risk_category back, just uncomment this and the related thing in briefing.py
 
-        if top_url:
-            st.link_button("Open top source", top_url)
+        date_to_show = str(event['event_date']).removesuffix(" 00:00:00")
+        st.write(f"Event type that makes this of interest: " + '"' + event["cameo_label"].removesuffix(", not specified below") + '"')
+        st.write(f"Event date: " + date_to_show)
+
+        #if top_url:
+            #st.link_button("Open top source", top_url)
 
         # The first few articles are listed on the card itself, so the reader sees
         # actual coverage without opening anything. The rest — the backend caps the
         # list at 20 — stay behind the expander.
         if articles:
-            st.write("**Articles**")
+            st.write("**Articles (sorted by Confidence score, then Tone)**")
+            i = 0
             for a in articles[:PREVIEW_ARTICLES]:
+                first_article_in_preview = True if i == 0 else False
+                if first_article_in_preview:
+                    st.caption("---------------------------------------------------------")
                 st.markdown(f"- [{a['mention_identifier']}]({a['url']})")
                 st.caption(
-                    f"    Confidence `{a['confidence']}` | "
-                    f"Tone `{a['mention_doc_tone']}` | "
-                    f"InRawText `{a['in_raw_text']}`"
+                    f"**Confidence** that this article is related to this event: **{a['confidence']}%**       |"
+                    f"       **Tone** (−100: max negative; +100: max positive): **{a['mention_doc_tone']}**"
                 )
+                st.caption("---------------------------------------------------------")
+                i += 1
+            i = 0
 
             # Only worth an expander when it would actually reveal something.
             if len(articles) > PREVIEW_ARTICLES:
@@ -99,7 +107,7 @@ def render_event_card(event: dict, context: str = "main") -> None:
                     f"{i + 1}. {a['mention_identifier']}": a
                     for i, a in enumerate(articles)
                 }
-                with st.expander(f"All {len(articles)} articles"):
+                with st.expander(f"All {len(articles)} articles (they are more than {PREVIEW_ARTICLES})"):
                     selected_label = st.selectbox(
                         "Choose an article to open",
                         options=list(article_labels.keys()),
@@ -108,9 +116,8 @@ def render_event_card(event: dict, context: str = "main") -> None:
                     selected = article_labels[selected_label]
                     st.link_button("Open selected article", selected["url"])
                     st.caption(
-                        f"Confidence `{selected['confidence']}` | "
-                        f"Tone `{selected['mention_doc_tone']}` | "
-                        f"InRawText `{selected['in_raw_text']}`"
+                        f"Confidence that this article is related to this event: {selected['confidence']}%       |"
+                        f"       Tone (−100: max negative; +100: max positive): {selected['mention_doc_tone']}"
                     )
         else:
             st.info("No related articles available for this event.")

@@ -76,11 +76,15 @@ def system_status() -> dict:
 
     mongo_error = check_mongo_health()
     if mongo_error:
-        return {
-            "status": "ERROR",
-            "timestamp_of_last_update": pipeline.get("timestamp_of_last_update"),
-            **mongo_error,
-        }
+        # Spread `pipeline` rather than copying named fields out of it. MongoDB
+        # being unreachable says nothing about the PostgreSQL-derived facts —
+        # the last update time, which silver the gold was built from — so they
+        # all still apply and are all still worth showing. Listing them by hand
+        # meant every field added to the status payload had to be remembered
+        # here too, and the watermark was silently dropped in this branch alone
+        # until it was noticed. `status` is pinned last so it wins over
+        # `pipeline`'s own value.
+        return {**pipeline, **mongo_error, "status": "ERROR"}
 
     return pipeline
 

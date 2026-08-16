@@ -7,31 +7,41 @@
         cap lives in memory.xml, and the one-node-per-machine cap for intended
         mode lives in memory.distributed.xml (selected by .env.intended).
 
-        RAISED from 2.5 GB to 3.5 GB when the gold layer moved from Oracle to
-        PostgreSQL. The old figure was chosen to "leave room for Oracle (~1.1 GB)"
-        alongside MongoDB, Keeper and the pipeline; PostgreSQL holds ~26 MB in the
-        same role, so that GB is now free and ClickHouse is the only component
-        that can use it.
+        2.5 GB, leaving room for MongoDB, Keeper, PostgreSQL and all five pipeline
+        layers on the same machine.
 
-        The raise is not cosmetic. The widest per-user query — radar_agrifood's
-        100-keyword filter, a multiSearchAny plus an arrayExists over the stemmed
-        article text — peaks at about 2.5 GB on the 30-day seed, which is exactly
-        at the old ceiling. It therefore failed intermittently, and then
-        reproducibly, with:
+        ── History: raised to 3.5 GB, then put back ─────────────────────────────
+        This was briefly 3.5 GB. The reason no longer exists, and the raise is now
+        actively harmful, so it has been reverted.
 
-            Code: 241. DB::Exception: Memory limit (total) exceeded:
-            would use 2.47 GiB ..., maximum: 2.33 GiB
+        The raise was made when gold moved from Oracle to PostgreSQL, on two
+        grounds. First, Oracle's ~1.1 GB was freed (PostgreSQL holds ~26 MB in the
+        same role). Second, and the real driver: the widest per-user query —
+        radar_agrifood's 100-keyword filter, a multiSearchAny plus an arrayExists
+        over the stemmed article text — peaked at ~2.5 GB on the 30-day seed and
+        failed reproducibly with
 
-        (`maximum` reads below the configured cap because the server reserves a
-        slice for itself.) Gold was never wrong when this happened — the recompute
-        simply aborted and left the previous gold in place — but a recompute that
-        cannot finish is not something to leave in the default configuration.
+            Code: 241. DB::Exception: Memory limit (total) exceeded
 
-        Measured after the change: the whole testing stack runs at ~2.1 GB total,
-        so 3.5 GB for ClickHouse stays inside a 6 GB Docker allocation with room
-        for MongoDB, Keeper, PostgreSQL and all five pipeline layers.
+        THAT QUERY NO LONGER EXISTS. Unifying silver -> gold on Spark moved the geo
+        and keyword predicates out of SQL entirely: ClickHouse is now only asked
+        for partitioned column reads over JDBC, and Spark evaluates the filters.
+        Neither multiSearchAny nor arrayExists appears anywhere in the Python
+        sources any more. Measured 2026-08-16 over three hours of live operation:
+        735 queries, peak query memory 74.54 MiB — roughly 1/34th of the figure
+        the raise was sized for.
+
+        The freed Oracle GB is also no longer free. Spark's driver JVM now runs
+        RESIDENT inside the processing container in local[*] mode, in the same
+        Docker VM, and it is the largest single consumer here. Leaving 3.5 GB
+        reserved for a workload ClickHouse no longer runs squeezes the JVM instead
+        — and when the host runs short, the kernel kills the biggest process,
+        which is that JVM. That failure was observed on 2026-08-16: the JVM died
+        at 19:44:32 and the gold layer stopped advancing. (spark_gold._spark() now
+        rebuilds a dead session, so it recovers either way — but not provoking it
+        is better than recovering from it.)
     -->
-    <max_server_memory_usage>3500000000</max_server_memory_usage>
+    <max_server_memory_usage>2500000000</max_server_memory_usage>
     <mark_cache_size>268435456</mark_cache_size>
     <uncompressed_cache_size>0</uncompressed_cache_size>
 </clickhouse>

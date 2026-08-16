@@ -476,7 +476,8 @@ def get_pipeline_status() -> dict:
     On connection failure, returns an explicit error payload (does not
     silently fall back to "OK") so the frontend can tell the two apart.
     """
-    sql = "SELECT status, timestamp_of_last_update FROM pipeline_status LIMIT 1"
+    sql = ("SELECT status, timestamp_of_last_update, silver_watermark "
+           "FROM pipeline_status LIMIT 1")
     try:
         def _run():
             with _connect() as conn:
@@ -485,7 +486,7 @@ def get_pipeline_status() -> dict:
                     return cur.fetchone()
         row = _with_retry(_run)
         if row:
-            status, updated = row[0], row[1]
+            status, updated, watermark = row[0], row[1], row[2]
             # Freshness is judged here, not taken on trust. The processing layer
             # writes ERROR when it NOTICES silver has stopped advancing, but if
             # that layer is itself down it writes nothing at all, and the last row
@@ -502,6 +503,7 @@ def get_pipeline_status() -> dict:
                     return {
                         "status": "ERROR",
                         "timestamp_of_last_update": str(updated),
+                        "silver_watermark": watermark,
                         "code": "STALE-PIPELINE",
                         "message": (
                             f"The briefing has not been updated for "
@@ -512,9 +514,11 @@ def get_pipeline_status() -> dict:
             return {
                 "status": status,
                 "timestamp_of_last_update": str(updated) if updated else None,
+                "silver_watermark": watermark,
             }
         # Table reachable but empty — processing hasn't run yet, not an error.
-        return {"status": "OK", "timestamp_of_last_update": None}
+        return {"status": "OK", "timestamp_of_last_update": None,
+                "silver_watermark": None}
     except Exception as e:
         logger.error("get_pipeline_status failed (PostgreSQL unreachable): %s", e)
         return {

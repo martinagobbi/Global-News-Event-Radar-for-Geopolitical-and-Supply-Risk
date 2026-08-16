@@ -13,11 +13,17 @@
 #
 # ── Why gold CAN be snapshotted, when the design says it should not be ───────
 # silver_snapshot.sh says gold is deliberately never snapshotted, "so the gold
-# can never drift from what the pipeline would have produced". That is still the
-# rule, and this does not break it: the snapshot is only a HEAD START. Restoring
-# silver advances the watermark, which fires a recompute, which overwrites
-# everything here with a freshly computed result within ~2 minutes. If the two
-# ever disagree, the pipeline wins — automatically, with no action needed.
+# can never drift from what the pipeline would have produced". This does not break
+# that rule, but the reason is narrower than it first appears.
+#
+# On a FIRST RUN the snapshot is only a head start: restoring silver advances the
+# watermark, which fires a recompute, which replaces everything here with a freshly
+# computed result. The pipeline wins, automatically.
+#
+# That argument holds ONLY when gold is empty. Restoring over a gold layer the
+# pipeline has already built is destructive and does NOT self-correct, because the
+# watermark advances on new SILVER, and restoring gold leaves silver untouched.
+# `restore` therefore refuses when gold is non-empty — see the guard below.
 #
 # What you get is a dashboard with real cards immediately, instead of an empty
 # one that fills in later.
@@ -104,10 +110,42 @@ case "${1:-}" in
       exit 1
     fi
 
+    # ── Refuse to overwrite a gold layer the pipeline has already built ──────
+    # This is a FIRST-RUN accelerator. If gold already holds rows, the pipeline
+    # has computed something from the silver actually present — which may include
+    # live slices beyond the 30-day seed, and profiles beyond the three seeded
+    # ones. The seed is then strictly WORSE than what is already there, and
+    # restoring would:
+    #   * delete every card derived from live data, and
+    #   * empty the dashboard for any user who is not one of the three seeded
+    #     accounts, since the dump contains no rows for them.
+    #
+    # And it would NOT self-correct promptly. The watermark trigger fires only
+    # when max(DATEADDED) in silver moves strictly FORWARDS; restoring gold does
+    # not touch silver, so nothing recomputes until the next new GDELT slice
+    # arrives — or never, if the pipeline is stopped.
+    existing=$(pg psql -U "$PG_USER" -d "$PG_DB" -tAc "SELECT count(*) FROM articles")
+    if [ "$existing" -gt 0 ] && [ "${FORCE:-0}" != "1" ]; then
+      echo "REFUSING: gold already holds $existing article rows." >&2
+      echo >&2
+      echo "  The seed is a first-run accelerator and would REPLACE them with the" >&2
+      echo "  $(grep -c '^INSERT INTO public.articles' "$DUMP") rows captured when it was exported —" >&2
+      echo "  losing anything derived from live data, and emptying the dashboard" >&2
+      echo "  for any account that is not one of the three seeded ones." >&2
+      echo >&2
+      echo "  To rebuild gold from the silver you actually have (usually what you" >&2
+      echo "  want), ask the pipeline to recompute:" >&2
+      echo "    docker exec pipeline_processing python3 -c 'import main; main.recompute_all()'" >&2
+      echo >&2
+      echo "  To overwrite anyway:  FORCE=1 $0 restore" >&2
+      exit 1
+    fi
+    [ "$existing" -gt 0 ] && echo "FORCE=1: replacing $existing existing article rows"
+
     echo "restoring gold ..."
-    # Idempotent: emptied first, so restoring twice cannot violate the primary
-    # keys or leave rows from an older export behind. Gold is derived, so there
-    # is nothing here that is not reproducible.
+    # Emptied first, so restoring twice cannot violate the primary keys or leave
+    # rows from an older export behind. Safe because gold is derived: a recompute
+    # rebuilds whatever this discards.
     pg psql -U "$PG_USER" -d "$PG_DB" -q -c "TRUNCATE articles, user_articles"
     # -o /dev/null: the dump opens with a set_config() SELECT whose result table
     # would otherwise be printed as if it were output.
@@ -124,8 +162,12 @@ case "${1:-}" in
         "SELECT (SELECT count(*) FROM articles) || ' articles, ' ||
                 (SELECT count(*) FROM user_articles) || ' user_articles'")
     printf '  %s  (age_days recomputed for %s rows)\n' "$rows" "$fixed"
-    echo "gold restored — the next recompute will overwrite it with a freshly"
-    echo "computed result, which is the intended behaviour"
+    echo "gold restored."
+    echo "The next recompute replaces this with a freshly computed result — but"
+    echo "note it fires when SILVER advances, which restoring gold does not do."
+    echo "With the pipeline running, the next GDELT slice (<= 15 min) triggers it."
+    echo "To rebuild immediately:"
+    echo "  docker exec pipeline_processing python3 -c 'import main; main.recompute_all()'"
     ;;
 
   *)

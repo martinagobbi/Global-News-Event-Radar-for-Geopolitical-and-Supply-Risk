@@ -37,8 +37,8 @@ _RUNNING_INDICATOR_CSS = """
     [data-testid="stStatusWidgetRunningIcon"]::after { display: none; }
 @keyframes radar-spin { to { transform: rotate(360deg); } }
 
-/* Colour-code the two triage links in the sidebar navigation. Streamlit builds
-   the nav href from the page's script name, so we match on that. */
+/* Colour-code the triage links in the sidebar navigation. Streamlit builds
+   the nav href from the page's script name (or root for the default page). */
 [data-testid="stSidebarNav"] a[href$="/needs_action"] span,
 [data-testid="stSidebarNav"] a[href*="needs_action"] span {
     color: #8B0000 !important;   /* dark red */
@@ -49,9 +49,25 @@ _RUNNING_INDICATOR_CSS = """
     color: #9A7D0A !important;   /* dark yellow */
     font-weight: 600;
 }
+[data-testid="stSidebarNav"] a[href="/"] span,
+[data-testid="stSidebarNav"] a[href$="/dashboard"] span,
+[data-testid="stSidebarNav"] a[href*="dashboard"] span {
+    color: #64B5F6 !important;   /* light blue */
+    font-weight: 600;
+}
+[data-testid="stSidebarNav"] a[href$="/archive"] span,
+[data-testid="stSidebarNav"] a[href*="archive"] span {
+    color: #424242 !important;   /* dark grey */
+    font-weight: 600;
+}
+
+/* Hide preferences from sidebar */
+[data-testid="stSidebarNav"] a[href$="/preferences"],
+[data-testid="stSidebarNav"] a[href*="preferences"] {
+    display: none !important;
+}
 </style>
 """
-
 
 def use_neutral_spinner() -> None:
     """Swap Streamlit's default 'running man' running indicator for a neutral

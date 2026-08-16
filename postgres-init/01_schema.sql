@@ -92,7 +92,14 @@ CREATE TABLE user_articles (
   CONSTRAINT pk_user_articles PRIMARY KEY (user_id, doc_id, global_event_id)
 );
 
+-- silver_watermark is max(DATEADDED) in ClickHouse gdelt_events as of the last
+-- publish: the slice id the gold on display was built from. It is carried through
+-- PostgreSQL rather than read live because the serving tier has no ClickHouse
+-- client — gold is the only store it talks to for events. Kept as the raw 14-char
+-- GDELT slice id (YYYYMMDDHHMMSS) so it compares lexicographically, exactly as the
+-- processing layer's trigger compares it.
 CREATE TABLE pipeline_status (
   status                   VARCHAR(10),
-  timestamp_of_last_update TIMESTAMP
+  timestamp_of_last_update TIMESTAMP,
+  silver_watermark         VARCHAR(14)
 );

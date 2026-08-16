@@ -36,11 +36,24 @@ def _silver_watermark_loop(ch_factory, recompute_all, report_stale=None) -> None
     """
     Recompute everyone whenever the silver store grows.
 
-    The watermark is max(DATEADDED) in gdelt_events, and it is required to move
-    strictly FORWARDS. An equal value means nothing new arrived; a lower one means
-    the store was rebuilt behind us (a seed restored over newer data, say), and
-    recomputing then would rebuild gold from a smaller history than it already
-    reflects. Either way there is nothing to do.
+    The watermark is max(DATEADDED) in gdelt_events. An equal value means nothing
+    new arrived. A HIGHER value means silver grew, so gold is rebuilt.
+
+    A LOWER value means silver shrank — `silver_snapshot.sh trim`/`wipe`/
+    `recreate`, or a volume recreated by `docker compose down -v` and refilled
+    from the seed. This used to be logged and otherwise ignored, on the reasoning
+    that rebuilding gold from a shorter history than it already reflects would be
+    a downgrade. That was wrong twice over. Gold describing events silver no
+    longer holds is not a richer gold, it is an inconsistent one; and refusing to
+    adopt the new value left `last` latched at the old high-water mark forever, so
+    `last_advance` never reset and the staleness reporter below fired 45 minutes
+    later on a pipeline that was working perfectly. The dashboard then showed
+    "technical difficulties" until the container happened to be restarted.
+
+    So a backwards move is now treated as what it is — a real change to silver —
+    and triggers the same recompute a forwards move does. Nothing here needs to
+    distinguish the two; only the log line differs, because the cause is worth
+    knowing.
 
     If the watermark has not advanced within SILVER_STALE_SECONDS, the upstream
     pipeline has stopped delivering. That is reported rather than passed over in
@@ -54,16 +67,25 @@ def _silver_watermark_loop(ch_factory, recompute_all, report_stale=None) -> None
         try:
             with ch_factory() as ch:
                 watermark = ch.silver_watermark()
-            if watermark and (last is None or watermark > last):
+            if watermark and last is not None and watermark < last:
+                # Checked BEFORE the grew/unchanged case so the log says which
+                # happened. recompute_all() is deliberately the same call: gold
+                # mirrors silver, whichever direction silver moved.
+                logger.warning("Silver watermark went BACKWARDS (%s -> %s) — "
+                               "silver was rebuilt or trimmed behind us; "
+                               "adopting the new value and recomputing",
+                               last, watermark)
+                recompute_all()
+                last = watermark
+                last_advance = time.monotonic()
+                reported_stale = False
+            elif watermark and (last is None or watermark > last):
                 logger.info("Silver watermark %s -> %s; running recompute_all()",
                             last, watermark)
                 recompute_all()
                 last = watermark
                 last_advance = time.monotonic()
                 reported_stale = False
-            elif watermark and last is not None and watermark < last:
-                logger.warning("Silver watermark went backwards (%s -> %s); "
-                               "not recomputing", last, watermark)
 
             idle = time.monotonic() - last_advance
             if idle > SILVER_STALE_SECONDS and not reported_stale:

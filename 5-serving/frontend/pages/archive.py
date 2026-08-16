@@ -16,7 +16,7 @@ if is_first_login(user_id):
     st.warning("The archive becomes available after first-time setup.")
     st.stop()
 
-st.caption("Events removed from the main Radar Briefing with the 'Not important / Archive' tag.")
+st.caption("Events removed from the Radar View with the 'Archive: Not important' tag.")
 render_retention_notice(preferences="follows")
 
 archived = get_archived_events(user_id)

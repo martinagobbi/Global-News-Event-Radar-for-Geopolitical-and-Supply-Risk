@@ -8,21 +8,21 @@ def render_tag_buttons(global_event_id: str, context: str = "main") -> None:
     user_id = get_current_user()
 
     if col1.button(
-        "Needs action from us",
+        "🔴 Apply tag: Needs action from us",
         key=f"{context}_needs_action_{global_event_id}",
     ):
         set_event_tag(user_id, global_event_id, "requires_action")
         st.success("Event tagged as needing action.")
 
     if col2.button(
-        "Look out for developments",
+        "🟡 Apply tag: Look out for developments",
         key=f"{context}_monitor_{global_event_id}",
     ):
         set_event_tag(user_id, global_event_id, "monitor")
         st.success("Event tagged for monitoring.")
 
     if col3.button(
-        "Not important / Archive",
+        "Archive: Not important",
         key=f"{context}_archive_{global_event_id}",
     ):
         set_event_tag(user_id, global_event_id, "archive")

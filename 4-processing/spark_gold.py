@@ -61,6 +61,8 @@ from pyspark.sql.types import BinaryType
 import countries
 from processor import normalize_keyword, tokenize_keyword_enriched, stem_token
 
+import urllib.request
+
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s [%(levelname)s] %(name)s — %(message)s")
 logger = logging.getLogger("spark_gold")
@@ -113,6 +115,10 @@ def _doc_id(url: str):
 
 doc_id_udf = F.udf(_doc_id, BinaryType())
 
+# The one session this process uses. Held here rather than relying solely on
+# getOrCreate's internal cache, so _spark() can notice it has died and replace it.
+_SESSION: SparkSession | None = None
+
 
 def _spark() -> SparkSession:
     """
@@ -133,7 +139,99 @@ def _spark() -> SparkSession:
     rather than a one-shot spark-submit: building a session costs seconds (a JVM
     start in local mode, a cluster handshake otherwise), and a recompute runs
     whenever silver advances or a user edits their preferences.
+
+    ── Why the liveness probe below is not optional ─────────────────────────────
+    `getOrCreate` caches the session in PySpark's own module state and hands it
+    back WITHOUT checking that the JVM behind it still exists. If the JVM dies —
+    killed by the host running short of memory, most likely, since the driver
+    runs inside this container in local[*] mode — every later call returns that
+    dead object and fails in milliseconds with
+
+        py4j.protocol.Py4JNetworkError: Answer from Java side is empty
+        pyspark ... SparkSession$ does not exist in the JVM
+        [Errno 111] Connection refused          (once the gateway socket is gone)
+
+    Observed 2026-08-16: the JVM died at 19:44:32 and the watermark trigger then
+    failed every 60 s for the next 40 minutes, each attempt dying in ~40 ms. The
+    gold layer froze at the 19:30 slice while silver kept advancing normally, and
+    nothing recovered it until the container was restarted by hand — the trigger
+    has no way to tell "Spark is broken" from "this recompute failed", so it just
+    retried the same corpse forever.
+
+    So the session is probed before use and rebuilt if it is gone. The probe is a
+    single O(1) call that has to cross the py4j bridge, which is exactly what
+    proves the JVM is still answering.
     """
+    global _SESSION
+    if _SESSION is not None and not _session_alive(_SESSION):
+        logger.warning("the Spark JVM is gone; discarding the dead session and "
+                       "building a new one")
+        # try_stop=False: the probe has already established the JVM is not
+        # answering, so stop() has nothing to talk to. It does not raise in that
+        # case, it BLOCKS on the socket until py4j gives up, which stalls this
+        # thread — and this thread is the watermark trigger, so the whole pipeline
+        # waits on a call that cannot succeed.
+        _forget_session(try_stop=False)
+        _SESSION = None
+    if _SESSION is None:
+        _SESSION = _build_session()
+    return _SESSION
+
+
+def _session_alive(spark: SparkSession) -> bool:
+    """True only if the JVM behind `spark` is still answering."""
+    try:
+        # isStopped() is trivial on the Java side but still a real round trip, so
+        # a dead gateway raises here rather than returning a stale answer.
+        return not spark.sparkContext._jsc.sc().isStopped()
+    except Exception:  # noqa: BLE001 — any failure means unusable, for any reason
+        return False
+
+
+def _forget_session(try_stop: bool = True) -> None:
+    """
+    Clear PySpark's internal caches so the next builder call really builds.
+
+    Without this, `getOrCreate` would find the dead session in its own class-level
+    state and hand it straight back, and the rebuild would be a no-op.
+
+    `try_stop` is False on the recovery path. stop() is only worth calling when
+    the JVM is alive; against a dead one it blocks on the socket instead of
+    raising, and swallowing exceptions does not help with a hang.
+
+    `_gateway` and `_jvm` MUST be cleared along with the session objects, and this
+    is the part that is easy to miss. The py4j gateway is a PROCESS-global, and
+    SparkContext._ensure_initialized only launches a new one when it is falsy:
+
+        if not SparkContext._gateway:
+            SparkContext._gateway = gateway or launch_gateway(conf)
+            SparkContext._jvm = SparkContext._gateway.jvm
+
+    So clearing only the session state lets the rebuild reuse the dead gateway,
+    and the "new" session fails with the same [Errno 111] Connection refused as
+    the old one. Measured: with the session state cleared but the gateway left in
+    place, recovery failed for 9 minutes straight until the container was
+    restarted. Only clearing the gateway makes launch_gateway start a new JVM.
+    """
+    if try_stop:
+        try:
+            if _SESSION is not None:
+                _SESSION.stop()
+        except Exception:  # noqa: BLE001 — the usual case: nothing left to stop
+            pass
+    try:
+        from pyspark import SparkContext
+        SparkSession._instantiatedSession = None
+        SparkSession._activeSession = None
+        SparkContext._active_spark_context = None
+        # The two that actually force a new JVM to be launched.
+        SparkContext._gateway = None
+        SparkContext._jvm = None
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("could not clear the cached Spark session: %s", exc)
+
+
+def _build_session() -> SparkSession:
     return (
         SparkSession.builder
         .appName("radar-silver-to-gold")
@@ -186,7 +284,7 @@ def read_partitioned(spark, table: str):
     )
 
 
-def build_catalogue(events, mentions):
+def build_catalogue(events, mentions, cameo_lookup):
     """
     events x mentions -> the `articles` rows, as a distributed join.
 
@@ -228,7 +326,6 @@ def build_catalogue(events, mentions):
           .withColumn("risk_category", F.lit(""))
           .withColumn("goldstein", F.col("GoldsteinScale").cast("double"))
           .withColumn("cameo_code", F.col("EventCode").cast("string"))
-          .withColumn("cameo_label", F.lit(""))
           .withColumn("actor", F.col("Actor1Name"))
           .withColumn("latitude", F.col("ActionGeo_Lat").cast("double"))
           .withColumn("longitude", F.col("ActionGeo_Long").cast("double"))
@@ -240,6 +337,16 @@ def build_catalogue(events, mentions):
                       F.to_timestamp(F.col("MentionTimeDate").cast("string"),
                                      "yyyyMMddHHmmss"))
     )
+
+    # Broadcast join to map the labels
+    df = df.join(
+        F.broadcast(cameo_lookup),
+        df["cameo_code"] == cameo_lookup["lookup_code"],
+        how="left"
+    ).withColumn(
+        "cameo_label",
+        F.coalesce(F.col("lookup_label"), F.lit("Unknown"))
+    ).drop("lookup_code", "lookup_label")
 
     # ONE de-duplication, on (doc_id, global_event_id) — the true grain, matching
     # silver's gdelt_mentions ORDER BY key. Collapsing on doc_id alone, which this
@@ -560,20 +667,31 @@ def publish(processed_uids: list[str]) -> None:
                             "events protected)", cur.rowcount, len(protected))
 
         state = read_pipeline_status()
+        # The watermark is read back and re-inserted rather than left out. This
+        # job does not know it — it reads silver over JDBC and never asks for
+        # max(DATEADDED) — but the row is DELETEd and re-INSERTed here, so
+        # omitting the column would blank it on every publish. recompute_user()
+        # publishes without going through main.recompute_all(), which is the
+        # caller that knows the real value, so there would be no one to restore it.
+        cur.execute("SELECT silver_watermark FROM pipeline_status LIMIT 1")
+        row = cur.fetchone()
+        watermark = row[0] if row else None
         cur.execute("DELETE FROM pipeline_status")
         cur.execute(
-            "INSERT INTO pipeline_status (status, timestamp_of_last_update) "
-            "VALUES (%(s)s, %(t)s)",
+            "INSERT INTO pipeline_status "
+            "(status, timestamp_of_last_update, silver_watermark) "
+            "VALUES (%(s)s, %(t)s, %(w)s)",
             # Naive UTC, to match postgres_writer: an aware value written to a
             # TIMESTAMP (without time zone) column is converted using the
             # session's TimeZone and the offset then dropped, so the stored
             # instant would depend on server configuration.
             {"s": state,
-             "t": datetime.now(timezone.utc).replace(tzinfo=None)},
+             "t": datetime.now(timezone.utc).replace(tzinfo=None),
+             "w": watermark},
         )
-        logger.info("pipeline_status set to %s", state)
+        logger.info("pipeline_status set to %s (watermark %s)",
+                    state, watermark or "unknown")
         conn.commit()
-
 
 def recompute(only_user: str | None = None) -> dict:
     """
@@ -610,7 +728,51 @@ def recompute(only_user: str | None = None) -> dict:
         logger.warning("silver is empty — nothing to do")
         return {"users": 0, "articles": 0, "status": "EMPTY"}
 
-    catalogue = build_catalogue(events, mentions).cache()
+    # 1. Read the file into standard Python memory ON THE DRIVER
+    data = []
+    url = "https://www.gdeltproject.org/data/lookups/CAMEO.eventcodes.txt"
+    cameo_file = Path("CAMEO.eventcodes.txt")
+
+    # 1. Try URL
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=10) as response:
+            lines = response.read().decode("utf-8").splitlines()
+            header = True
+            for line in lines:
+                parts = line.strip().split("\t")
+                if header or len(parts) < 2:
+                    header = False
+                    continue
+                data.append((parts[0].strip(), parts[1].strip()))
+    except Exception as e:
+        logger.warning(f"Could not fetch or parse CAMEO eventcodes from URL ({e}). Falling back to local file.")
+        data = []
+
+    # 2. Fall back to local file if URL fetch/parse failed
+    if not data and cameo_file.exists():
+        try:
+            with open(cameo_file, "r", encoding="utf-8") as f:
+                header = True
+                for line in f:
+                    parts = line.strip().split("\t")
+                    if header or len(parts) < 2:
+                        header = False
+                        continue
+                    data.append((parts[0].strip(), parts[1].strip()))
+        except Exception as e:
+            logger.warning(f"Could not read or parse local CAMEO file ({e}).")
+
+    # 3. Push into Spark
+    schema = ["lookup_code", "lookup_label"]
+    if not data:
+        logger.warning("CAMEO.eventcodes.txt not found or could not be loaded! Labels will default to 'Unknown'")
+
+    cameo_lookup = spark.createDataFrame(data, schema)
+
+    # 4. Pass it to the catalogue
+    catalogue = build_catalogue(events, mentions, cameo_lookup).cache()
+
     logger.info("catalogue built: %d candidate articles", catalogue.count())
 
     # Per-user sets: each predicate is evaluated across the cluster.

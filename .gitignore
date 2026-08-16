@@ -68,3 +68,5 @@ Thumbs.db
 # 9. SMALL
 # Sometimes I will render a README.html from README.md
 README.html
+# A file where I draft commit messages
+.prepping_latest_commit_message.txt

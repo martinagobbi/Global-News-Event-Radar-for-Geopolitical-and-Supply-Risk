@@ -41,6 +41,59 @@ That is the price of having ONE implementation of silver → gold instead of two
 alternative was keeping a separate pandas path for testing mode, which is exactly the
 duplication that let the two versions drift apart in the first place.
 
+### Memory allowance, layer by layer
+
+Every container in testing mode, ingestion through serving frontend. "Allowance"
+is the ceiling the component is *permitted*; "measured" is steady-state usage on
+the 30-day seed plus live slices, taken 2026-08-16 on a 6.77 GiB Docker VM.
+
+| Layer | Container | Allowance | Measured | Where the allowance is set |
+|----|----|----|----|----|
+| 1 — ingestion | `pipeline_ingestion` | uncapped | 51 MiB | — |
+| 2 — parsing | `pipeline_parsing` | uncapped | 43 MiB | — |
+| 3 — validation | `pipeline_validation` | uncapped | 86 MiB | — |
+| 4 — processing | `pipeline_processing` | uncapped (Spark driver defaults to a 1 GB heap) | **1.66 GiB** | `spark.driver.memory`, unset |
+| silver store | `pipeline_clickhouse_s1r1` | **2.5 GB** | 1.52 GiB | `clickhouse/memory.local.xml` |
+| coordination | `pipeline_ch_keeper_1` | uncapped | 107 MiB | — |
+| profiles/tags | `pipeline_mongo1` | **2.88 GB** WiredTiger cache | 145 MiB | MongoDB default: ½(RAM) − 1 GB |
+| gold store | `pipeline_postgres` | uncapped (`shared_buffers` 128 MB default) | 34 MiB | — |
+| 5 — backend | `radar-backend` | uncapped | 52 MiB | — |
+| 5 — frontend | `radar-frontend` | uncapped | 131 MiB | — |
+
+Two things this table makes visible that are worth stating outright.
+
+**The allowances oversubscribe the VM; the measurements do not.** ClickHouse
+(2.5 GB) plus MongoDB's cache (2.88 GB) plus the Spark driver (~1.7 GB) is over
+7 GB on a 6.77 GiB VM. Nothing fails today only because MongoDB never approaches
+its cache ceiling — it holds three user profiles and some tags, 145 MiB against
+2.88 GB permitted. It is a latent overcommit, not a safe margin, and it is the
+first thing to look at if the JVM is killed again.
+
+**Only ClickHouse is explicitly capped.** Everything else takes a default. That is
+defensible for the pipeline layers, which are small and flat, but it means the two
+largest consumers — the Spark JVM and MongoDB's cache — are bounded by their own
+defaults rather than by anything this project decided.
+
+**In intended mode the shape is different, and easier.** Each store machine runs
+one ClickHouse node (`clickhouse/memory.distributed.xml`, **4 GB**, sized for an
+8 GB machine) plus at most one Keeper and one MongoDB member or PostgreSQL node.
+Spark is the big change: `spark-master` and `spark-worker` are real services on
+the pipeline machine, so the executors no longer share a container with the
+processing layer, and each worker is bounded by `SPARK_WORKER_MEMORY` (default
+**2G**) rather than by nothing. Only the *driver* JVM remains resident in the
+processing container. The oversubscription described above is therefore a
+testing-mode problem specifically — it comes from putting every component, Spark
+included, on one machine.
+
+**On ClickHouse's 2.5 GB.** This was briefly 3.5 GB, raised when Oracle's ~1.1 GB
+was freed by the move to PostgreSQL and because the widest per-user keyword query
+peaked right at 2.5 GB and failed with `Code: 241`. Both reasons have since
+expired: unifying silver → gold on Spark moved that predicate out of SQL entirely,
+so ClickHouse now only serves partitioned column reads — 735 queries over three
+live hours peaked at **74.54 MiB** — and the freed gigabyte is no longer free,
+because the Spark driver now runs resident in the same VM. See
+`clickhouse/memory.local.xml`.
+
 Below these thresholds the ClickHouse nodes are terminated under memory pressure
 and restart in a loop, which appears as queries timing out or returning nothing
 rather than as an obvious error.
@@ -389,11 +442,32 @@ because the Spark job runs once per user profile. `gold_snapshot.sh restore` loa
 a committed dump of `articles` and `user_articles` in **under a second**.
 
 It does not weaken the rule that gold must never drift from what the pipeline would
-produce. The snapshot is only a **head start**: restoring silver advances the
-watermark, which fires a recompute, which overwrites all of it with a freshly
-computed result a couple of minutes later. If the snapshot and the pipeline ever
-disagree, the pipeline wins, automatically. What the seed buys is a dashboard with
-real cards immediately rather than an empty one that fills in.
+produce — but the reason is narrower than it looks, and worth stating precisely.
+
+**On a first run** the snapshot is only a head start: restoring *silver* advances the
+watermark, which fires a recompute, which replaces all of it a couple of minutes
+later. The pipeline wins, automatically.
+
+**That argument holds only while gold is empty.** Restoring over a gold layer the
+pipeline has already built is destructive, and does not self-correct: `restore`
+truncates both tables, and the watermark fires on new **silver**, which restoring
+gold does not touch. So nothing recomputes until the next GDELT slice arrives — or
+never, if the pipeline is stopped. Anything derived from live data would be gone in
+the meantime, and any account other than the three seeded ones would show an empty
+dashboard, because the dump contains no rows for them.
+
+`restore` therefore **refuses when gold is non-empty**, and points at the command
+that rebuilds gold from the silver you actually have:
+
+```
+REFUSING: gold already holds 5,412 article rows.
+  To rebuild gold from the silver you actually have (usually what you want):
+    docker exec pipeline_processing python3 -c 'import main; main.recompute_all()'
+  To overwrite anyway:  FORCE=1 ./bootstrap/gold_snapshot.sh restore
+```
+
+What the seed buys is a dashboard with real cards immediately on a fresh clone,
+rather than an empty one that fills in over two minutes.
 
 **One column has to be repaired on restore, and it is worth knowing why.** Every
 other value in gold is absolute — timestamps, ids, text — and keeps its meaning
@@ -402,6 +476,20 @@ row was written, and the dashboard filters on it (`age_days <= briefing_days`). 
 dump restored a month later would make every article a month too young. So the
 restore recomputes it from `event_date`, which is absolute. Verified after a
 restore: all 607 rows satisfy `age_days = CURRENT_DATE − event_date`.
+
+**Silver's `restore` has no such guard, and needs none.** The two are asymmetric for
+a reason worth stating. Silver holds append-only facts keyed on `GLOBALEVENTID`, so
+re-inserting the seed over live data is well defined: `restore` only `INSERT`s,
+never truncates, and `ReplacingMergeTree` collapses the repeats by key. Verified
+against a store holding 25 live events beyond the seed — before and after the
+restore it read 103,997 rows, 25 of them live, newest timestamp unchanged, and
+exactly 103,972 in the seed window rather than double. Silver's destructive
+operations are separately named and say so: `wipe`, `trim`, `recreate`.
+
+Gold cannot work that way, because it is derived per-user state rather than facts.
+A user's article set is *rebuilt*, not merged — unioning an old set with a new one
+gives an answer that matches neither — so the restore must replace wholesale, which
+is exactly why it needs a guard that silver does not.
 
 **Re-export it when the filter logic changes** — `./bootstrap/gold_snapshot.sh
 export`. Gold is derived, so the committed dump is only valid for the code that
@@ -417,31 +505,53 @@ above in order:
 | Step | What it waits for | First run | Every later run |
 |----|----|----|----|
 | 1 | ClickHouse and PostgreSQL accepting connections | 4 s | 4 s |
-| 2 | `--build`, pipeline started, silver schema created | **≈ 7 min** | 15 s |
+| 2 | `--build` of **five** images, pipeline started, schema created | **7–10 min** | 15 s |
 | 3 | 30-day silver seed restored | 7 s | 7 s |
 | 4 | three profiles created through the backend | 1 s | 1 s |
 | 5 | gold seed restored | **< 1 s** | < 1 s |
-| 6 | dashboard answering on :8501 | 8 s | 8 s |
-| | **total to a working dashboard** | **≈ 7½ min** | **≈ 35 s** |
+| 6 | frontend image **built**, dashboard answering on :8501 | **≈ 160 s** | 8 s |
+| | **total to a working dashboard** | **10–13 min** | **≈ 35 s** |
 
-**Step 2 is the whole story on a first run, and it is a download, not a build.**
-The processing image is built on the Spark base, which is about 1.5 GB, and the
-image itself lands at ~2.7 GB. Measured here: 429 s with nothing cached, and ~7 s
-when only the build cache was reused — so essentially all of it is fetching the
-base image, and how long it takes depends on the connection rather than on this
-project.
+**Step 2 is the whole story on a first run, and it has two separate costs.** The
+pipeline builds **five** images, and they are not alike:
 
-Docker reuses work at three independent levels, which is why "I deleted the image
-and it still only took 15 seconds" is misleading: `docker rmi radar-processing`
-removes only the *tag*. The base image and BuildKit's layer cache are separate and
-survive it. To reproduce a genuine first run:
+| Image | Built by | Base | First-build cost |
+|----|----|----|----|
+| processing | step 2 | `bitnamilegacy/spark:3.5` | **≈ 429 s** — almost entirely pulling the ~1.5 GB base |
+| validation | step 2 | `python:3.11-slim` | 126 s `pip install` + 15 s NLTK data |
+| ingestion | step 2 | `python:3.11-slim` | 102 s `pip install` |
+| parsing | step 2 | `python:3.11-slim` | 91 s `pip install` |
+| backend | step 2 | `python:3.11-slim` | 85 s `pip install` |
+| **frontend** | **step 6** | `python:3.11-slim` | **128 s `pip install` + 28 s export** |
+
+The frontend is easy to overlook because it is built by a **different compose file**
+(`5-serving/docker-compose.serving.yml`) — it is not part of step 2's `--build`, and
+it runs on the user's machine rather than the operator's.
+
+BuildKit builds them concurrently, so the four Python images together take about
+**152 s of wall clock**, not the sum of their parts. Add the Spark pull, which
+overlaps only partly, and a true first build lands somewhere between **7 and 10
+minutes** depending on connection speed. Every later build is seconds, because
+every one of those layers is cached and only `COPY . .` re-runs.
+
+Two of those figures were measured separately — 429 s with the four Python images
+already cached, and 152 s with processing already cached — so the combined range is
+a bound rather than a single stopwatch reading.
+
+**Reproducing a genuine first run means purging all five images plus the base**,
+not just the one. Removing `radar-processing` alone leaves the other four fully
+cached and makes step 2 look like seconds:
 
 ```bash
-docker compose --env-file .env.testing down
+docker compose -f 5-serving/docker-compose.serving.yml down --rmi local   # frontend
+docker compose --env-file .env.testing down --rmi local                   # the four python images
 docker compose --env-file .env.testing -f docker-compose.stores.yml down
-docker rmi -f radar-processing:latest bitnamilegacy/spark:3.5   # tag AND base
-docker builder prune -af                                        # layer cache
+docker rmi -f radar-processing:latest bitnamilegacy/spark:3.5             # custom tag + base
+docker builder prune -af                                                   # the layer cache
 ```
+
+`--rmi local` covers the images Compose names after the project; `radar-processing`
+carries an explicit tag, so it needs removing by name.
 
 **Without step 5** — if you skip the gold seed — the dashboard starts empty and
 fills in over roughly **two minutes**. Creating three profiles fires the MongoDB
@@ -1223,7 +1333,7 @@ The constraint this creates: ClickHouse refuses a **distributed subquery nested
 inside a distributed query** (`distributed_product_mode = 'deny'`), so
 `… WHERE GLOBALEVENTID IN (SELECT … FROM gdelt_mentions …)` fails with
 `Code: 288`. Every query in the project therefore uses plain aggregates and literal
-id lists — see [Retention](#retention-the-ten-year-rule), where this is worked
+id lists — see [Retention](#retention-the-365-day-rule), where this is worked
 through in full. In testing mode the planner has one shard and nothing to distribute,
 so the restriction never bites and a bad query shape would pass unnoticed.
 
@@ -1552,9 +1662,12 @@ waiting for new data to arrive. This is also why MongoDB runs as a replica set e
 in testing mode: change streams are unavailable on a standalone server.
 
 The watermark trigger covers the other direction — new data arriving for existing
-preferences. It deliberately fires only when the watermark **increases**, so
-restoring an older snapshot onto a cluster that has already seen newer data will
-not trigger it; that case needs one manual `recompute_all()`.
+preferences. It fires whenever the watermark **changes**: upwards when a slice
+arrives, and downwards when silver is trimmed, wiped or restored over. The
+downward case used to be ignored, which left the trigger stuck and the dashboard
+reporting a stalled pipeline that was in fact healthy; see
+[Watermarking](#watermarking-how-the-pipeline-knows-it-is-making-progress). No
+manual `recompute_all()` is needed for it any more.
 
 ## Why enrichment never reaches 100%
 
@@ -1731,14 +1844,14 @@ The two published lookups do not cover an identical set of places. Reconciling t
 
 Reconciliation also required correcting errors in the published data — the FIPS list mislabels Guinea's code as Equatorial Guinea, and labels Slovakia's code as Czechoslovakia — and merging divergent spellings of the same place, such as `Cote dIvoire` against `Ivory Coast`, and `Columbia` against `Colombia`. The Palestinian territories are consolidated into a single entry carrying all five related codes, so that selecting it matches both actor and location.
 
-## Retention: the ten-year rule
+## Retention: the 365-day rule
 
 Everything else in the pipeline either appends or rebuilds. Silver is
 append-only, gold's `articles` is upserted, and until this rule existed **nothing
 in either store ever aged out** — both grew for as long as the pipeline ran, and
 the only removal was the manual `silver_snapshot.sh trim`.
 
-A daily job now deletes events that have gone quiet for a decade, together with
+A daily job now deletes events that have gone quiet for a year, together with
 everything hanging off them:
 
 | Store | What is removed |
@@ -1747,12 +1860,12 @@ everything hanging off them:
 | PostgreSQL | its rows in `user_articles`, then in `articles` |
 | MongoDB | any user's tag pointing at it |
 
-**Ten years is a starting point, not a fixed constant.** It is set by
-`RETENTION_YEARS`, so shortening it is a one-line change requiring no migration
+**365 days is a starting point, not a fixed constant.** It is set by
+`RETENTION_DAYS`, so changing it is a one-line change requiring no migration
 and no code edit — set the variable on the processing service and the next run
-uses the new cutoff. A shorter window is likely to be wanted once the store has
-real volume behind it; ten years was chosen simply because it cannot delete
-anything the project currently holds, which makes it a safe default to ship.
+uses the new cutoff. The window is expressed in days rather than years so it can
+be tuned at the granularity the store actually turns over at; it still cannot
+delete anything the project currently holds, which keeps it safe to ship.
 
 **The clock read is `MentionTimeDate`, the article's own timestamp.** Expiry is
 `max(MentionTimeDate)` over an event's mentions — the newest article about it.
@@ -1762,7 +1875,7 @@ keeps attracting coverage: the event row is stamped once, but articles arrive fo
 as long as anyone is still writing. Measuring from the event date would delete a
 story that is still being reported. Measuring from its most recent article means
 an event survives exactly as long as the world keeps talking about it, and ages
-out ten years after the last word. An event that never had a mention at all has
+out 365 days after the last word. An event that never had a mention at all has
 no "most recent article", so it falls back to its own `DATEADDED` — otherwise
 such rows could never expire.
 
@@ -1810,10 +1923,11 @@ result on one shard and on two.
 **Deletes are issued in batches**, because the ids are substituted into the SQL
 text and `max_query_size` caps a statement at 256 KB — roughly 21,800 ids, or six
 days of this pipeline's output. A nightly run is nowhere near that: only the events
-that turned ten years old *that day* expire, some 3,500 of them. The cases that
-would overflow are a machine that was off for a week or more, whose catch-up run
-clears the whole backlog at once, and the first run after `RETENTION_YEARS` is
-shortened, which retires years of history in one go.
+that crossed the cutoff *that day* expire, some 3,500 of them — one day of output,
+a figure that does not change with the window length. The cases that would overflow
+are a machine that was off for a week or more, whose catch-up run clears the whole
+backlog at once, and the first run after `RETENTION_DAYS` is shortened, which
+retires a long stretch of history in one go.
 
 **In intended mode the deletes are slower.** `mutations_sync = 2` waits for every
 replica to apply the mutation, which is what makes the reported counts final. With
@@ -1830,8 +1944,11 @@ entirely; it is gated separately from the other triggers precisely because it is
 the only thing in the pipeline that deletes data.
 
 **On the shipped seed it deletes nothing.** The seed spans June–July 2026, so a
-ten-year cutoff lands in 2016 and nothing qualifies. That is expected: the rule is
-forward-looking. `RETENTION_YEARS` exists so the behaviour can be exercised
+365-day cutoff lands in 2025 and nothing qualifies — verified against a live store
+spanning 2026-06-27 to 2026-08-16, where a cutoff of 2025-08-16 matched 0 events
+and 0 mentions. That is expected: the rule is forward-looking, and a year of
+history has to accumulate before it has anything to do. `RETENTION_DAYS` exists so
+the behaviour can be exercised
 without waiting — moving the cutoff to 2026-06-30 expired 8,939 events and 9,571
 mentions, left no survivor past the cutoff, and left no mention orphaned from its
 event.
@@ -2015,12 +2132,45 @@ exists to prevent.
 happened to be handled — is what the pipeline records. Slice ids can be compared
 and ordered, so a gap in the feed is detectable; a URL alone cannot be.
 
-**The watermark only moves forwards.** A slice arriving late never drags it back
-over ground already covered, and the processing layer recomputes only when
-`max(DATEADDED)` in silver **increases**. An equal value means nothing new
-arrived; a lower one means the store was rebuilt behind it — for instance a seed
-restored over newer data — and rebuilding gold from a shorter history than it
-already reflects would be a regression, so it declines and says so.
+**A late slice cannot drag the watermark back.** The watermark is
+`max(DATEADDED)` over the rows *currently present*, and a maximum ignores every
+value below it. A slice that arrives an hour late is simply absorbed: it is
+inserted, the maximum does not change, and no ground already covered is revisited.
+
+**So how can it move backwards at all?** Only by rows being **removed**. Nothing
+about arrival order can do it — the max is a property of what is in the store, not
+of what arrived when. Four things delete from silver, and every one of them is
+deliberate:
+
+| Cause | What it does |
+|----|----|
+| `silver_snapshot.sh trim` | deletes everything published after a given slice |
+| `silver_snapshot.sh wipe` | empties both tables |
+| `silver_snapshot.sh recreate` | drops the tables to apply a changed schema |
+| `docker compose down -v` | destroys the volume; the seed is then restored, and the seed ends a month earlier than live data |
+
+The retention job is the one deletion that **cannot** cause it: it removes the
+*oldest* events, and the watermark tracks the *newest*.
+
+**A backwards move is now adopted, not refused.** This used to be logged and
+otherwise ignored, reasoning that rebuilding gold from a shorter history than it
+already reflected would be a regression. That was wrong twice over:
+
+* Gold describing events that silver no longer holds is not a richer gold, it is
+  an **inconsistent** one. Gold mirrors silver; if silver shrank, gold must shrink.
+* Refusing left the trigger's in-memory `last` latched at the old high-water mark
+  **forever**. `last_advance` therefore never reset either, so the 45-minute
+  staleness reporter fired on a pipeline that was working perfectly, and the
+  dashboard showed "technical difficulties" until someone restarted the container.
+
+The loop now treats a lower value as what it is — a real change to silver — and
+runs the same `recompute_all()` a forwards move would. Only the log line differs.
+Measured 2026-08-16: a trim was detected **30 s** later and gold was consistent
+again **120 s** after that, with `status=OK` throughout and no restart.
+
+This is why nothing needs to be remembered about the ordering of `restore` and the
+pipeline any more. Previously, resetting silver under a running processing
+container stranded it; now it repairs itself.
 
 **Lateness is bounded, and failure is bounded with it.** A slice that cannot be
 processed is retried three times and then moved to `/data/dead_letter/<slice>/`.
@@ -2088,6 +2238,135 @@ them automatically is deliberately *not* done: a 15-minute poller quietly
 reloading hours of history is exactly the unbounded lateness the rest of this
 design rules out. `bootstrap/bulk_load.py` exists to load a known period on
 purpose.
+
+## Recovering a dead Spark session
+
+### What a Spark session actually is, here
+
+PySpark is not a Python implementation of Spark. Spark is a **Java** program, and
+`pyspark` is a remote control for it. When the processing layer builds a session,
+three things exist:
+
+1. **The Python process** — the resident FastAPI service, which holds the triggers.
+2. **A separate Java process (the JVM)** — a child process where the real work
+   happens. It is a genuinely separate operating-system process with its own
+   process id, and it can die independently of the Python process that started it.
+3. **A socket between them**, the *py4j gateway*. Every DataFrame call is a message
+   over that socket.
+
+`SparkSession` is therefore a **handle**, not the engine: a Python object holding
+the address of a JVM that is expected to be listening.
+
+Two consequences follow, and the whole of this section is about them.
+
+### Why the JVM dies
+
+In testing mode `SPARK_MASTER=local[*]`, so the JVM runs **inside the processing
+container** rather than on a separate worker machine. It is the largest single
+memory consumer in the stack (~1.7 GiB). When the host runs short of memory, the
+Linux kernel's out-of-memory killer picks the largest process and terminates it
+with `SIGKILL` — which cannot be caught, blocked, or cleaned up after. The JVM
+simply ceases to exist, mid-call, with no exception and no shutdown.
+
+Observed 2026-08-16 at 19:44:32.
+
+### Why it did not recover, and why that was hard to see
+
+`SparkSession.builder…getOrCreate()` reads its name literally: it returns the
+existing session if one was ever created. It does **not** check that the JVM
+behind that session is still alive. So every recompute after 19:44 was handed the
+same dead handle and failed in about 40 milliseconds:
+
+```
+19:43:33  EOFError                                     ← the socket drops
+19:44:32  Py4JNetworkError: Answer from Java side is empty
+19:44:32  SparkSession$ does not exist in the JVM
+19:45:32  [Errno 111] Connection refused                ← and every 60 s after
+```
+
+The trigger cannot distinguish "Spark is broken" from "this recompute failed", so
+it retried the same corpse every minute for forty minutes. **Ingestion, parsing
+and validation were all healthy throughout** — silver kept advancing normally, and
+only gold was frozen, which is exactly the shape of failure that is invisible
+without the watermark shown on the dashboard.
+
+### The fix, in three parts
+
+Each part was necessary, and the first two attempts were wrong in instructive ways.
+
+**1. Probe before use.** `_spark()` now calls `sc().isStopped()` before handing the
+session back. The point is not the answer but the round trip: the call has to cross
+the py4j socket, so a dead JVM raises instead of returning a stale value. Any
+exception means unusable, whatever the cause.
+
+**2. Clear the gateway, not just the session.** The first attempt cleared
+`SparkSession._instantiatedSession`, `_activeSession` and
+`SparkContext._active_spark_context` — and still failed, identically, for another
+nine minutes. The reason is one line inside PySpark:
+
+```python
+if not SparkContext._gateway:
+    SparkContext._gateway = gateway or launch_gateway(conf)
+```
+
+`_gateway` is a **process-global**, and a new JVM is launched only when it is
+falsy. Leaving the dead gateway in place meant the "new" session reattached to the
+same dead socket. `SparkContext._gateway` and `._jvm` must be cleared too.
+
+**3. Do not call `stop()` on a dead JVM.** `stop()` tries to talk to the JVM. When
+there is nothing listening it does not raise — it **blocks** on the socket, so
+`except` does not help. Since the probe has already established the JVM is gone,
+the recovery path skips it. This is the likely cause of an unexplained 11-minute
+stall in the trigger loop during testing: that thread *is* the watermark trigger,
+so blocking it stops the pipeline.
+
+### Worked example
+
+A recompute is due. `_spark()` probes the session it holds:
+
+* **JVM alive** — `isStopped()` returns `False`, the session is returned, the
+  recompute proceeds. This is every normal call, and it costs one round trip.
+* **JVM killed by the OOM reaper** — the probe raises. The log says
+  `the Spark JVM is gone; discarding the dead session and building a new one`.
+  PySpark's session state *and* gateway are cleared, `getOrCreate()` finds nothing
+  cached, `launch_gateway` starts a fresh JVM with a new process id, and the
+  recompute runs on it.
+
+Verified by killing the JVM with `SIGKILL` inside a single long-lived process —
+which is the only way to reproduce it, since a fresh process gets a fresh gateway
+and never exercises the bug at all:
+
+```
+STEP 1  jvm pids: [33, 93]      count: 5
+STEP 2  SIGKILL   jvm pids: []
+STEP 3  RECOVERED in 5.3s — count: 5
+        new jvm pids: [292]     different JVM? True
+```
+
+The live trigger loop then demonstrated the same thing unprompted: dead session
+detected, new JVM built, and `published — articles, user_articles and
+pipeline_status are live` — with no container restart.
+
+**This is recovery, not prevention.** The JVM can still be killed; see
+[Memory allowance, layer by layer](#memory-allowance-layer-by-layer) for the
+oversubscription that makes it possible. What changed is that the pipeline no
+longer needs a human to notice.
+
+### It matters at least as much in intended mode
+
+The failure was found in testing mode, but nothing about the fix is specific to
+it, and intended mode has *more* ways to reach the same state, not fewer.
+
+The driver JVM still lives in the processing container there — only the executors
+move to `spark-worker`. So it can still be killed, and it can now also lose its
+`SparkContext` for reasons that do not exist locally: `spark-master` is a Swarm
+service with `restart_policy: condition: any`, so it *will* restart at some point
+and drop the connections held by every driver attached to it.
+
+That case lands on the same probe. A `SparkContext` whose master has gone away
+reports `isStopped() == True`, which is treated exactly like a dead JVM — discard,
+clear the gateway, rebuild. Without it, a routine `spark-master` restart would
+freeze the gold layer until someone restarted the processing service by hand.
 
 ## Retries: nothing waits indefinitely
 

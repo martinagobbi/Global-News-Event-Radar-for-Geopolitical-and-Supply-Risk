@@ -14,6 +14,8 @@ def render_heatmap(summary: list[dict], selected_countries: list[str]) -> None:
         pdk.Deck(
             map_style="mapbox://styles/mapbox/light-v9",
             initial_view_state=pdk.ViewState(latitude=20, longitude=10, zoom=1.1, pitch=0),
+            # Explicitly configure the map view to disable cursor-based zooming
+            views=[pdk.View(type="MapView", controller={"scrollZoom": False, "doubleClickZoom": False})],
             layers=[
                 pdk.Layer(
                     "HeatmapLayer",

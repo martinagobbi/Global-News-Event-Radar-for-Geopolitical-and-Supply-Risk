@@ -8,9 +8,17 @@
         kernel then kills them (exit code 137). That is what caused the repeated
         restarts on this project.
 
-        Each node is capped explicitly here. Six nodes at 700 MB total about
-        4.2 GB, leaving room for Oracle (~1 GB), the three MongoDB nodes, the
-        three Keeper nodes and the pipeline within a 6 GB Docker allocation.
+        Each node is capped explicitly here. Six nodes at 1.1 GB total about
+        6.6 GB, which is why this topology needs more than the 6 GB testing
+        allocation and is gated behind `--profile full`.
+
+        The budget this was originally written against reserved ~1 GB for Oracle.
+        Oracle is gone: gold moved to PostgreSQL, which holds ~34 MB in the same
+        role. That gigabyte is NOT spare, though — the processing container now
+        runs Spark's driver JVM resident (`SPARK_MASTER=local[*]`), which is
+        ~1.7 GB on its own and is the largest single consumer in the stack. See
+        the memory table in the README.
+
         Raise these values if the Docker memory limit is raised.
 
         NOTE: only SERVER-level settings belong in this file. Per-query limits

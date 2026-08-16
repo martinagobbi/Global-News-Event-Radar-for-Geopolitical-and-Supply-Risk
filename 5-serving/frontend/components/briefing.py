@@ -4,15 +4,16 @@ import streamlit as st
 
 from components.event_card import render_event_card
 
+from datetime import datetime
 
 def _render_event_table(events: list[dict]) -> None:
     rows = [
         {
             "Event": event["card_title"],
             "Country": event["country"],
-            "Risk category": event.get("risk_category", "Not classified"),
-            "Date": event["event_date"],
-            "Tag": event.get("user_tag") or "Untagged",
+            #"Risk category": event.get("risk_category", "Not classified"), # If we ever want to bring risk_category back, just uncomment this and the related thing in event_card.py
+            "Date": datetime.strptime(str(event["event_date"])[:10], "%Y-%m-%d").date(),
+            "Tag you applied": event.get("user_tag") or "You did not apply a tag",
             "Top source": event.get("top_article_url"),
         }
         for event in events
@@ -67,14 +68,14 @@ def render_briefing(
             for event in red_events:
                 render_event_card(event, context="red")
         else:
-            st.info("No events are tagged as needing action.")
+            st.info("The user tagged no events as needing action.")
 
     with tabs[2]:
         if yellow_events:
             for event in yellow_events:
                 render_event_card(event, context="yellow")
         else:
-            st.info("No events are tagged for monitoring.")
+            st.info("The user tagged no events for monitoring.")
 
     with tabs[3]:
         if older:

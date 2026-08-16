@@ -96,21 +96,41 @@ SUPPLY_CHAIN_KEYWORDS = {
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# KEY RENAMING — ingestion compatibility
+# KEY RENAMING — VESTIGIAL. Nothing in the pipeline reaches this any more.
+#
+# These two functions convert a positionally-keyed record ({0: …, 1: …}) into a
+# named one ({"GLOBALEVENTID": …}). They date from the removed Kafka design, in
+# which the poller sent `df.to_dict()` of a header-less frame through a broker.
+#
+# Every caller today passes NAMED keys already, because both read their CSVs with
+# an explicit `names=` argument:
+#     2-parsing/main.py:262      pd.read_csv(..., header=None, names=GDELT_COLUMNS)
+#     bootstrap/bulk_load.py:100 pd.read_csv(..., header=None, names=columns)
+# `header=None` alone would give {0: …, 1: …}; `header=None` WITH `names=` gives
+# {"GLOBALEVENTID": …}. Verified directly with pandas.
+#
+# They are kept rather than deleted because they are inert and correct: dead code
+# that cannot fire, guarding an input shape that would otherwise crash the filter
+# if a caller ever did hand over a header-less frame. See passes_filter() for the
+# cost of the guard that decides whether to call them (one iterator and two type
+# checks per row).
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def rename_integer_keys(record: dict) -> dict:
     """
-    The ingestion poller (poller.py) reads GDELT CSVs with pandas (no header)
-    and calls df.to_dict(orient='records'), producing dicts with integer keys:
-        {0: "1381729282", 1: "20260430", 2: "202604", …}
+    Map a positionally-keyed event record onto GDELT_COLUMNS. NOT REACHED — see
+    the section header above.
 
-    IMPORTANT: the poller then serialises each record with json.dumps() before
-    sending it to Kafka. JSON object keys are ALWAYS strings, so after the
-    consumer's json.loads() the keys arrive as "0", "1", "2", … (strings),
-    not integers. This function therefore accepts BOTH forms: it first tries
-    the integer key (direct/local use) and falls back to the string key
-    (the real Kafka path). Missing columns are padded with empty strings.
+    Accepts both {0: …} and {"0": …}. The integer form is what pandas produces
+    from a header-less frame read without `names=`; the STRING form only ever
+    arose because the old Kafka path serialised each record with json.dumps(),
+    and JSON object keys are always strings, so json.loads() returned "0", "1",
+    … on the far side. There is no serialisation boundary left in the pipeline,
+    so the string branch can no longer be reached by anything.
+
+    Both are kept because the dual lookup is what makes the function total: any
+    positional record maps correctly regardless of how its keys were spelled, and
+    a column absent from a short row is padded with "" rather than raising.
     """
     return {
         col: record.get(i, record.get(str(i), ""))
@@ -178,11 +198,22 @@ def passes_filter(record: dict) -> bool:
     """
     Return True if the record satisfies all filter + validation criteria:
         F1 AND (F2 OR F3) AND has_source_url
-    Accepts either integer-keyed dicts (from Kafka) or named-column dicts.
-    If integer keys are detected, rename_integer_keys() is called automatically.
+
+    Takes NAMED-column dicts, which is what both callers pass. It also tolerates
+    positionally-keyed ones, though nothing produces those any more — see the
+    KEY RENAMING header above.
     """
-    # Auto-detect index-keyed records (from Kafka ingestion). Keys may be
-    # integers (local use) or digit strings "0".."60" (after JSON round-trip).
+    # Positional-record guard, vestigial. It cannot fire on current input: both
+    # callers read their CSV with `names=`, so the first key is a column name
+    # like "GLOBALEVENTID", which is neither an int nor a digit string.
+    #
+    # Left in place because it is genuinely cheap and cannot misfire. It costs
+    # one iterator and two isinstance checks per row, and no GDELT column name is
+    # a digit string, so a named record can never be mistaken for a positional
+    # one. Deleting it (with the two rename_* functions) would be safe today and
+    # would only cost the tolerance for a caller that hands over a header-less
+    # frame — which is exactly the mistake this catches instead of crashing on
+    # every lookup returning "".
     if record:
         first_key = next(iter(record))
         if isinstance(first_key, int) or (isinstance(first_key, str) and first_key.isdigit()):
@@ -297,9 +328,12 @@ def to_silver_event(record: dict) -> dict:
 # GDELT MENTIONS TABLE
 # ═══════════════════════════════════════════════════════════════════════════════
 # The mentions table references events (one event can have many mentions).
-# It is published by GDELT as a separate CSV every 15 minutes and arrives on
-# the Kafka topic 'gdelt_mentions_raw'. The key field is MentionIdentifier,
-# which holds the source-article URL used for Newspaper3k enrichment.
+# GDELT publishes it as a separate CSV every 15 minutes, alongside the events
+# file; the ingestion layer downloads both and drops them on the shared volume
+# for this layer to pick up. (It used to arrive on a Kafka topic named
+# 'gdelt_mentions_raw' — there is no broker in the pipeline now.) The key field
+# is MentionIdentifier, which holds the source-article URL that the validation
+# layer scrapes with Newspaper3k.
 
 # GDELT 2.0 Mentions columns (16 columns, 0-based index)
 MENTIONS_COLUMNS = [
@@ -324,11 +358,10 @@ MENTIONS_COLUMNS = [
 
 def rename_mention_integer_keys(record: dict) -> dict:
     """
-    Same idea as rename_integer_keys() but for the mentions table.
-    The poller sends mention rows with integer keys (0, 1, 2 …) which become
-    string keys ("0", "1", …) after the json.dumps()/json.loads() round-trip
-    through Kafka. Both forms are accepted: integer key first, string key as
-    fallback.
+    Same as rename_integer_keys(), for the mentions table — and equally NOT
+    REACHED, for the same reason: bulk_load.py and 2-parsing/main.py both read
+    the mentions CSV with `names=MENTIONS_COLUMNS`, so the records are named
+    before they arrive here.
     """
     return {
         col: record.get(i, record.get(str(i), ""))

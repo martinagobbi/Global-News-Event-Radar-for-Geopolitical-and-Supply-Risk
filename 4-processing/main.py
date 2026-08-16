@@ -161,15 +161,34 @@ def recompute_all() -> dict:
     as a distributed shuffle rather than a client-side IN list, so neither ceiling
     applies and no truncation is needed.
     """
-    result = spark_gold.recompute()
-    # The sweep and the status mirror stay here, in plain Python: they are small
-    # transactional statements against PostgreSQL and MongoDB with nothing to
-    # distribute. Spark's publish() runs the same sweep inside its own
-    # transaction; running it again is harmless (it deletes what is already gone)
-    # and keeps the behaviour identical whichever entry point was used.
-    n_orphans = _sweep_orphans()
-    state = read_pipeline_status().get("state", "OK")
-    postgres_writer.write_pipeline_status(state, datetime.now(timezone.utc))
+    # Block overlapping runs by acquiring the database lock
+    with postgres_writer.advisory_lock():
+        # Sampled BEFORE the recompute, deliberately. Spark reads silver at some
+        # point during the run, so a value read afterwards can name a slice that
+        # arrived mid-run and was never actually read — which would overstate how
+        # fresh the gold is, and the serving tier uses this to decide whether the
+        # briefing is stale. Sampling first makes it a lower bound: gold contains
+        # at least this much. Understating costs one poll cycle of apparent lag
+        # (the next watermark advance recomputes and corrects it); overstating
+        # would hide a stalled pipeline, which is the failure this exists to show.
+        try:
+            with _ch() as ch:
+                watermark = ch.silver_watermark()
+            watermark = str(watermark) if watermark else None
+        except Exception as exc:  # noqa: BLE001 — never fail a publish over this
+            logger.warning("could not read the silver watermark: %s", exc)
+            watermark = postgres_writer.KEEP
+
+        result = spark_gold.recompute()
+        # The sweep and the status mirror stay here, in plain Python: they are small
+        # transactional statements against PostgreSQL and MongoDB with nothing to
+        # distribute. Spark's publish() runs the same sweep inside its own
+        # transaction; running it again is harmless (it deletes what is already gone)
+        # and keeps the behaviour identical whichever entry point was used.
+        n_orphans = _sweep_orphans()
+        state = read_pipeline_status().get("state", "OK")
+        postgres_writer.write_pipeline_status(
+            state, datetime.now(timezone.utc), watermark=watermark)
     return {"articles": result.get("articles", 0), "orphans_removed": n_orphans,
             "users": result.get("users", 0), "pipeline_status": state}
 
@@ -199,11 +218,13 @@ def recompute_user(user_id: str) -> int | None:
     # their preferences until nothing matches still ends up with an empty pool
     # rather than a stale one, which is what the old write_user_articles(uid, [])
     # guaranteed.
-    result = spark_gold.recompute(only_user=user_id)
-    # This user's set has just been replaced, so articles they dropped may now be
-    # referenced by nobody. Rows any OTHER user still references are kept by the
-    # anti-join, so purging here is safe even though only one user was recomputed.
-    _sweep_orphans()
+    # Block overlapping runs by acquiring the database lock
+    with postgres_writer.advisory_lock():
+        result = spark_gold.recompute(only_user=user_id)
+        # This user's set has just been replaced, so articles they dropped may now be
+        # referenced by nobody. Rows any OTHER user still references are kept by the
+        # anti-join, so purging here is safe even though only one user was recomputed.
+        _sweep_orphans()
     return result.get("articles", 0)
 
 

@@ -5,10 +5,10 @@ Everything else in this system either appends or rebuilds. Silver is
 append-only; gold's `articles` is upserted (and swept of unreferenced rows);
 nothing ages out. Left alone, both stores grow for as long as the pipeline runs.
 
-This module removes events that have gone quiet for a decade, and everything
+This module removes events that have gone quiet for a year, and everything
 hanging off them:
 
-    an event whose MOST RECENT article is older than RETENTION_YEARS
+    an event whose MOST RECENT article is older than RETENTION_DAYS
       -> delete the event      from ClickHouse gdelt_events
       -> delete its mentions   from ClickHouse gdelt_mentions
       -> delete its articles   from PostgreSQL articles / user_articles
@@ -20,7 +20,7 @@ A long-running story keeps attracting coverage: the event row is stamped once,
 but articles arrive for as long as anyone is still writing. Measuring from the
 event date would delete a story that is still being reported; measuring from its
 newest article means an event survives exactly as long as the world keeps talking
-about it, and ages out ten years after the last word.
+about it, and ages out 365 days after the last word.
 
 Schedule
 --------
@@ -29,11 +29,12 @@ a laptop that sleeps overnight would otherwise never clean up at all. The last
 run is recorded in RETENTION_STATE_FILE on the shared volume, written atomically,
 so the decision survives a restart.
 
-Ten years is a starting point, not a fixed constant: RETENTION_YEARS sets it, so
-shortening the window needs no migration and no code change. It is deliberately
-long enough that it deletes nothing the project currently holds — the seed spans
-2026, so the cutoff lands in 2016 — which makes it a safe default to ship and an
-easy one to tighten once the store has real volume behind it.
+365 days is a starting point, not a fixed constant: RETENTION_DAYS sets it, so
+changing the window needs no migration and no code change. It is still long
+enough that it deletes nothing the project currently holds — silver spans
+2026-06-27 to 2026-08-16, so a cutoff at 2025-08-16 matches no row (verified:
+0 events, 0 mentions) — but unlike the ten-year window it replaced, it is short
+enough to actually fire once the store has a year of history behind it.
 
 Deleting a condemned event's mentions by GLOBALEVENTID is equivalent to testing
 each mention's own MentionTimeDate: if the MAXIMUM is below the cutoff then every
@@ -53,7 +54,7 @@ from pathlib import Path
 
 logger = logging.getLogger("processing.retention")
 
-RETENTION_YEARS = float(os.getenv("RETENTION_YEARS", "10"))
+RETENTION_DAYS = float(os.getenv("RETENTION_DAYS", "365"))
 CLICKHOUSE_CLUSTER = os.getenv("CLICKHOUSE_CLUSTER", "gnews_cluster")
 STATE_DIR = Path(os.getenv("STATE_DIR", "/data/state"))
 RETENTION_STATE_FILE = STATE_DIR / "retention.json"
@@ -111,13 +112,14 @@ def _chunked(ids: list[int], size: int | None = None):
     server's max_query_size (256 KB by default). At roughly 12 bytes per id that
     is about 21,800 ids, or six days of this pipeline's output.
 
-    A normal nightly run is far below that — only the events that turned ten years
-    old that day expire, some 3,500 of them, about 41 KB. The cases that overflow
-    are the ones where a single run covers a longer stretch: a machine that was
-    off for a week or more (the catch-up runs once and clears the whole backlog),
-    or the first run after RETENTION_YEARS is shortened, which retires years of
-    history at once. Batching costs nothing in the normal case and removes the
-    cliff in those.
+    A normal nightly run is far below that — only the events that crossed the
+    cutoff that day expire, some 3,500 of them, about 41 KB. That figure is one
+    day of this pipeline's output, so it does not change with the window length.
+    The cases that overflow are the ones where a single run covers a longer
+    stretch: a machine that was off for a week or more (the catch-up runs once and
+    clears the whole backlog), or the first run after RETENTION_DAYS is shortened,
+    which retires a long stretch of history at once. Batching costs nothing in the
+    normal case and removes the cliff in those.
 
     `size` is resolved at CALL time, not bound as a default argument: a default is
     evaluated once when the function is defined, which would freeze ID_CHUNK at
@@ -295,14 +297,14 @@ def delete_tags(event_ids: list[int]) -> int:
 def run_once(ch_factory, now: datetime | None = None) -> dict:
     """Find expired events and remove them from silver, gold and the tag store."""
     now = now or datetime.now(timezone.utc)
-    cutoff_dt = now - timedelta(days=RETENTION_YEARS * 365.25)
+    cutoff_dt = now - timedelta(days=RETENTION_DAYS)
     cutoff = cutoff_dt.strftime("%Y%m%d%H%M%S")
 
     with ch_factory() as ch:
         expired = find_expired_event_ids(ch, cutoff)
         if not expired:
-            logger.info("retention: nothing older than %s (%.0f years) — no deletions",
-                        cutoff_dt.date(), RETENTION_YEARS)
+            logger.info("retention: nothing older than %s (%.0f days) — no deletions",
+                        cutoff_dt.date(), RETENTION_DAYS)
             return {"cutoff": cutoff, "events": 0, "articles": 0, "tags": 0}
 
         logger.info("retention: %d events have had no article since %s; removing",
@@ -331,5 +333,5 @@ def start(ch_factory) -> None:
     """Launch the daily retention job as a daemon thread."""
     threading.Thread(target=_loop, args=(ch_factory,),
                      name="retention", daemon=True).start()
-    logger.info("Retention job started (%.0f-year cutoff, checked every %ds)",
-                RETENTION_YEARS, TICK_SECONDS)
+    logger.info("Retention job started (%.0f-day cutoff, checked every %ds)",
+                RETENTION_DAYS, TICK_SECONDS)

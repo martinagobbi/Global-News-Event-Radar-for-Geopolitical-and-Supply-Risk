@@ -427,7 +427,10 @@ services:
           # exist when the script needs it.
           post_init: /bootstrap/init-gold.sh
     configs:
-      - source: pg_gold_schema
+      # _v2: 01_schema.sql gained pipeline_status.silver_watermark. Swarm configs
+      # are immutable, so the same name cannot carry changed content — see the
+      # Configs block at the foot of this file.
+      - source: pg_gold_schema_v2
         target: /bootstrap/01_schema.sql
       - source: pg_init_script
         target: /bootstrap/init-gold.sh
@@ -471,7 +474,13 @@ configs:
   ch_macros_s2r1:  { file: ./clickhouse/macros-s2r1.xml }
   ch_macros_s2r2:  { file: ./clickhouse/macros-s2r2.xml }
   ch_macros_s2r3:  { file: ./clickhouse/macros-s2r3.xml }
-  pg_gold_schema:  { file: ./postgres-init/01_schema.sql }
+  # Bumped to _v2 when pipeline_status gained silver_watermark. Redeploying with
+  # the OLD name and changed file content does not update the config — Swarm
+  # either reuses the stale one or refuses the deploy outright, and the failure is
+  # quiet either way. Existing clusters are unaffected regardless, on two counts:
+  # post_init runs only at first bootstrap, and postgres_writer.ensure_schema()
+  # adds the column with ADD COLUMN IF NOT EXISTS before the first write.
+  pg_gold_schema_v2: { file: ./postgres-init/01_schema.sql }
   pg_init_script:  { file: ./postgres-init/init-gold.sh }
 
 # ── Volumes ──────────────────────────────────────────────────────────────────
