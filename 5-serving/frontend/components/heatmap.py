@@ -22,7 +22,7 @@ def render_heatmap(summary: list[dict], selected_countries: list[str]) -> None:
     ).fillna(0)
 
     # Light geographic background
-    map_style = "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json"
+    map_style = None
 
     deck = pdk.Deck(
         map_provider="carto",
