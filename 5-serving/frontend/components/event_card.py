@@ -75,10 +75,15 @@ def render_event_card(event: dict, context: str = "main") -> None:
 
         #st.write(f"Risk category: `{event.get('risk_category', 'Not classified')}`") # If we ever want to bring risk_category back, just uncomment this and the related thing in briefing.py
 
-        date_to_show = str(event['event_date']).removesuffix(" 00:00:00")
-        st.write(f"Event type that makes this of interest: " + '"' + event["cameo_label"].removesuffix(", not specified below") + '"')
-        st.write(f"Event date: " + date_to_show)
+        
+        date_to_show = str(event["event_date"]).removesuffix(" 00:00:00")
 
+        cameo_label = event.get("cameo_label")
+        if cameo_label:
+            cameo_label = cameo_label.removesuffix(", not specified below")
+            st.write(f'Event type that makes this of interest: "{cameo_label}"')
+
+        st.write(f"Event date: {date_to_show}")
         #if top_url:
             #st.link_button("Open top source", top_url)
 

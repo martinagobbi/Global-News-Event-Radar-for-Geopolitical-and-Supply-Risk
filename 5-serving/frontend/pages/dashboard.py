@@ -208,21 +208,48 @@ older_events = st.session_state.get("cached_older_events", [])
 summary      = st.session_state.get("cached_summary", [])
 
 # ── Map ────────────────────────────────────────────────────────────────────
-map_col, sidebar_col = st.columns([2, 1])
-with map_col:
-    st.subheader("Heatmap")
-    render_heatmap(summary, profile.get("territories", []))
-with sidebar_col:
-    briefing_days = profile.get("briefing_days", default_briefing_days)
-    st.subheader("Radar status")
-    st.write(f"Main briefing: last {briefing_days} days (editable in Preferences)")
-    st.write(
-        f"Older-risk lookback: {briefing_days} to {profile.get('older_news_days', 180)} days ago (editable in Preferences)"
-    )
-    st.write(f"Briefing events: {len(events)}")
-    #st.write("Red window → `Needs action from us`")
-    #st.write("Yellow window → `Look out for developments`")
+st.subheader("Heatmap")
+render_heatmap(
+    summary,
+    profile.get("territories", []),
+)
 
+legend_col, status_col = st.columns(2)
+
+with legend_col:
+    st.subheader("Map legend")
+    st.markdown(
+        """
+        🔴 **Points** — monitored geographic locations.  
+        Larger points indicate more events.
+
+        🔥 **Heatmap** — concentration of events.  
+        Brighter areas indicate a higher concentration of events.
+
+        *Colours indicate event concentration, not risk severity.*
+        """
+    )
+
+with status_col:
+    briefing_days = profile.get(
+        "briefing_days",
+        default_briefing_days,
+    )
+
+    st.subheader("Radar status")
+
+    st.markdown(
+        f"""
+        **Main briefing:** last {briefing_days} days  
+        *(editable in Preferences)*
+
+        **Older-risk lookback:** {briefing_days} to \
+{profile.get("older_news_days", 180)} days ago  
+        *(editable in Preferences)*
+
+        **Briefing events:** {len(events)}
+        """
+    )
 # ── Briefing ───────────────────────────────────────────────────────────────
 st.subheader("Radar Briefing")
 
