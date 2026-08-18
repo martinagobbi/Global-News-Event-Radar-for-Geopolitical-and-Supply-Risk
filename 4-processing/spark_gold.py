@@ -315,7 +315,7 @@ def build_catalogue(events, mentions, cameo_lookup):
     events x mentions -> the `articles` rows, as a distributed join.
 
     Mirrors gold._article_row: the headline is the enriched title falling back to
-    the URL, and duplicates are dropped per (event, headline) so a syndicated
+    "No article title for " followed by the article URL, and duplicates are dropped per (event, headline) so a syndicated
     story doesn't appear several times on one card.
     """
     ev = events.select(
@@ -335,7 +335,7 @@ def build_catalogue(events, mentions, cameo_lookup):
 
     event_date = F.to_date(F.col("Day").cast("string"), "yyyyMMdd")
     headline = F.when(F.trim(F.coalesce("article_title", F.lit(""))) != "",
-                      F.trim("article_title")).otherwise(F.col("MentionIdentifier"))
+                      F.trim("article_title")).otherwise(F.concat(F.lit("No article title for "), F.col("MentionIdentifier")))
     # "Beijing, ..., China" -> "China"
     country = F.trim(F.element_at(F.split(F.col("ActionGeo_FullName"), ","), -1))
 

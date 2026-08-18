@@ -23,9 +23,8 @@ docker compose --env-file .env.testing up -d --build
 # This "seeded" data was chosen to make the testing-mode radar not empty at startup: the radar gets updated with the latest news every 15 minutes, and automatically drops news older than 365 days every midnight. Even seeding over a year of data will leave a gap in testing mode: all the per-15-minutes slices between the latest seeded/stored data and the data from the moment a tester starts up the testing-mode radar with these instructions.
 ./bootstrap/silver_snapshot.sh restore
 
-# 4. Three test profiles.
-# Without any profiles, the gold layer stays empty. With any profiles at all, the PostgreSQL store for gold-layer news data and the MongoDB store for user preferences are idempotently created.
-python3 5-serving/seed_test_users.py          # Needs `requests` on the host. Also, may have to type `python` instead of `python3`.
+# 4. Three test profiles. Without any profiles, the gold layer stays empty.
+python3 5-serving/seed_test_users.py # Needs `requests` on the machine where this code is run. Also, may have to type `python` instead of `python3`.
 
 # 5. OPTIONAL: Gold data from articles spanning 27/06/2026 at 17:15 to 27/07/2026 at 17:15.
 # If you ran step 3., this will be computed anyways, but will take around 2 minutes. This command's execution might take less than 10 seconds.
@@ -39,6 +38,8 @@ docker compose -f 5-serving/docker-compose.serving.yml up --build
 Here in testing mode, backend machines and frontend machines are the same one machine, but these steps are still kept separate to keep the production-level design (to also have distribution across machines, see intended mode below).
 
 ### Shutdown
+
+
 
 ### Explanation of the process
 

@@ -38,11 +38,15 @@ def render_event_card(event: dict, context: str = "main") -> None:
     """
     articles: list[dict] = event.get("articles", [])
 
+    cameo_label = event.get("cameo_label")
+    if cameo_label:
+        cameo_label = cameo_label.removesuffix(", not specified below")
+
     # Title = mention_identifier of articles[0] (highest confidence after backend sort)
     card_title = (
         articles[0]["mention_identifier"]
-        if articles
-        else event.get("card_title", f"Event {event['global_event_id']}")
+        if articles and not articles[0]["mention_identifier"].startswith("No article title")
+        else event.get("card_title", f"\"{event['cameo_label']}\" type of event (ID: {event['global_event_id']})")
     )
     top_url = event.get("top_article_url") or (articles[0]["url"] if articles else None)
 
@@ -78,9 +82,7 @@ def render_event_card(event: dict, context: str = "main") -> None:
         
         date_to_show = str(event["event_date"]).removesuffix(" 00:00:00")
 
-        cameo_label = event.get("cameo_label")
         if cameo_label:
-            cameo_label = cameo_label.removesuffix(", not specified below")
             st.write(f'Event type that makes this of interest: "{cameo_label}"')
 
         st.write(f"Event date: {date_to_show}")
