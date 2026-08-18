@@ -6,39 +6,43 @@ This repository is "production-level" meaning that it deliberately avoids using 
 
 Two modes are in place: testing mode and intended mode. **Only testing mode can be run on one machine, so only testing mode can be used when running the whole radar to observe and evaluate how the radar operates.** In contrast, intended mode is boilerplate to make testing mode's data distributed across machines: intended mode was curated at every relevant step of the creation of testing mode, but to test intended mode, significant hardware is required, without which Docker Swarm will refuse to start intended mode. In a nutshell, testing mode is the only mode that can run on one machine, and intended mode is a curated but untested draft of the setup to make the same pipeline run on multiple machines.
 
-## Testing mode: startup, shutdown, explanation of the processes, memory use
+## Testing mode: startup, shutdown, explanation of the processes
 
 ### Startup
 
 
 ```bash
-# 1. stores (these create pipeline_network)
+# 1. Stores
 
 docker compose --env-file .env.testing -f docker-compose.stores.yml up -d
 
-# 2. the pipeline — the validation layer creates the silver schema on first connect
+# 2. Pipeline (Ingestion; Parsing; Validation and Storage; Processing; Serving Backend)
 docker compose --env-file .env.testing up -d --build
 
-# 3. the 30-day history (needs the schema from step 2; waits for it if necessary)
+# 3. OPTIONAL: Silver data from articles spanning 27/06/2026 at 17:15 to 27/07/2026 at 17:15.
+# This "seeded" data was chosen to make the testing-mode radar not empty at startup: the radar gets updated with the latest news every 15 minutes, and automatically drops news older than 365 days every midnight. Even seeding over a year of data will leave a gap in testing mode: all the per-15-minutes slices between the latest seeded/stored data and the data from the moment a tester starts up the testing-mode radar with these instructions.
 ./bootstrap/silver_snapshot.sh restore
 
-# 4. the three test profiles — without these the gold layer stays empty
-python3 5-serving/seed_test_users.py          # needs `requests` on the host. Also, may have to type `python` instead of `python3`.
+# 4. Three test profiles.
+# Without any profiles, the gold layer stays empty.
+python3 5-serving/seed_test_users.py          # Needs `requests` on the host. Also, may have to type `python` instead of `python3`.
 
-# 5. the gold layer, pre-computed (optional, but it saves ~2 minutes of waiting)
+# 5. OPTIONAL: Gold data from articles spanning 27/06/2026 at 17:15 to 27/07/2026 at 17:15.
+# If you ran step 3., this will be computed anyways, but will take around 2 minutes. This command's execution might take less than 10 seconds.
 ./bootstrap/gold_snapshot.sh restore
 
-# 6. the dashboard
+# 6. Service frontend.
+# While all previous steps just need to be run on the backend, this is the only code that each frontend machine will need.
 docker compose -f 5-serving/docker-compose.serving.yml up --build
 ```
+
+Here in testing mode, backend machines and frontend machines are the same one machine, but these steps are still kept separate to keep the production-level design (to also have distribution across machines, see intended mode below).
 
 ### Shutdown
 
 ### Explanation of the process
 
-### Memory use
-
-## Intended mode: startup, shutdown, explanation of the processes, memory use
+## Intended mode: startup, shutdown, explanation of the processes
 
 ### Startup
 
@@ -46,4 +50,3 @@ docker compose -f 5-serving/docker-compose.serving.yml up --build
 
 ### Explanation of the process
 
-### Memory use
