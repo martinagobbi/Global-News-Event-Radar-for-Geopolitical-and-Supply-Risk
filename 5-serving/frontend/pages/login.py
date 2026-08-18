@@ -3,6 +3,10 @@ import streamlit as st
 from auth import IDLE_TIMEOUT_SECONDS, login, verify
 from configuration.naming import NAME_HELP, NAME_MAX_CHARS, is_valid_name
 
+from components.branding import use_neutral_spinner
+
+use_neutral_spinner()
+
 st.title("Global News Event Radar")
 st.caption("Sign in to open your supply-chain briefing.")
 

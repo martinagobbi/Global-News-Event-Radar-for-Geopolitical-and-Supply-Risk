@@ -113,7 +113,33 @@ def _doc_id(url: str):
     return hashlib.sha256(url.encode("utf-8")).digest()
 
 
-doc_id_udf = F.udf(_doc_id, BinaryType())
+def doc_id_udf():
+    """
+    Build the doc_id UDF, FRESH, every time it is needed.
+
+    This used to be a module-level constant, `doc_id_udf = F.udf(...)`, and that
+    is a third place a dead JVM hides — after the SparkSession itself and
+    SparkContext._gateway (see _spark and _forget_session).
+
+    A UDF object lazily creates a Java counterpart on first use and then caches
+    it. That cached handle belongs to the JVM that was running at the time. When
+    the JVM is replaced, rebuilding the session and the gateway is not enough:
+    this object still points at the old one, and the next recompute dies at
+
+        .withColumn("doc_id", doc_id_udf(...))
+          -> judf.apply(...)
+            -> py4j ... _create_new_connection()
+              -> [Errno 111] Connection refused
+
+    which is exactly the symptom the session rebuild was supposed to have cured —
+    observed 2026-08-17, gold frozen for ten hours while silver stayed current.
+
+    Calling F.udf() per recompute costs a Python object and one lazy registration
+    against the CURRENT session, against a job that takes minutes. Resetting the
+    private _judf_placeholder instead would work too, but it depends on a PySpark
+    internal; this uses only the public API and cannot go stale by construction.
+    """
+    return F.udf(_doc_id, BinaryType())
 
 # The one session this process uses. Held here rather than relying solely on
 # getOrCreate's internal cache, so _spark() can notice it has died and replace it.
@@ -315,7 +341,7 @@ def build_catalogue(events, mentions, cameo_lookup):
 
     df = (
         df.withColumn("document_identifier", F.col("MentionIdentifier"))
-          .withColumn("doc_id", doc_id_udf(F.col("MentionIdentifier")))
+          .withColumn("doc_id", doc_id_udf()(F.col("MentionIdentifier")))
           .withColumn("mention_identifier", headline)
           .withColumn("global_event_id", F.col("GLOBALEVENTID").cast("string"))
           .withColumn("in_raw_text", F.col("InRawText").cast("int"))

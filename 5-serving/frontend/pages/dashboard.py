@@ -130,6 +130,10 @@ with header_right:
 # not a fault. floor(now) is used as the reference precisely because it can only
 # UNDERSTATE the lag — it never invents a problem that is not there.
 _SLICE = 15 * 60
+# The last slice the committed seed covers — kept in step with SEED_LAST_SLICE in
+# bootstrap/silver_snapshot.sh. Anything later can only have arrived live, which
+# is what separates "never started" from "started and stopped" below.
+_SEED_LAST_SLICE = "20260727171500"
 _watermark = system_status.get("silver_watermark")
 if _watermark:
     try:
@@ -146,16 +150,34 @@ if _watermark:
             f"{_light} Newest data held: **{_wm_dt:%Y-%m-%d %H:%M} UTC** "
             f"({_behind}). Latest GDELT slice now: {_expected:%Y-%m-%d %H:%M} UTC."
         )
-        # A lag this large is not the pipeline running late; it means no live
-        # slice has landed at all, which is what a fresh clone looks like before
-        # the first poll completes. Say so, rather than leaving a red light that
-        # reads as breakage.
+        # A large lag has two completely different causes, and saying the wrong
+        # one is worse than saying nothing:
+        #
+        #   * the store holds ONLY the committed seed, which is what a fresh
+        #     clone looks like before its first live slice; or
+        #   * live slices did arrive and then STOPPED — the machine slept, the
+        #     network dropped, or the processing layer wedged.
+        #
+        # They are told apart by the watermark itself, not by how big the lag is.
+        # The seed ends at a fixed slice (SEED_LAST_SLICE in
+        # bootstrap/silver_snapshot.sh); anything after it can only have come
+        # from live ingestion. Judging by lag alone got this wrong on 2026-08-17,
+        # telling the user "live ingestion has not delivered a slice yet" while
+        # they were looking at live data from 23:00 the previous night.
         if _lag >= 8:
-            st.caption(
-                "This is seed data — live ingestion has not delivered a slice "
-                "yet. The first one arrives within ~15 minutes of the pipeline "
-                "starting, and this line moves to today when it does."
-            )
+            if _watermark <= _SEED_LAST_SLICE:
+                st.caption(
+                    "This is the shipped seed — live ingestion has not delivered "
+                    "a slice yet. The first arrives within ~15 minutes of the "
+                    "pipeline starting, and this line moves to today when it does."
+                )
+            else:
+                st.caption(
+                    f"Live data reached {_wm_dt:%Y-%m-%d %H:%M} UTC and then "
+                    "stopped. Ingestion, parsing, validation and processing are "
+                    "all worth checking — a machine that slept, or a processing "
+                    "layer that cannot publish, both look like this."
+                )
     except ValueError:
         # Never let an unparseable value hide the raw one; it is diagnostic.
         st.caption(f"Silver watermark: `{_watermark}` (unrecognised format)")
