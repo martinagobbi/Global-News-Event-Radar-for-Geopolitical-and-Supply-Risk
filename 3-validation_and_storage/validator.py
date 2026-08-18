@@ -26,6 +26,8 @@ import logging
 import os
 from pathlib import Path
 
+import pandas as pd      # check_confidence() uses to_numeric for the range test
+
 from enrichment import enrich_dataframe
 from gdelt import EVENT_ID, classify, load_table, save_table
 
@@ -53,6 +55,76 @@ def _event_id_series(df):
     """GLOBALEVENTID column coerced to a clean integer Series (bad -> 0)."""
     import pandas as pd
     return pd.to_numeric(df[EVENT_ID], errors="coerce").fillna(0).astype("int64")
+
+
+# ── Confidence range check ───────────────────────────────────────────────────
+# GDELT documents Confidence as a percentage, so 0–100 is the whole of its
+# domain. ClickHouse cannot enforce that: the column is String, like 76 of the
+# 80 columns across both silver tables (only GLOBALEVENTID, DATEADDED and
+# `enriched` carry real types). Anything outside the range would be stored
+# without complaint.
+#
+# Measured on the committed 30-day seed — 111,430 mentions — the field is
+# entirely well behaved: zero empties, every value a plain integer, range 10–100,
+# and only ten distinct values, all multiples of ten. So this check is not
+# fixing an observed fault; it is a tripwire for a future change in the feed.
+#
+# ── The two judgement calls, and why they went the way they did ──────────────
+# EMPTY IS ALLOWED. GDELT genuinely leaves fields blank — in the same mention row
+# MentionDocTranslationInfo and Extras are both empty — so an absent Confidence
+# is "not provided", not "wrong". Rejecting it would throw away good slices the
+# first time GDELT omits the field.
+#
+# ANYTHING ELSE INVALID REJECTS THE WHOLE SLICE, by raising. The pair then goes
+# through the normal path: three attempts, then dead-lettered with both files
+# preserved for inspection. This is stricter than the referential-integrity rule
+# a few lines below, which drops individual mentions whose event is missing —
+# deliberately so. A missing event is an ordinary, expected consequence of slice
+# boundaries; a Confidence of 3000 means the feed no longer matches what this
+# code believes about it, and the sane response is to stop and be looked at
+# rather than to quietly discard rows.
+CONFIDENCE_MIN = 0
+CONFIDENCE_MAX = 100
+_MAX_REPORTED = 5          # keep the error message readable
+
+
+def check_confidence(mentions_df, path=None) -> None:
+    """
+    Raise unless every non-empty Confidence parses as a number in 0–100.
+
+    Empty strings pass (see above). Values are compared numerically, not by
+    pattern, so a decimal such as "85.5" is accepted when in range: the rule
+    asked for is a range check on a percentage, not an integer-format check.
+    """
+    if mentions_df is None or "Confidence" not in mentions_df.columns:
+        return
+
+    values = mentions_df["Confidence"].astype(str).str.strip()
+    present = values[values != ""]
+    if present.empty:
+        return
+
+    numeric = pd.to_numeric(present, errors="coerce")
+    non_numeric = present[numeric.isna()]
+    out_of_range = present[numeric.notna()
+                           & ((numeric < CONFIDENCE_MIN) | (numeric > CONFIDENCE_MAX))]
+
+    if non_numeric.empty and out_of_range.empty:
+        return
+
+    name = getattr(path, "name", path) or "<mentions>"
+    parts = []
+    if not out_of_range.empty:
+        parts.append(f"{len(out_of_range)} outside {CONFIDENCE_MIN}–{CONFIDENCE_MAX} "
+                     f"(e.g. {sorted(set(out_of_range))[:_MAX_REPORTED]})")
+    if not non_numeric.empty:
+        parts.append(f"{len(non_numeric)} non-numeric "
+                     f"(e.g. {sorted(set(non_numeric))[:_MAX_REPORTED]})")
+    raise ValueError(
+        f"Confidence is a percentage and must be {CONFIDENCE_MIN}–{CONFIDENCE_MAX}: "
+        f"{name} has " + "; ".join(parts) +
+        f", out of {len(present)} non-empty values. Refusing to store this slice."
+    )
 
 
 def validate_pair(paths, storage) -> dict:
@@ -88,6 +160,12 @@ def validate_pair(paths, storage) -> dict:
 
     events_df = load_table(events_path) if events_path is not None else None
     mentions_df = load_table(mentions_path) if mentions_path is not None else None
+
+    # Content check BEFORE the first append. Position matters: append_events()
+    # runs below, ahead of the whole mentions block, so a check placed with the
+    # mentions would let the events half of a rejected slice reach silver and
+    # leave a partial write behind. Raising here means nothing was stored.
+    check_confidence(mentions_df, mentions_path)
 
     n_events = dropped = n_mentions = 0
     mentions_clean = None
