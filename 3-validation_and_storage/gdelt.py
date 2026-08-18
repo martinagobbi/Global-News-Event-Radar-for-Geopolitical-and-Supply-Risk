@@ -84,6 +84,55 @@ def classify(path) -> str:
     return "unknown"
 
 
+# ── Field-width guard ────────────────────────────────────────────────────────
+# Mirrors 2-parsing/parser.check_field_width. Duplicated rather than imported
+# because parsing and validation are separate images with no shared package; the
+# alternative is a shared library for ~30 lines, across a container boundary.
+#
+# RAW input widths — deliberately NOT len(EVENT_COLUMNS) / len(MENTION_COLUMNS).
+# Mentions arrive 16 wide and are read against 19 names so the three enrichment
+# columns pad in empty; conflating the two numbers would reject every file.
+EXPECTED_FIELD_COUNT = {"events": 61, "mentions": 16}
+
+
+def check_field_width(raw: bytes, expected: int, kind: str, path=None) -> None:
+    """
+    Raise unless the first non-blank line of `raw` has exactly `expected`
+    tab-separated fields.
+
+    An empty payload passes: a slice whose filter matched nothing is written as
+    a 0-byte file, which is legitimate, and whose first line would otherwise
+    count as a single field.
+
+    This is a backstop, not the primary detector. Parsing rewrites each slice at
+    its declared width, so a feed-wide change is normally caught there and is
+    already invisible by the time it reaches here. What this catches is a file
+    that reached the hand-off directory WITHOUT passing through parsing — placed
+    by hand, replayed from dead_letter, or produced by an older build.
+    """
+    text = raw.decode("utf-8", errors="replace")
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        actual = len(line.split("\t"))
+        name = getattr(path, "name", path) or "<bytes>"
+        if actual > expected:
+            raise ValueError(
+                f"Looks like GDELT added more columns than expected to this "
+                f"file! {kind} file {name} has {actual} fields, expected "
+                f"{expected}. Refusing to load it: reading it positionally "
+                f"would shift every column."
+            )
+        if actual < expected:
+            raise ValueError(
+                f"Looks like GDELT removed columns, or this file is truncated! "
+                f"{kind} file {name} has {actual} fields, expected {expected}. "
+                f"Refusing to load it."
+            )
+        return
+    return                      # empty payload: nothing to check
+
+
 def is_valid_pair(paths) -> bool:
     """True if the given two paths are exactly one events file and one mentions file."""
     kinds = sorted(classify(p) for p in paths)
@@ -137,6 +186,18 @@ def load_table(path) -> pd.DataFrame:
         raise ValueError(f"Cannot classify GDELT file: {path.name}")
 
     raw = _read_bytes(path)
+    # Width check before the read. `on_bad_lines="skip"` does NOT cover this: it
+    # drops individual malformed LINES, whereas a feed-wide column change makes
+    # every line uniformly wider, which pandas absorbs by shifting names rather
+    # than by reporting a bad line.
+    #
+    # The expected width is the RAW input width, which for mentions is 16 — NOT
+    # len(columns), which is 19. The three extra names (article_title,
+    # article_keywords, enriched) are enrichment columns deliberately padded in
+    # by the fillna("") below, and comparing against 19 would reject every
+    # normal mentions file.
+    check_field_width(raw, EXPECTED_FIELD_COUNT[kind], kind, path)
+
     df = pd.read_csv(
         io.BytesIO(raw),
         sep="\t",

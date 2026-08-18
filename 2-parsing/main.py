@@ -78,7 +78,8 @@ from pathlib import Path
 
 import pandas as pd
 
-from parser import passes_filter, GDELT_COLUMNS, MENTIONS_COLUMNS
+from parser import (passes_filter, GDELT_COLUMNS, MENTIONS_COLUMNS,
+                    check_field_width, EVENTS_FIELD_COUNT, MENTIONS_FIELD_COUNT)
  
 logging.basicConfig(
     level=logging.INFO,
@@ -259,6 +260,12 @@ def process_pair(slice_id: str, ev_path: Path | None, mn_path: Path | None) -> N
     n_events_in = 0
 
     if ev_path is not None:
+        # Checked BEFORE the read, because the read cannot fail: pandas absorbs a
+        # width change by shifting columns instead of raising. This is also the
+        # LAST point at which a width change is visible — the write below emits
+        # exactly len(GDELT_COLUMNS) fields, so validation would see a
+        # correctly-shaped, wrongly-aligned file.
+        check_field_width(ev_path, EVENTS_FIELD_COUNT, "events")
         events_df = pd.read_csv(ev_path, sep="\t", header=None,
                                 names=GDELT_COLUMNS, dtype=str,
                                 keep_default_na=False, low_memory=False)
@@ -270,6 +277,13 @@ def process_pair(slice_id: str, ev_path: Path | None, mn_path: Path | None) -> N
             events_out = events_df
 
     if mn_path is not None:
+        # Matters MORE than the events check above, not less. A shifted events
+        # slice is stopped later by ClickHouse typing (GLOBALEVENTID and
+        # DATEADDED are UInt64, so shifted text fails the insert). Mentions get
+        # no such protection: a shift puts EventTimeDate into GLOBALEVENTID,
+        # which is a valid UInt64, so the rows would insert cleanly and attach
+        # every mention to the wrong event.
+        check_field_width(mn_path, MENTIONS_FIELD_COUNT, "mentions")
         mentions_df = pd.read_csv(mn_path, sep="\t", header=None,
                                   names=MENTIONS_COLUMNS, dtype=str,
                                   keep_default_na=False, low_memory=False)

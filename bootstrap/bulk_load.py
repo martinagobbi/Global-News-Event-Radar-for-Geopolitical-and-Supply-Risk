@@ -35,6 +35,7 @@ Usage (see docker-compose.bootstrap.yml):
     docker compose -f docker-compose.bootstrap.yml run --rm bootstrap
 """
 
+import io
 import logging
 import os
 import sys
@@ -50,7 +51,8 @@ sys.path.insert(0, "/app/parsing")
 sys.path.insert(0, "/app/validation")
 
 from parser import passes_filter, GDELT_COLUMNS, MENTIONS_COLUMNS   # 2-parsing
-from gdelt import EVENT_COLUMNS, MENTION_COLUMNS                     # 3-validation
+from gdelt import (EVENT_COLUMNS, MENTION_COLUMNS,                     # 3-validation
+                   check_field_width, EXPECTED_FIELD_COUNT)
 from storage import Storage                                          # 3-validation
 
 # The two layers name the same GDELT columns differently: parsing calls the key
@@ -93,12 +95,22 @@ def find_slices() -> dict:
 
 
 def read_zip(path: Path, columns: list) -> pd.DataFrame:
-    """Read the single CSV inside a GDELT ZIP as a header-less, all-string frame."""
+    """
+    Read the single CSV inside a GDELT ZIP as a header-less, all-string frame.
+
+    Width-checked first, and this site needs it as much as parsing does: the
+    loader reads GDELT archives DIRECTLY, never through 2-parsing, so nothing
+    upstream has normalised the file. It also writes thousands of slices in one
+    run, so an unnoticed column shift here would corrupt a whole backfill rather
+    than a single 15-minute slice.
+    """
     with zipfile.ZipFile(path) as zf:
         member = zf.namelist()[0]
-        with zf.open(member) as fh:
-            return pd.read_csv(fh, sep="\t", header=None, names=columns,
-                               dtype=str, keep_default_na=False, low_memory=False)
+        raw = zf.read(member)
+        kind = "events" if len(columns) >= 61 else "mentions"
+        check_field_width(raw, EXPECTED_FIELD_COUNT[kind], kind, path)
+        return pd.read_csv(io.BytesIO(raw), sep="\t", header=None, names=columns,
+                           dtype=str, keep_default_na=False, low_memory=False)
 
 
 def main() -> None:

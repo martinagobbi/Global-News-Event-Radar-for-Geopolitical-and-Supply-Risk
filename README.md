@@ -24,7 +24,7 @@ docker compose --env-file .env.testing up -d --build
 ./bootstrap/silver_snapshot.sh restore
 
 # 4. Three test profiles.
-# Without any profiles, the gold layer stays empty.
+# Without any profiles, the gold layer stays empty. With any profiles at all, the PostgreSQL store for gold-layer news data and the MongoDB store for user preferences are idempotently created.
 python3 5-serving/seed_test_users.py          # Needs `requests` on the host. Also, may have to type `python` instead of `python3`.
 
 # 5. OPTIONAL: Gold data from articles spanning 27/06/2026 at 17:15 to 27/07/2026 at 17:15.

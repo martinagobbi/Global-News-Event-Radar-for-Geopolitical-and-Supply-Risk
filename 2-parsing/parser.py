@@ -336,6 +336,73 @@ def to_silver_event(record: dict) -> dict:
 # layer scrapes with Newspaper3k.
 
 # GDELT 2.0 Mentions columns (16 columns, 0-based index)
+# ── Field-width guard ────────────────────────────────────────────────────────
+# GDELT's column count is a fixed part of its format, and every read in this
+# project supplies the names positionally (`header=None, names=[...]`). That
+# combination is silently destructive if the real width ever changes, which is
+# why this check exists rather than trusting the feed.
+#
+# Given N names and N+1 fields, pandas does NOT raise. It promotes the first
+# field to the DataFrame index and shifts every name one position left, so each
+# value lands under its neighbour's name. Measured on a real 513-row slice with
+# one extra column appended: no exception, shape still (513, 61), but
+# GlobalEventID held `20250816` (a Day), SOURCEURL held the new value, and
+# passes_filter selected 2 rows instead of 11.
+#
+# Downstream that is worse than an error, because the corruption is plausible:
+#   * parsing REWRITES the file at the declared width, so the extra field is
+#     gone by the time validation sees it — a guard there alone cannot fire;
+#   * events are caught eventually, but only by luck of typing: GLOBALEVENTID and
+#     DATEADDED are UInt64 in ClickHouse, so shifted text fails the insert with
+#     `TypeMismatchError`, and the slice is retried 3x then dead-lettered;
+#   * MENTIONS ARE NOT CAUGHT AT ALL. Shifting there puts EventTimeDate
+#     (`20260816133000`) into GLOBALEVENTID, which is a valid UInt64, so the rows
+#     insert cleanly and attach to the wrong events.
+#
+# Too FEW fields is rejected as well. The expected width here is the RAW input
+# width, not the length of the schema the rows are eventually stored under —
+# validation reads a 16-field mentions file against a 19-name list on purpose,
+# padding the three enrichment columns — so the two must not be confused.
+EVENTS_FIELD_COUNT   = 61
+MENTIONS_FIELD_COUNT = 16
+
+
+def check_field_width(path, expected: int, kind: str) -> None:
+    """
+    Raise unless the first non-blank line of `path` has exactly `expected`
+    tab-separated fields.
+
+    An EMPTY file passes. That is not laxity: a slice in which the relevance
+    filter matched nothing is written as a 0-byte file, which is legitimate and
+    common, and whose first line would otherwise count as one field and be
+    rejected. Emptiness is a row-count condition, not a schema one.
+
+    The first NON-BLANK line is measured, so a leading newline cannot be read as
+    a one-field row.
+    """
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            if not line.strip():
+                continue
+            actual = len(line.rstrip("\n").split("\t"))
+            if actual > expected:
+                raise ValueError(
+                    f"Looks like GDELT added more columns than expected to this "
+                    f"file! {kind} file {getattr(path, 'name', path)} has {actual} "
+                    f"fields, expected {expected}. Refusing to parse it: reading "
+                    f"it positionally would shift every column and corrupt the "
+                    f"slice silently."
+                )
+            if actual < expected:
+                raise ValueError(
+                    f"Looks like GDELT removed columns, or this file is "
+                    f"truncated! {kind} file {getattr(path, 'name', path)} has "
+                    f"{actual} fields, expected {expected}. Refusing to parse it."
+                )
+            return          # first non-blank line is the whole check
+    return                  # empty file: nothing to check
+
+
 MENTIONS_COLUMNS = [
     "GlobalEventID",            # 0  links the mention to an event
     "EventTimeDate",            # 1
