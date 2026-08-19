@@ -112,20 +112,40 @@ services:
   # runs the SAME job with SPARK_MASTER=local[*], inside the processing
   # container, so it needs neither of these two services.
   #
-  # These may roam: they hold no durable state, so Swarm can reschedule them
-  # anywhere. That is the opposite of the store nodes, every one of which is
-  # pinned (see docker-stack.stores.yml).
+  # ── Why these are PINNED, when they hold no durable state ──────────────────
+  # They used to roam, on the reasoning that a stateless service can run
+  # anywhere. That reasoning is right about correctness and wrong about memory.
+  #
+  # "Anywhere" includes store1–6, and those machines have no room. With 8 GB
+  # each, the declared ALLOWANCES already are:
+  #     store1–3   ClickHouse 4 GB + PostgreSQL ~2 GB (Spilo sets shared_buffers
+  #                to 25% of RAM, measured) + etcd + Keeper   ≈ 6+ GB
+  #     store4–6   ClickHouse 4 GB + MongoDB ~3.5 GB cache    ≈ 7.5 GB
+  # A 2 GB Spark worker scheduled onto either group overcommits the machine, and
+  # the kernel then kills the largest process on it — which would be ClickHouse
+  # or MongoDB, not Spark. That is the same failure that killed the driver JVM in
+  # testing mode on 2026-08-16, relocated onto a machine holding durable state.
+  #
+  # So both Spark services carry the same constraint as the rest of this stack.
+  # The backend replicas are pinned for the same reason: three copies is not much
+  # memory, but there is no reason for them to land on a store machine either.
   spark-master:
     image: bitnamilegacy/spark:3.5
     hostname: spark-master
     environment:
       SPARK_MODE: master
-    ports:
-      - "8080:8080"    # master web UI — watch partitions and executors here
+    # The web UI is deliberately NOT published. It is reachable over the overlay
+    # at spark-master:8080 from any machine in the cluster, which is enough to
+    # watch a job. Publishing it exposed it on EVERY node through the Swarm
+    # routing mesh, unauthenticated, and `spark.ui.killEnabled` defaults to true
+    # — so it offered anyone on the network a way to kill running applications.
+    # To look at it, tunnel: ssh -L 8080:spark-master:8080 <any-node>
     networks: [pipeline_network]
     deploy:
       replicas: 1
       endpoint_mode: dnsrr
+      placement:
+        constraints: ["node.labels.role == pipeline"]
       restart_policy: { condition: any, delay: 5s }
 
   spark-worker:
@@ -140,10 +160,31 @@ services:
       SPARK_WORKER_MEMORY: ${SPARK_WORKER_MEMORY:-2G}
     networks: [pipeline_network]
     deploy:
-      # One executor host per replica. Set SPARK_WORKERS before deploying, or
-      # scale live with `docker service scale radar_spark-worker=N` — Swarm
-      # places them on any machine, since they hold no durable state.
-      replicas: ${SPARK_WORKERS:-2}
+      # ── Why the default is ONE worker, not two ──────────────────────────────
+      # Every worker now lands on the pipeline machine (see the constraint
+      # below), so the replica count is bounded by that machine's RAM. Budget at
+      # 8 GiB, from measurements taken in testing mode:
+      #
+      #     OS + Docker daemon                        ~1.00 GiB
+      #     ingestion + parsing + validation          ~0.20 GiB
+      #     processing (driver JVM + uvicorn + py)    ~1.90 GiB
+      #     backend x3                                ~0.20 GiB
+      #     spark-master                              ~0.50 GiB
+      #                                        base   ~3.80 GiB
+      #     leaves for workers                        ~4.20 GiB
+      #
+      # A worker costs roughly SPARK_WORKER_MEMORY plus ~0.3 GiB of daemon and
+      # JVM overhead, so:
+      #     2 x 2.0G  ->  ~8.4 GiB total   OVERCOMMITTED
+      #     2 x 1.5G  ->  ~7.4 GiB total   93% committed, no room for a spike
+      #     1 x 2.0G  ->  ~6.1 GiB total   fits with real headroom  <- default
+      #
+      # Raise SPARK_WORKERS only after raising the machine, or after reclaiming
+      # store-side allowance: MongoDB is permitted ~3.5 GB and was measured
+      # using 145 MiB, which is the largest unused reservation in the cluster.
+      replicas: ${SPARK_WORKERS:-1}
+      placement:
+        constraints: ["node.labels.role == pipeline"]
       restart_policy: { condition: any, delay: 5s }
 
   processing:
@@ -190,6 +231,14 @@ services:
     networks: [pipeline_network]
     deploy:
       replicas: 3
+      # Pinned with everything else in this stack. Three replicas are only
+      # ~0.2 GiB together, so this is not about memory pressure — it is that a
+      # store machine has no spare allowance for anything (see spark-worker
+      # above), and an unpinned service is one Swarm reschedule away from
+      # landing on one. Published ports are unaffected: the routing mesh answers
+      # :8000 on EVERY node regardless of where the tasks actually run.
+      placement:
+        constraints: ["node.labels.role == pipeline"]
       restart_policy: { condition: any, delay: 5s }
 
 volumes:
