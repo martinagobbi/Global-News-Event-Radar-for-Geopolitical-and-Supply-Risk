@@ -26,6 +26,8 @@ import logging
 import os
 from pathlib import Path
 
+from datetime import datetime
+
 import pandas as pd      # check_confidence() uses to_numeric for the range test
 
 from enrichment import enrich_dataframe
@@ -127,6 +129,81 @@ def check_confidence(mentions_df, path=None) -> None:
     )
 
 
+# ── DATEADDED validity check ─────────────────────────────────────────────────
+# Same contract as check_confidence, for the same reason and with the same
+# consequences: empty passes, anything else invalid rejects the WHOLE slice by
+# raising, and the pair then retries three times before being dead-lettered.
+#
+# This one matters more than Confidence, because DATEADDED is the watermark.
+# `max(DATEADDED)` is what the processing layer polls to decide that silver has
+# grown, so a corrupt value does not merely store a wrong number — it decides
+# whether the gold layer is rebuilt at all.
+#
+# It also closes a genuinely silent failure. The column is UInt64 in ClickHouse,
+# but nothing invalid ever reaches ClickHouse to be rejected: storage._to_uint()
+# converts anything unparseable to 0 first. Measured:
+#     _to_uint('https://example.com/story') -> 0
+#     _to_uint('85.5')                      -> 0
+# A slice whose columns had shifted would therefore be STORED, every row with
+# DATEADDED = 0. Zero is below every real slice id, so max(DATEADDED) would not
+# move, the watermark would not advance, and gold would quietly stop updating
+# while silver kept growing — the exact failure signature that is hardest to
+# diagnose from the dashboard.
+#
+# Validity is "14 digits that parse as a real timestamp", which is what a GDELT
+# slice id is (YYYYMMDDHHMMSS, e.g. 20260816133000). Length alone is too weak —
+# it would accept 99999999999999 — and a bare range test cannot express "month
+# 13 does not exist".
+DATEADDED_FORMAT = "%Y%m%d%H%M%S"
+DATEADDED_WIDTH  = 14      # a GDELT slice id is always exactly this wide
+
+
+def check_dateadded(events_df, path=None) -> None:
+    """
+    Raise unless every non-empty DATEADDED is a valid YYYYMMDDHHMMSS timestamp.
+
+    Empty passes, matching check_confidence: an absent value is "not provided",
+    and rejecting it would discard good slices the first time GDELT omits it.
+    """
+    if events_df is None or "DATEADDED" not in events_df.columns:
+        return
+
+    values = events_df["DATEADDED"].astype(str).str.strip()
+    present = values[values != ""]
+    if present.empty:
+        return
+
+    # BOTH tests are needed, and strptime alone is not enough. `%Y` matches
+    # greedily rather than exactly four digits, so a truncated id parses happily:
+    # strptime("202608161330", "%Y%m%d%H%M%S") succeeds, silently reading a
+    # 12-digit value as a date. The explicit width test is what rejects a
+    # truncated or padded id; strptime is what rejects an impossible one such as
+    # month 13. Verified: 12 digits passed strptime and is caught by the length
+    # check; 20261316133000 passes the length check and is caught by strptime.
+    bad = []
+    for value in present.unique():
+        if len(value) != DATEADDED_WIDTH or not value.isdigit():
+            bad.append(value)
+            continue
+        try:
+            datetime.strptime(value, DATEADDED_FORMAT)
+        except (ValueError, TypeError):
+            bad.append(value)
+
+    if not bad:
+        return
+
+    n_bad = int(present.isin(bad).sum())
+    name = getattr(path, "name", path) or "<events>"
+    raise ValueError(
+        f"DATEADDED must be a 14-digit GDELT slice timestamp (YYYYMMDDHHMMSS): "
+        f"{name} has {n_bad} invalid value(s) across {len(bad)} distinct form(s) "
+        f"(e.g. {sorted(bad)[:_MAX_REPORTED]}), out of {len(present)} non-empty. "
+        f"Refusing to store this slice — DATEADDED is the watermark, so a wrong "
+        f"value here decides whether gold is rebuilt at all."
+    )
+
+
 def validate_pair(paths, storage) -> dict:
     """
     Validate and ingest one slice: an events file, a mentions file, or both.
@@ -166,6 +243,7 @@ def validate_pair(paths, storage) -> dict:
     # mentions would let the events half of a rejected slice reach silver and
     # leave a partial write behind. Raising here means nothing was stored.
     check_confidence(mentions_df, mentions_path)
+    check_dateadded(events_df, events_path)
 
     n_events = dropped = n_mentions = 0
     mentions_clean = None
