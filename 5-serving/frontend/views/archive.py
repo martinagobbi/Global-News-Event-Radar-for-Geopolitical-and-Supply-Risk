@@ -27,4 +27,4 @@ if not archived:
     st.info("No archived events yet.")
 else:
     for event in archived:
-        render_event_card(event)
+        render_event_card(event, context="archive")

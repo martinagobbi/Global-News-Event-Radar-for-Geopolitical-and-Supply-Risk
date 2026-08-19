@@ -32,4 +32,4 @@ if not events:
     st.info("No events flagged as needing action yet.")
 else:
     for event in events:
-        render_event_card(event)
+        render_event_card(event, context="red")

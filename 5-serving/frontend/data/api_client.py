@@ -33,3 +33,8 @@ def post_json(path: str, payload: dict | None = None) -> Any:
 
 def put_json(path: str, payload: dict) -> Any:
     return _request("PUT", path, json=payload)
+
+def delete_json(path: str, payload: dict | None = None) -> Any:
+    if payload is not None:
+        return _request("DELETE", path, json=payload)
+    return _request("DELETE", path)

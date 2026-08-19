@@ -3,7 +3,7 @@ from __future__ import annotations
 import streamlit as st
 
 from components.tag_buttons import render_tag_buttons
-
+from data.user_store import get_current_user, remove_event_tag, set_event_tag
 
 # How many articles are listed on the card without the reader opening anything.
 # The backend already caps the full list at 20, which is what the expander shows.
@@ -12,43 +12,94 @@ PREVIEW_ARTICLES = 3
 
 def _tag_badge(tag: str | None) -> str:
     if tag == "requires_action":
-        return ":red[Needs action from us]"
+        return ':red[You tagged with "Needs action from us"]'
     if tag == "monitor":
-        return ":orange[Look out for developments]"
+        return ':orange[You tagged with "Look out for developments"]'
     if tag == "archive":
         return ":green[Archived]"
     return "You did not apply a tag"
 
 
 def render_event_card(event: dict, context: str = "main") -> None:
-    """
-    Render a single event card.
+    """Render a single event card."""
+    global_event_id = event["global_event_id"]
+    user_id = get_current_user()
 
-    The backend has already applied:
-      - InRawText filter (only InRawText=1 articles if any exist)
-      - Ordering: Confidence DESC, abs(MentionDocTone) ASC
-      - 20-article cap
+    # Intercept archive/unarchive actions to hide the card body and display only the message
+    if context == "main" and st.session_state.get(f"main_archive_{global_event_id}"):
+        set_event_tag(user_id, global_event_id, "archive")
+        with st.container(border=True):
+            st.success("Event moved out of this Radar View page and into the \"Archive: Not important\" page.")
+        return
 
-    articles[0] is therefore the highest-confidence article and its
-    mention_identifier is used as the card title.
+    if context == "red":
+        if st.session_state.get(f"{context}_undo_needs_action_{global_event_id}"):
+            remove_event_tag(user_id, global_event_id)
+            with st.container(border=True):
+                st.success("Event moved out of this page (is still in Radar View).")
+            return
+        
+        if st.session_state.get(f"{context}_monitor_{global_event_id}"):
+            set_event_tag(user_id, global_event_id, "monitor")
+            with st.container(border=True):
+                st.success("Event moved out of this page (is still in Radar View), and copied to the \"Looking out for developments\" page.")
+            return
 
-    The top PREVIEW_ARTICLES are listed on the card itself and the remainder sit
-    behind an expander, so a reader can judge an event's coverage at a glance
-    instead of having to open every card to find out what is in it.
-    """
+        if st.session_state.get(f"main_archive_{global_event_id}"):
+            set_event_tag(user_id, global_event_id, "archive")
+            with st.container(border=True):
+                st.success("Event moved out of this page and into the \"Archive: Not important\" page.")
+            return
+
+    if context == "yellow":
+        if st.session_state.get(f"{context}_needs_action_{global_event_id}"):
+            set_event_tag(user_id, global_event_id, "requires_action")
+            with st.container(border=True):
+                st.success("Event moved out of this page (is still in Radar View) and copied to the \"Needs action from us\" page.")
+            return
+
+        if st.session_state.get(f"{context}_undo_monitor_{global_event_id}"):
+            remove_event_tag(user_id, global_event_id)
+            with st.container(border=True):
+                st.success("Event moved out of this page (is still in Radar View).")
+            return
+
+        if st.session_state.get(f"main_archive_{global_event_id}"):
+            set_event_tag(user_id, global_event_id, "archive")
+            with st.container(border=True):
+                st.success("Event moved out of this page and into the \"Archive: Not important\" page.")
+            return
+
+    if context == "archive":
+        if st.session_state.get(f"{context}_needs_action_{global_event_id}"):
+            set_event_tag(user_id, global_event_id, "requires_action")
+            with st.container(border=True):
+                st.success("Event back in Radar View, moved out of this page, and copied to the \"Needs action from us\" page.")
+            return
+
+        if st.session_state.get(f"{context}_monitor_{global_event_id}"):
+            set_event_tag(user_id, global_event_id, "monitor")
+            with st.container(border=True):
+                st.success("Event back in Radar View, moved out of this page, and copied to the \"Looking out for developments\" page.")
+            return
+
+        if st.session_state.get(f"{context}_unarchive_{global_event_id}"):
+            remove_event_tag(user_id, global_event_id)
+            with st.container(border=True):
+                st.success("Event back in Radar View and moved out of this page.")
+            return
+
     articles: list[dict] = event.get("articles", [])
 
     cameo_label = event.get("cameo_label")
     if cameo_label:
         cameo_label = cameo_label.removesuffix(", not specified below")
 
-    # Title = mention_identifier of articles[0] (highest confidence after backend sort)
     card_title = (
         articles[0]["mention_identifier"]
         if articles and not articles[0]["mention_identifier"].startswith("No article title")
-        else event.get("card_title", f"\"{event['cameo_label']}\" type of event (ID: {event['global_event_id']})")
+        else event.get("card_title", f'"{event["cameo_label"]}" type of event (ID: {event["global_event_id"]})')
     )
-    top_url = event.get("top_article_url") or (articles[0]["url"] if articles else None)
 
     with st.container(border=True):
         st.markdown(f"### {card_title}")
@@ -58,7 +109,6 @@ def render_event_card(event: dict, context: str = "main") -> None:
             f"{_tag_badge(event.get('user_tag'))}"
         )
 
-        # InRawText disclaimer — flag set by the backend
         if event.get("inrawtext_filtered"):
             st.info(
                 "ℹ️ Only articles explicitly identified by GDELT as covering this event "
@@ -73,31 +123,19 @@ def render_event_card(event: dict, context: str = "main") -> None:
 
         meta = st.columns(2)
         meta[0].metric("Number of articles", len(articles))
-        #meta[1].metric("Top confidence", articles[0]["confidence"] if articles else "N/A")
         meta[1].metric("Goldstein score", event["goldstein"])
-        #meta[3].metric("General event", event["cameo_label"])
 
-        #st.write(f"Risk category: `{event.get('risk_category', 'Not classified')}`") # If we ever want to bring risk_category back, just uncomment this and the related thing in briefing.py
-
-        
         date_to_show = str(event["event_date"]).removesuffix(" 00:00:00")
 
         if cameo_label:
             st.write(f'Event type that makes this of interest: "{cameo_label}"')
 
         st.write(f"Event date: {date_to_show}")
-        #if top_url:
-            #st.link_button("Open top source", top_url)
 
-        # The first few articles are listed on the card itself, so the reader sees
-        # actual coverage without opening anything. The rest — the backend caps the
-        # list at 20 — stay behind the expander.
         if articles:
             st.write("**Articles (sorted by Confidence score, then Tone)**")
-            i = 0
-            for a in articles[:PREVIEW_ARTICLES]:
-                first_article_in_preview = True if i == 0 else False
-                if first_article_in_preview:
+            for i, a in enumerate(articles[:PREVIEW_ARTICLES]):
+                if i == 0:
                     st.caption("---------------------------------------------------------")
                 st.markdown(f"- [{a['mention_identifier']}]({a['url']})")
                 st.caption(
@@ -105,10 +143,7 @@ def render_event_card(event: dict, context: str = "main") -> None:
                     f"       **Tone** (−100: max negative; +100: max positive): **{a['mention_doc_tone']}**"
                 )
                 st.caption("---------------------------------------------------------")
-                i += 1
-            i = 0
 
-            # Only worth an expander when it would actually reveal something.
             if len(articles) > PREVIEW_ARTICLES:
                 article_labels = {
                     f"{i + 1}. {a['mention_identifier']}": a

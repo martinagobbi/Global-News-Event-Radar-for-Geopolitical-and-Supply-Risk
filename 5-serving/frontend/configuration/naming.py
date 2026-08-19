@@ -14,8 +14,8 @@ _NAME_RE = re.compile(r"^[A-Za-z0-9_]{1,%d}$" % NAME_MAX_CHARS)
 
 NAME_HELP = (
     "Necessary to link you, within our database, to the news you might want. "
-    "For this reason, whatever username you set could only have had Roman letters, Arabic numerals and underscores (no spaces). "
-    f"Max characters: {NAME_MAX_CHARS}"
+    "For this reason, whatever username you set could only have had Roman letters, Arabic numerals and underscores (no spaces)."
+    f"\nMax characters: {NAME_MAX_CHARS}"
 )
 
 
