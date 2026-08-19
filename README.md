@@ -10,7 +10,6 @@ Two modes are in place: testing mode and intended mode. **Only testing mode can 
 
 ### Startup
 
-
 ```bash
 # 1. Stores
 
@@ -33,13 +32,33 @@ python3 5-serving/seed_test_users.py # Needs `requests` on the machine where thi
 # 6. Service frontend.
 # While all previous steps just need to be run on the backend, this is the only code that each frontend machine will need.
 docker compose -f 5-serving/docker-compose.serving.yml up --build
+
+# 7. You may then view the radar's UI via this link:
+[**http://localhost:8501**](http://localhost:8501){.uri}.
+
+# 8. You may then log in with one of these test accounts:
+[]
 ```
 
 Here in testing mode, backend machines and frontend machines are the same one machine, but these steps are still kept separate to keep the production-level design (to also have distribution across machines, see intended mode below).
 
 ### Shutdown
 
+OPTIONAL: Remove all data except the one from the 30-days seed
 
+``` bash
+docker compose --env-file .env.testing stop ingestion parsing validation        # Stops live data from being ingested
+./bootstrap/silver_snapshot.sh trim seed                                        # Removes all non-30-day-seed data from silver
+docker exec pipeline_processing python3 -c "import main; main.recompute_all()"  # Removes all non-30-day-seed data from gold
+```
+
+Not optional: shutdown procedure (that does not destroy the volumes, so user preferences and data for users stay intact)
+
+``` bash
+docker compose -f 5-serving/docker-compose.serving.yml down
+docker compose --env-file .env.testing down
+docker compose --env-file .env.testing -f docker-compose.stores.yml down
+```
 
 ### Explanation of the process
 
