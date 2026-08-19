@@ -3,6 +3,8 @@ from datetime import datetime, timezone
 
 import streamlit as st
 
+from auth import require_auth
+
 from components.branding import use_neutral_spinner
 from components.briefing import render_briefing
 from components.heatmap import render_heatmap
@@ -16,7 +18,7 @@ from data.gold_layer import (
     get_gold_layer_status,
     get_system_status,
 )
-from data.user_store import get_current_user, get_user_profile, is_first_login
+from data.user_store import get_user_profile, is_first_login
 from components.recompute_notice import (
     gold_never_built,
     recompute_pending,
@@ -35,7 +37,7 @@ default_briefing_days = 30
 use_neutral_spinner()
 st.title("Radar View")
 
-user_id = get_current_user()
+user_id = require_auth()
 
 try:
     if is_first_login(user_id):

@@ -1,5 +1,7 @@
 import streamlit as st
 
+from auth import require_auth
+
 from configuration.countries import get_territory_options
 # from configuration.sectors import RISK_CATEGORY_OPTIONS  # replaced by the keyword form
 from components.branding import use_neutral_spinner
@@ -7,14 +9,14 @@ from components.keyword_form import render_keyword_questions
 from components.recompute_notice import mark_recompute_pending, render_recompute_notice
 from data.api_client import BackendUnavailable
 from data.gold_layer import get_events_version
-from data.user_store import get_current_user, get_user_profile, is_first_login, save_user_profile
+from data.user_store import get_user_profile, is_first_login, save_user_profile
 
 
 use_neutral_spinner()
 st.title("User setup")
 st.caption("Configure your supply chain monitoring perimeter.")
 
-user_id = get_current_user()
+user_id = require_auth()
 
 try:
     already_registered = not is_first_login(user_id)
@@ -126,4 +128,4 @@ if save_top or save_bottom:
     # and keep saying it on the dashboard until the new pool lands.
     mark_recompute_pending(version_before_save)
     render_recompute_notice()
-    st.page_link("pages/dashboard.py", label="Open Radar View")
+    st.page_link("views/dashboard.py", label="Open Radar View")

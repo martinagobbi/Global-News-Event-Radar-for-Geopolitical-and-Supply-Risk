@@ -25,7 +25,7 @@ authenticated = is_authenticated()
 
 if not authenticated:
     # Sole page: no sidebar navigation is rendered for a single-page nav.
-    page = st.navigation([st.Page("pages/login.py", title="Sign in")])
+    page = st.navigation([st.Page("views/login.py", title="Sign in")])
 else:
     user_id = current_user()
  
@@ -44,7 +44,7 @@ else:
             st.rerun()
     with col2:
         if st.button("Preferences", use_container_width=True):
-            st.switch_page("pages/preferences.py")
+            st.switch_page("views/preferences.py")
             
     st.sidebar.caption(
         f"Inactive users are logged out after {IDLE_TIMEOUT_SECONDS // 60} minutes."
@@ -53,11 +53,11 @@ else:
     # Preferences stays in the sidebar list to remain routable[cite: 1]. 
     # Use the CSS snippet in components/branding.py to visually hide it from the auto-generated menu.
     page = st.navigation([
-        st.Page("pages/dashboard.py",     title="Radar View", default=True),
-        st.Page("pages/needs_action.py",  title="Needs action from us"),
-        st.Page("pages/monitoring.py",    title="Looking out for developments"),
-        st.Page("pages/archive.py",       title="Archive: Not important"),
-        st.Page("pages/preferences.py",   title="Preferences"),
+        st.Page("views/dashboard.py",     title="Radar View", default=True),
+        st.Page("views/needs_action.py",  title="Needs action from us"),
+        st.Page("views/monitoring.py",    title="Looking out for developments"),
+        st.Page("views/archive.py",       title="Archive: Not important"),
+        st.Page("views/preferences.py",   title="Preferences"),
     ])
  
 page.run()

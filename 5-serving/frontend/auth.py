@@ -64,6 +64,41 @@ def current_user() -> str | None:
     return st.session_state.get("auth_user")
 
 
+def require_auth() -> str:
+    """
+    Gate a protected page. Returns the signed-in user id, or halts the script.
+
+    Defence in depth. app.py already decides which pages exist for the current
+    session — an unauthenticated run registers only the sign-in page, so the
+    others are not routable and Streamlit answers their URLs with "Page not
+    found". That was, until this function existed, the ONLY thing protecting
+    them, and it protects by ABSENCE rather than by refusal.
+
+    That is a fragile thing to rely on, for two reasons found on 2026-08-18:
+
+      * Nothing else checked. Pages read the user through
+        data.user_store.get_current_user(), which is `current_user() or ""` —
+        it never stops and never redirects, so a page reached by any means at
+        all would render happily for an empty user id.
+      * The absence is not guaranteed. Streamlit automatically discovers a
+        directory named `pages/` beside the entrypoint and builds its own
+        navigation from it, which is how a sidebar listing every page appeared
+        on the sign-in screen. That directory is now `views/`, which Streamlit
+        does not auto-discover, but renaming a folder is not an access control.
+
+    So each protected page calls this, and the guarantee stops depending on the
+    layout of the app. is_authenticated() is safe to call twice per rerun: it
+    only reads session state and refreshes the idle timestamp.
+
+    NOT a substitute for backend authentication. As the module docstring says,
+    the serving API has none of its own — this gates the UI, nothing more.
+    """
+    if not is_authenticated():
+        st.error("Please sign in to view this page.")
+        st.stop()
+    return current_user()
+
+
 def _expired() -> bool:
     last = st.session_state.get("auth_last_seen")
     if last is None:
