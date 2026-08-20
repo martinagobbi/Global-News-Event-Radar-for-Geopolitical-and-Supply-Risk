@@ -83,17 +83,10 @@ elif system_status.get("status") == "ERROR":
     )
 
 # ── Preferences just changed: the pool is being rebuilt ────────────────────
-# Shown from the moment preferences are saved until the rebuild lands, so the
-# dashboard never silently shows articles chosen by the old preferences. It
-# clears itself when the fingerprint moves, and the green message below then
-# announces the new set.
 if recompute_pending(live_gold_version):
     render_recompute_notice()
 
 # ── "Your articles changed" nudge (green = good news) ──────────────────────
-# live_gold_version is polled cheaply every rerun; st.session_state.gold_version
-# is the version the currently-shown events were rendered against (set in the
-# data-fetch block below). If they differ, new gold has arrived for this user.
 elif (
     live_gold_version is not None
     and st.session_state.get("gold_version") not in (None, live_gold_version)
@@ -112,29 +105,7 @@ with header_right:
     manual_refresh = st.button("Refresh now")
 
 # ── Silver watermark ───────────────────────────────────────────────────────
-# max(DATEADDED) in silver as of the last publish: the newest GDELT slice this
-# briefing was actually built from. Shown permanently, not only when something is
-# wrong — the "technical difficulties" banner appears only once the pipeline is
-# 45+ minutes behind (SILVER_STALE_SECONDS), and below that threshold a frozen
-# pipeline looks exactly like a healthy one.
-#
-# Reported as a LAG IN SLICES against the clock, not as a raw age, because a raw
-# age cannot be judged without knowing the cadence. Two separate 15-minute cycles
-# are involved and they are not in phase:
-#
-#   * GDELT names slices on exact quarter hours, and publishes slightly early —
-#     measured 2026-08-16, lastupdate.txt pointed at 18:00:00 while the clock read
-#     17:58:29. So the newest id in existence can lead floor(now) by a slice.
-#   * OUR poller runs every 15 minutes FROM STARTUP, so it is not aligned to the
-#     quarter hour at all and can take a further full cycle to notice a slice.
-#
-# Both push the same way, so being one slice behind is the normal resting state,
-# not a fault. floor(now) is used as the reference precisely because it can only
-# UNDERSTATE the lag — it never invents a problem that is not there.
 _SLICE = 15 * 60
-# The last slice the committed seed covers — kept in step with SEED_LAST_SLICE in
-# bootstrap/silver_snapshot.sh. Anything later can only have arrived live, which
-# is what separates "never started" from "started and stopped" below.
 _SEED_LAST_SLICE = "20260727171500"
 _watermark = system_status.get("silver_watermark")
 if _watermark:
@@ -152,20 +123,6 @@ if _watermark:
             f"{_light} Newest data held: **{_wm_dt:%Y-%m-%d %H:%M} UTC** "
             f"({_behind}). Latest GDELT slice now: {_expected:%Y-%m-%d %H:%M} UTC."
         )
-        # A large lag has two completely different causes, and saying the wrong
-        # one is worse than saying nothing:
-        #
-        #   * the store holds ONLY the committed seed, which is what a fresh
-        #     clone looks like before its first live slice; or
-        #   * live slices did arrive and then STOPPED — the machine slept, the
-        #     network dropped, or the processing layer wedged.
-        #
-        # They are told apart by the watermark itself, not by how big the lag is.
-        # The seed ends at a fixed slice (SEED_LAST_SLICE in
-        # bootstrap/silver_snapshot.sh); anything after it can only have come
-        # from live ingestion. Judging by lag alone got this wrong on 2026-08-17,
-        # telling the user "live ingestion has not delivered a slice yet" while
-        # they were looking at live data from 23:00 the previous night.
         if _lag >= 8:
             if _watermark <= _SEED_LAST_SLICE:
                 st.caption(
@@ -181,7 +138,6 @@ if _watermark:
                     "layer that cannot publish, both look like this."
                 )
     except ValueError:
-        # Never let an unparseable value hide the raw one; it is diagnostic.
         st.caption(f"Silver watermark: `{_watermark}` (unrecognised format)")
 else:
     st.caption(
@@ -194,18 +150,6 @@ st.info(
     "entirely unrelated to supply chains, which may thus not feature in this briefing."
 )
 
-# ── Metrics ────────────────────────────────────────────────────────────────
-#pipeline_status = get_gold_layer_status(user_id)
-#metrics = st.columns(4)
-#metrics[0].metric("User", user_id)
-#metrics[1].metric("Monitored territories", len(profile.get("territories", [])))
-#metrics[2].metric("Keywords", sum(len(v) for v in (profile.get("keywords") or {}).values()))
-#metrics[3].metric("Data status", pipeline_status)
-
-# ── Profile update ─────────────────────────────────────────────────────────
-# NOTE: the setup page is only routable until a profile exists, so there is no
-# link to it here. See the note in the reply — preference editing needs a home.
-
 # ── Data fetch (rate-limited) ──────────────────────────────────────────────
 now = time.time()
 if "last_data_fetch" not in st.session_state:
@@ -215,12 +159,6 @@ should_refresh = manual_refresh or (now - st.session_state.last_data_fetch >= DA
 
 if should_refresh:
     st.session_state.cached_events       = get_events(user_id)
-    st.session_state.cached_older_events = get_events(
-        user_id,
-        max_age_days=profile.get("older_news_days", 180),
-        min_age_days=profile.get("briefing_days", default_briefing_days),
-        exclude_archived=True,
-    )
     st.session_state.cached_summary      = get_events_summary(user_id)
     st.session_state.last_data_fetch     = now
     st.session_state.gold_version        = live_gold_version
@@ -228,7 +166,6 @@ if should_refresh:
         st.success("Data refreshed.")
 
 events       = st.session_state.get("cached_events", [])
-older_events = st.session_state.get("cached_older_events", [])
 summary      = st.session_state.get("cached_summary", [])
 
 # ── Map ────────────────────────────────────────────────────────────────────
@@ -267,26 +204,21 @@ with status_col:
         **Main briefing:** last {briefing_days} days  
         *(editable in Preferences)*
 
-        **Older-risk lookback:** {briefing_days} to \
-{profile.get("older_news_days", 180)} days ago  
-        *(editable in Preferences)*
-
-        **Briefing events:** {len(events)}
+        **Events:** {len(events)}
         """
     )
+
 # ── Briefing ───────────────────────────────────────────────────────────────
 st.subheader("Radar Briefing")
 
-# An empty briefing has two very different causes, and they must not look alike:
-# the gold layer has never been built yet, or it has been built and nothing
-# matched this user's filters.
 if not events:
     if gold_never_built(system_status):
         render_first_build_notice()
     else:
         render_no_matches_notice()
 
-render_briefing(events, selected_countries=profile.get("territories", []), older_events=older_events)
+# The older_events parameter is now removed
+render_briefing(events, selected_countries=profile.get("territories", []))
 
 # ── Polling loop ───────────────────────────────────────────────────────────
 time.sleep(STATUS_POLL_SECONDS)

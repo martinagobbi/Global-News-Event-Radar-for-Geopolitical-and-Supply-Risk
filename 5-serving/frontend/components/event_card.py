@@ -5,9 +5,15 @@ import streamlit as st
 from components.tag_buttons import render_tag_buttons
 from data.user_store import get_current_user, remove_event_tag, set_event_tag
 
-# How many articles are listed on the card without the reader opening anything.
-# The backend already caps the full list at 20, which is what the expander shows.
 PREVIEW_ARTICLES = 3
+
+
+def _update_session_cache(global_event_id: str, new_tag: str | None) -> None:
+    for cache_key in ("cached_events", "cached_older_events", "cached_historical_events"):
+        if cache_key in st.session_state:
+            for event in st.session_state[cache_key]:
+                if event.get("global_event_id") == global_event_id:
+                    event["user_tag"] = new_tag
 
 
 def _tag_badge(tag: str | None) -> str:
@@ -25,66 +31,77 @@ def render_event_card(event: dict, context: str = "main") -> None:
     global_event_id = event["global_event_id"]
     user_id = get_current_user()
 
-    # Intercept archive/unarchive actions to hide the card body and display only the message
-    if context == "main" and st.session_state.get(f"main_archive_{global_event_id}"):
-        set_event_tag(user_id, global_event_id, "archive")
-        with st.container(border=True):
-            st.success("Event moved out of this Radar View page and into the \"Archive: Not important\" page.")
-        return
+    # Intercept card-hiding actions using exact keys
+    if context == "main":
+        if any(st.session_state.get(f"main_{k}_{global_event_id}") for k in ["archive", "red_archive", "yellow_archive"]):
+            set_event_tag(user_id, global_event_id, "archive")
+            _update_session_cache(global_event_id, "archive")
+            with st.container(border=True):
+                st.success("Event moved out of this Radar View page and into the \"Archive: Not important\" page.")
+            return
 
     if context == "red":
-        if st.session_state.get(f"{context}_undo_needs_action_{global_event_id}"):
+        if st.session_state.get(f"red_red_untag_{global_event_id}"):
             remove_event_tag(user_id, global_event_id)
+            _update_session_cache(global_event_id, None)
             with st.container(border=True):
                 st.success("Event moved out of this page (is still in Radar View).")
             return
-        
-        if st.session_state.get(f"{context}_monitor_{global_event_id}"):
+
+        if st.session_state.get(f"red_red_to_yellow_{global_event_id}"):
             set_event_tag(user_id, global_event_id, "monitor")
+            _update_session_cache(global_event_id, "monitor")
             with st.container(border=True):
                 st.success("Event moved out of this page (is still in Radar View), and copied to the \"Looking out for developments\" page.")
             return
 
-        if st.session_state.get(f"main_archive_{global_event_id}"):
+        if st.session_state.get(f"red_red_archive_{global_event_id}"):
             set_event_tag(user_id, global_event_id, "archive")
+            _update_session_cache(global_event_id, "archive")
             with st.container(border=True):
                 st.success("Event moved out of this page and into the \"Archive: Not important\" page.")
             return
 
     if context == "yellow":
-        if st.session_state.get(f"{context}_needs_action_{global_event_id}"):
+        if st.session_state.get(f"yellow_yellow_to_red_{global_event_id}"):
             set_event_tag(user_id, global_event_id, "requires_action")
+            _update_session_cache(global_event_id, "requires_action")
             with st.container(border=True):
                 st.success("Event moved out of this page (is still in Radar View) and copied to the \"Needs action from us\" page.")
             return
 
-        if st.session_state.get(f"{context}_undo_monitor_{global_event_id}"):
+        if st.session_state.get(f"yellow_yellow_untag_{global_event_id}"):
             remove_event_tag(user_id, global_event_id)
+            _update_session_cache(global_event_id, None)
             with st.container(border=True):
                 st.success("Event moved out of this page (is still in Radar View).")
             return
 
-        if st.session_state.get(f"main_archive_{global_event_id}"):
+        if st.session_state.get(f"yellow_yellow_archive_{global_event_id}"):
             set_event_tag(user_id, global_event_id, "archive")
+            _update_session_cache(global_event_id, "archive")
             with st.container(border=True):
                 st.success("Event moved out of this page and into the \"Archive: Not important\" page.")
             return
 
     if context == "archive":
-        if st.session_state.get(f"{context}_needs_action_{global_event_id}"):
+        if st.session_state.get(f"archive_arc_to_red_{global_event_id}"):
             set_event_tag(user_id, global_event_id, "requires_action")
+            _update_session_cache(global_event_id, "requires_action")
             with st.container(border=True):
                 st.success("Event back in Radar View, moved out of this page, and copied to the \"Needs action from us\" page.")
             return
 
-        if st.session_state.get(f"{context}_monitor_{global_event_id}"):
+        if st.session_state.get(f"archive_arc_to_yellow_{global_event_id}"):
             set_event_tag(user_id, global_event_id, "monitor")
+            _update_session_cache(global_event_id, "monitor")
             with st.container(border=True):
                 st.success("Event back in Radar View, moved out of this page, and copied to the \"Looking out for developments\" page.")
             return
 
-        if st.session_state.get(f"{context}_unarchive_{global_event_id}"):
+        if st.session_state.get(f"archive_unarchive_{global_event_id}"):
             remove_event_tag(user_id, global_event_id)
+            _update_session_cache(global_event_id, None)
             with st.container(border=True):
                 st.success("Event back in Radar View and moved out of this page.")
             return
@@ -133,14 +150,16 @@ def render_event_card(event: dict, context: str = "main") -> None:
         st.write(f"Event date: {date_to_show}")
 
         if articles:
-            st.write("**Articles (sorted by Confidence score, then Tone)**")
+            st.write("Articles below are sorted by:")
+            st.write("- Confidence score (percentage of confidence that the article is related to this event)")
+            st.write("- Tone score (−100: max negative; +100: max positive)")
             for i, a in enumerate(articles[:PREVIEW_ARTICLES]):
                 if i == 0:
                     st.caption("---------------------------------------------------------")
                 st.markdown(f"- [{a['mention_identifier']}]({a['url']})")
                 st.caption(
-                    f"**Confidence** that this article is related to this event: **{a['confidence']}%**       |"
-                    f"       **Tone** (−100: max negative; +100: max positive): **{a['mention_doc_tone']}**"
+                    f"Confidence: {a['confidence']}%       |"
+                    f"       Tone: {a['mention_doc_tone']}"
                 )
                 st.caption("---------------------------------------------------------")
 
@@ -158,8 +177,8 @@ def render_event_card(event: dict, context: str = "main") -> None:
                     selected = article_labels[selected_label]
                     st.link_button("Open selected article", selected["url"])
                     st.caption(
-                        f"Confidence that this article is related to this event: {selected['confidence']}%       |"
-                        f"       Tone (−100: max negative; +100: max positive): {selected['mention_doc_tone']}"
+                        f"Confidence: {a['confidence']}%       |"
+                        f"       Tone: {a['mention_doc_tone']}"
                     )
         else:
             st.info("No related articles available for this event.")
