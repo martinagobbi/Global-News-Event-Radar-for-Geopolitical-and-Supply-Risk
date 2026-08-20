@@ -148,7 +148,10 @@ def read_tags(user_id: str) -> dict:
 @app.put("/users/{user_id}/events/{global_event_id}/tag")
 def update_tag(user_id: str, global_event_id: str, payload: dict) -> dict:
     try:
-        return set_tag(user_id, global_event_id, payload["tag"])
+        event_ids = payload.get("global_event_ids") or [global_event_id]
+        if str(global_event_id) not in {str(event_id) for event_id in event_ids}:
+            event_ids = [global_event_id, *event_ids]
+        return set_tag(user_id, event_ids, payload.get("tag"))
     except Exception as e:
         logger.error("set_tag failed for %s / %s: %s", user_id, global_event_id, e)
         raise HTTPException(

@@ -336,7 +336,7 @@ def build_catalogue(events, mentions, cameo_lookup):
     ev = events.select(
         "GLOBALEVENTID", "Day", "EventCode", "GoldsteinScale", "Actor1Name",
         "ActionGeo_FullName", "ActionGeo_CountryCode",
-        "ActionGeo_Lat", "ActionGeo_Long",
+        "ActionGeo_Lat", "ActionGeo_Long", "DATEADDED",
         "Actor1CountryCode", "Actor2CountryCode",
         "Actor1Geo_CountryCode", "Actor2Geo_CountryCode",
     )
@@ -371,6 +371,7 @@ def build_catalogue(events, mentions, cameo_lookup):
           .withColumn("latitude", F.col("ActionGeo_Lat").cast("double"))
           .withColumn("longitude", F.col("ActionGeo_Long").cast("double"))
           .withColumn("event_date", event_date)
+          .withColumn("date_added", F.to_timestamp(F.col("DATEADDED").cast("string"), "yyyyMMddHHmmss"))
           .withColumn("age_days", F.datediff(F.current_date(), event_date))
           # The ARTICLE's own timestamp; event_date above is per-EVENT and so
           # identical across a card. Mirrors gold._mention_time().
@@ -493,7 +494,7 @@ ARTICLE_COLUMNS = [
     "doc_id", "document_identifier", "mention_identifier", "global_event_id",
     "in_raw_text", "confidence", "mention_doc_tone", "country", "risk_category",
     "goldstein", "cameo_code", "cameo_label", "actor", "latitude", "longitude",
-    "event_date", "age_days", "mention_time",
+    "event_date", "date_added", "age_days", "mention_time",
 ]
 
 
@@ -530,7 +531,7 @@ _ARTICLE_UPSERT_COLUMNS = [
     "doc_id", "document_identifier", "mention_identifier", "global_event_id",
     "in_raw_text", "confidence", "mention_doc_tone", "country", "risk_category",
     "goldstein", "cameo_code", "cameo_label", "actor", "latitude", "longitude",
-    "event_date", "age_days", "mention_time",
+    "event_date", "date_added", "age_days", "mention_time",
 ]
 
 _UPSERT_ARTICLES = (
@@ -582,7 +583,7 @@ _STAGE_DDL = {
           goldstein DOUBLE PRECISION,
           cameo_code VARCHAR(10), cameo_label VARCHAR(200), actor VARCHAR(500),
           latitude DOUBLE PRECISION, longitude DOUBLE PRECISION,
-          event_date TIMESTAMP, age_days SMALLINT,
+          event_date TIMESTAMP, date_added TIMESTAMP, age_days SMALLINT,
           mention_time TIMESTAMP)
     """,
     "user_articles_stage": """

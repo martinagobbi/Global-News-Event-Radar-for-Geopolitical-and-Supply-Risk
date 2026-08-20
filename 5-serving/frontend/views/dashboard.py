@@ -55,6 +55,10 @@ except BackendUnavailable:
     st.stop()
 
 status_code = system_status.get("code")
+gold_changed = (
+    live_gold_version is not None
+    and st.session_state.get("gold_version") not in (None, live_gold_version)
+)
 
 if status_code == "503-POSTGRES":
     st.error(
@@ -86,15 +90,9 @@ elif system_status.get("status") == "ERROR":
 if recompute_pending(live_gold_version):
     render_recompute_notice()
 
-# ── "Your articles changed" nudge (green = good news) ──────────────────────
-elif (
-    live_gold_version is not None
-    and st.session_state.get("gold_version") not in (None, live_gold_version)
-):
-    st.success(
-        "The set of articles that might interest you has been updated! "
-        "Please refresh the page."
-    )
+# ── Gold changes trigger the normal fetch below, which also regroups cards. ──
+elif gold_changed:
+    st.success("The set of articles that might interest you has been updated.")
 
 # ── Header ─────────────────────────────────────────────────────────────────
 header_left, header_right = st.columns([3, 1])
@@ -121,22 +119,15 @@ if _watermark:
                    f"{_lag} slice{'s' if _lag > 1 else ''} behind")
         st.caption(
             f"{_light} Newest data held: **{_wm_dt:%Y-%m-%d %H:%M} UTC** "
-            f"({_behind}). Latest GDELT slice now: {_expected:%Y-%m-%d %H:%M} UTC."
+            f"({_behind}). Latest GDELT slice now: {_expected:%Y-%m-%d %H:%M} UTC. {((_lag >= 8) and (_watermark <= _SEED_LAST_SLICE))*'**THIS IS THE SHIPPED SEED FOR TESTING** — live ingestion has not delivered a slice yet. Live data arrives every ~15 minutes (the rate at which GDELT publishes them) starting when this pipeline starts, and this line moves to today when it does.'}"
         )
-        if _lag >= 8:
-            if _watermark <= _SEED_LAST_SLICE:
-                st.caption(
-                    "THIS IS THE SHIPPED SEED — live ingestion has not delivered "
-                    "a slice yet. The first arrives within ~15 minutes of the "
-                    "pipeline starting, and this line moves to today when it does."
-                )
-            else:
-                st.caption(
-                    f"Live data reached {_wm_dt:%Y-%m-%d %H:%M} UTC and then "
-                    "stopped. Ingestion, parsing, validation and processing are "
-                    "all worth checking — a machine that slept, or a processing "
-                    "layer that cannot publish, both look like this."
-                )
+        if (_lag >= 8) and (_watermark > _SEED_LAST_SLICE):
+            st.caption(
+                f"Live data reached {_wm_dt:%Y-%m-%d %H:%M} UTC and then "
+                "stopped. Ingestion, parsing, validation and processing are "
+                "all worth checking — a machine that slept, or a processing "
+                "layer that cannot publish, both look like this."
+            )
     except ValueError:
         st.caption(f"Silver watermark: `{_watermark}` (unrecognised format)")
 else:
@@ -155,7 +146,14 @@ now = time.time()
 if "last_data_fetch" not in st.session_state:
     st.session_state.last_data_fetch = 0
 
-should_refresh = manual_refresh or (now - st.session_state.last_data_fetch >= DATA_REFRESH_SECONDS)
+first_load = "cached_events" not in st.session_state
+
+should_refresh = (
+    manual_refresh
+    or first_load
+    or gold_changed
+    or (now - st.session_state.last_data_fetch >= DATA_REFRESH_SECONDS)
+)
 
 if should_refresh:
     st.session_state.cached_events       = get_events(user_id)

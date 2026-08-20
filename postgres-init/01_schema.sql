@@ -72,6 +72,7 @@ CREATE TABLE articles (
   -- per-EVENT, so it is identical for every article on a card; this is what lets
   -- the serving layer order cards by the oldest article each one carries.
   mention_time        TIMESTAMP,
+  date_added          TIMESTAMP,
   event_date          TIMESTAMP,
   age_days            SMALLINT,
   CONSTRAINT pk_articles PRIMARY KEY (doc_id, global_event_id)

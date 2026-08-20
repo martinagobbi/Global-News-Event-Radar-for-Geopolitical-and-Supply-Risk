@@ -3,17 +3,18 @@ import streamlit as st
 from data.user_store import get_current_user, set_event_tag, remove_event_tag
 
 
-def _update_session_cache(global_event_id: str, new_tag: str | None) -> None:
+def _update_session_cache(global_event_ids: list[str], new_tag: str | None) -> None:
     """Keep Streamlit's cached events in sync with tag changes immediately."""
     for cache_key in ("cached_events", "cached_older_events", "cached_historical_events"):
         if cache_key in st.session_state:
             for event in st.session_state[cache_key]:
-                if event.get("global_event_id") == global_event_id:
+                if set(event.get("event_ids", [event.get("global_event_id")])) & set(global_event_ids):
                     event["user_tag"] = new_tag
 
 
-def render_tag_buttons(global_event_id: str, context: str = "main", user_tag: str | None = None) -> None:
+def render_tag_buttons(global_event_ids: list[str], context: str = "main", user_tag: str | None = None) -> None:
     user_id = get_current_user()
+    global_event_id = str(global_event_ids[0])
 
     # Define 12 distinct keys across layouts to prevent Streamlit React DOM duplication
     k_main_red = f"{context}_apply_red_{global_event_id}"
@@ -53,37 +54,37 @@ def render_tag_buttons(global_event_id: str, context: str = "main", user_tag: st
     if context == "main":
         if layout == "main":
             if st.session_state.get(k_main_red):
-                set_event_tag(user_id, global_event_id, "requires_action")
-                _update_session_cache(global_event_id, "requires_action")
+                set_event_tag(user_id, global_event_ids, "requires_action")
+                _update_session_cache(global_event_ids, "requires_action")
                 layout = "red"
                 st.success("Event copied to the \"Needs action from us\" page.")
             elif st.session_state.get(k_main_yellow):
-                set_event_tag(user_id, global_event_id, "monitor")
-                _update_session_cache(global_event_id, "monitor")
+                set_event_tag(user_id, global_event_ids, "monitor")
+                _update_session_cache(global_event_ids, "monitor")
                 layout = "yellow"
                 st.success("Event copied to the \"Looking out for developments\" page.")
 
         elif layout == "red":
             if st.session_state.get(k_red_untag):
-                remove_event_tag(user_id, global_event_id)
-                _update_session_cache(global_event_id, None)
+                remove_event_tag(user_id, global_event_ids)
+                _update_session_cache(global_event_ids, None)
                 layout = "main"
                 st.success("Event moved out of \"Needs action from us\" (still remains on this page).")
             elif st.session_state.get(k_red_yellow):
-                set_event_tag(user_id, global_event_id, "monitor")
-                _update_session_cache(global_event_id, "monitor")
+                set_event_tag(user_id, global_event_ids, "monitor")
+                _update_session_cache(global_event_ids, "monitor")
                 layout = "yellow"
                 st.success("Event moved out of \"Needs action from us\" and into \"Looking out for developments\" (still remains on this page).")
 
         elif layout == "yellow":
             if st.session_state.get(k_yellow_red):
-                set_event_tag(user_id, global_event_id, "requires_action")
-                _update_session_cache(global_event_id, "requires_action")
+                set_event_tag(user_id, global_event_ids, "requires_action")
+                _update_session_cache(global_event_ids, "requires_action")
                 layout = "red"
                 st.success("Event moved out of \"Looking out for developments\" and into \"Needs action from us\" (still remains on this page).")
             elif st.session_state.get(k_yellow_untag):
-                remove_event_tag(user_id, global_event_id)
-                _update_session_cache(global_event_id, None)
+                remove_event_tag(user_id, global_event_ids)
+                _update_session_cache(global_event_ids, None)
                 layout = "main"
                 st.success("Event moved out of \"Looking out for developments\" (still remains on this page).")
 

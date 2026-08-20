@@ -9,7 +9,7 @@ Connection defaults match 5-serving/backend/postgres_store.py. The three tables
     articles(doc_id BYTEA PK, document_identifier, mention_identifier,
              global_event_id, in_raw_text, confidence, mention_doc_tone, country,
              risk_category, goldstein, cameo_code, cameo_label, actor,
-             latitude, longitude, event_date, age_days, mention_time)
+             latitude, longitude, event_date, date_added, age_days, mention_time)
     user_articles(user_id, doc_id)   PK (user_id, doc_id)
     pipeline_status(status, timestamp_of_last_update)
 
@@ -76,7 +76,7 @@ _ARTICLE_COLUMNS = [
     "doc_id", "document_identifier", "mention_identifier", "global_event_id",
     "in_raw_text", "confidence", "mention_doc_tone", "country", "risk_category",
     "goldstein", "cameo_code", "cameo_label", "actor", "latitude", "longitude",
-    "event_date", "age_days", "mention_time",
+    "event_date", "date_added", "age_days", "mention_time",
 ]
 
 _UPSERT_ARTICLES = (
@@ -100,6 +100,7 @@ _ADDED_COLUMNS = [
     # silver, which the card ordering needs; event_date is per-EVENT and so is the
     # same for every article on a card.
     ("mention_time", "TIMESTAMP"),
+    ("date_added", "TIMESTAMP"),
 ]
 
 # Same idea, for pipeline_status. postgres-init/01_schema.sql declares this column
@@ -195,6 +196,7 @@ def _migrate_to_pair_key(cur) -> None:
           latitude            DOUBLE PRECISION,
           longitude           DOUBLE PRECISION,
           mention_time        TIMESTAMP,
+          date_added          TIMESTAMP,
           event_date          TIMESTAMP,
           age_days            SMALLINT,
           CONSTRAINT pk_articles PRIMARY KEY (doc_id, global_event_id))

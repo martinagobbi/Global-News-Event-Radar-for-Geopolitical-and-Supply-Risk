@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from data.api_client import get_json, put_json
+from data.event_grouping import group_events
 
 
 def get_system_status() -> dict:
@@ -21,13 +22,18 @@ def get_events(
     min_age_days keeps only events OLDER than that many days — used by the
     "Older news" tab so it does not repeat what the main briefing already shows.
     """
-    params = f"max_age_days={max_age_days}&exclude_archived={str(exclude_archived).lower()}"
+    # Grouping must see archived members too; otherwise a grouped card can be
+    # split before the frontend has a chance to rebuild its set.
+    params = f"max_age_days={max_age_days}&exclude_archived=false"
     if briefing_days is not None:
         params += f"&briefing_days={briefing_days}"
     if min_age_days is not None:
         params += f"&min_age_days={min_age_days}"
     payload = get_json(f"/users/{user_id}/events?{params}")
-    return payload["events"]
+    events = group_events(payload["events"])
+    if exclude_archived:
+        events = [event for event in events if event.get("user_tag") != "archive"]
+    return events
 
 
 def get_event_detail(user_id: str, global_event_id: str) -> dict:
@@ -43,7 +49,7 @@ def get_archived_events(user_id: str) -> list[dict]:
 def get_tagged_events(user_id: str, tag: str) -> list[dict]:
     """Events this user filed under one tag: requires_action / monitor / archive."""
     payload = get_json(f"/users/{user_id}/tagged-events/{tag}")
-    return payload["events"]
+    return group_events(payload["events"])
 
 
 def get_events_summary(user_id: str) -> list[dict]:

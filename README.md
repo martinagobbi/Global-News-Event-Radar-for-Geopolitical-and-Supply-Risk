@@ -24,7 +24,7 @@ docker compose --env-file .env.testing up -d --build
 ./bootstrap/silver_snapshot.sh restore
 
 # 4. Three test profiles. Without any profiles, the gold layer stays empty.
-# After you run this command, you will have to wait around 2 minutes before running the next one: the time for every user to have their gold created for the first time.
+# After you run this command, you may have to wait around 2 minutes before running the next one: the time for every user to have their gold created for the first time.
 python3 5-serving/seed_test_users.py # Needs `requests` on the machine where this code is run. Also, may have to type `python` instead of `python3`.
 
 # 5. Service frontend.
@@ -35,11 +35,11 @@ docker compose -f 5-serving/docker-compose.serving.yml up --build
 [**http://localhost:8501**](http://localhost:8501){.uri}.
 
 # 7. You may then log in with one of these test profiles:
-|For login: Username       |For login: Password |FYI: Supply chain                   |FYI: Territories       |
-|--------------------------|--------------------|------------------------------------|-----------------------|
-| radar_electronics        | chips2026          | Semiconductors and electronics     | Asia-Pacific          |
-| radar_pharma             | vials2026          | Pharmaceuticals and biologics      | Europe                |
-| radar_agrifood           | grain2026          | Agri-food commodities              | Americas and Africa   |
+# |For login: Username       |For login: Password |FYI: Supply chain                   |FYI: Territories       |
+# |--------------------------|--------------------|------------------------------------|-----------------------|
+# | radar_electronics        | chips2026          | Semiconductors and electronics     | Asia-Pacific          |
+# | radar_pharma             | vials2026          | Pharmaceuticals and biologics      | Europe                |
+# | radar_agrifood           | grain2026          | Agri-food commodities              | Americas and Africa   |
 ```
 
 Here in testing mode, backend machines and frontend machines are the same one machine, but these steps are still kept separate to keep the production-level design (to also have distribution across machines, see intended mode below).
@@ -49,15 +49,13 @@ Here in testing mode, backend machines and frontend machines are the same one ma
 OPTIONAL: Remove all data except the one from the 30-days seed
 ``` bash
 docker compose --env-file .env.testing stop ingestion parsing validation        # Stops live data from being ingested
-./bootstrap/silver_snapshot.sh trim seed                                        # Removes all non-30-day-seed data from silver
-docker exec pipeline_processing python3 -c "import main; main.recompute_all()"  # Removes all non-30-day-seed data from gold (takes a little while, but this is not an action the system would normally perform)
+./bootstrap/silver_snapshot.sh trim seed                                        # Removes all non-30-day-testing-seed data from silver
+docker exec pipeline_processing python3 -c "import main; main.recompute_all()"  # Removes all non-30-day-testing-seed data from gold (can take a few minutes, but this is indeed not an action the system would normally perform under any circumstance)
 ```
 
 NOT OPTIONAL: shutdown procedure (that does not destroy the volumes, so user preferences and data for users stay intact)
 ``` bash
-docker compose -f 5-serving/docker-compose.serving.yml down
-docker compose --env-file .env.testing down
-docker compose --env-file .env.testing -f docker-compose.stores.yml down
+docker compose -f 5-serving/docker-compose.serving.yml down && docker compose --env-file .env.testing down && docker compose --env-file .env.testing -f docker-compose.stores.yml down
 ```
 
 ### Explanation of the process

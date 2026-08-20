@@ -205,15 +205,18 @@ def get_tags(user_id: str) -> dict[str, str]:
         return {}
 
 
-def set_tag(user_id: str, global_event_id: str, tag: str) -> dict:
+def set_tag(user_id: str, global_event_ids: str | list[str], tag: str | None) -> dict:
     """
-    Saves a tag. Raises on failure — the user should know their tag was not saved.
+    Saves or removes one tag across every event in a grouped card.
     """
+    ids = [global_event_ids] if isinstance(global_event_ids, str) else global_event_ids
+    updates = {f"tags.{event_id}": tag for event_id in ids}
     _with_retry(
         lambda: _tags().update_one(
             {"_id": user_id},
-            {"$set": {f"tags.{global_event_id}": tag}},
+            {"$set": updates},
             upsert=True,
         )
     )
+    return {"updated": [str(event_id) for event_id in ids], "tag": tag}
     return {"global_event_id": global_event_id, "tag": tag}

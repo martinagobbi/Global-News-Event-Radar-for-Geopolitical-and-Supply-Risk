@@ -229,6 +229,13 @@ def _sort_cards_newest_first(cards: list[dict]) -> list[dict]:
     )
 
 
+def _confidence_value(value) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return -1
+
+
 def _build_event_card(global_event_id: str, raw_articles: list[dict]) -> dict:
     filtered, inrawtext_filtered = _apply_inrawtext_filter(raw_articles)
     articles = _sort_and_cap(filtered)
@@ -236,6 +243,10 @@ def _build_event_card(global_event_id: str, raw_articles: list[dict]) -> dict:
     title   = articles[0]["mention_identifier"] if articles else f"Event {global_event_id}"
     top_url = articles[0]["url"] if articles else None
     meta    = raw_articles[0]
+    max_confidence = max(
+        (_confidence_value(a.get("confidence")) for a in raw_articles),
+        default=None,
+    )
 
     return {
         "global_event_id":    global_event_id,
@@ -249,6 +260,8 @@ def _build_event_card(global_event_id: str, raw_articles: list[dict]) -> dict:
         "risk_category":      meta.get("risk_category", ""),
         "goldstein":          meta.get("goldstein"),
         "event_date":         str(meta.get("event_date", "")),
+        "date_added":         str(meta.get("date_added", "")),
+        "max_confidence":     max_confidence,
         "age_days":           meta.get("age_days"),
         "top_article_url":    top_url,
         "inrawtext_filtered": inrawtext_filtered,
@@ -289,6 +302,7 @@ _EVENTS_SQL = """
         a.latitude,
         a.longitude,
         a.event_date,
+        a.date_added,
         a.age_days,
         a.mention_time
     FROM user_articles ua
@@ -320,6 +334,7 @@ _SINGLE_EVENT_SQL = """
         a.latitude,
         a.longitude,
         a.event_date,
+        a.date_added,
         a.age_days,
         a.mention_time
     FROM user_articles ua
@@ -388,7 +403,7 @@ _BY_IDS_SQL = """
         a.global_event_id, a.document_identifier, a.mention_identifier,
         a.in_raw_text, a.confidence, a.mention_doc_tone, a.country,
         a.risk_category, a.goldstein, a.cameo_code, a.cameo_label,
-        a.actor, a.latitude, a.longitude, a.event_date, a.age_days,
+        a.actor, a.latitude, a.longitude, a.event_date, a.date_added, a.age_days,
         a.mention_time
     FROM articles a
     WHERE a.global_event_id = ANY(%(ids)s)

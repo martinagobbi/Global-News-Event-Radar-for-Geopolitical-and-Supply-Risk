@@ -17,11 +17,17 @@ def save_user_profile(profile: dict) -> None:
     put_json(f"/users/{profile['user_id']}/profile", profile)
  
  
-def set_event_tag(user_id: str, global_event_id: str, tag: str) -> None:
-    put_json(f"/users/{user_id}/events/{global_event_id}/tag", {"tag": tag})
+def set_event_tag(user_id: str, global_event_ids: str | list[str], tag: str | None) -> None:
+    ids = [global_event_ids] if isinstance(global_event_ids, str) else global_event_ids
+    if not ids:
+        return
+    put_json(
+        f"/users/{user_id}/events/{ids[0]}/tag",
+        {"tag": tag, "global_event_ids": [str(event_id) for event_id in ids]},
+    )
 
-def remove_event_tag(user_id: str, global_event_id: str) -> None:
-    put_json(f"/users/{user_id}/events/{global_event_id}/tag", {"tag": None})
+def remove_event_tag(user_id: str, global_event_ids: str | list[str]) -> None:
+    set_event_tag(user_id, global_event_ids, None)
  
 def get_event_tags(user_id: str) -> dict[str, str]:
     return get_json(f"/users/{user_id}/tags")
