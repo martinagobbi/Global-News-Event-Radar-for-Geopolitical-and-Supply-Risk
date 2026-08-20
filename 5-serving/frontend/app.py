@@ -56,6 +56,7 @@ else:
         st.Page("views/dashboard.py",     title="Radar View", default=True),
         st.Page("views/needs_action.py",  title="Needs action from us"),
         st.Page("views/monitoring.py",    title="Looking out for developments"),
+        st.Page("views/older_events.py",  title="Historical Radar View"),
         st.Page("views/archive.py",       title="Archive: Not important"),
         st.Page("views/preferences.py",   title="Preferences"),
     ])

@@ -55,6 +55,11 @@ _RUNNING_INDICATOR_CSS = """
     color: #64B5F6 !important;   /* light blue */
     font-weight: 600;
 }
+[data-testid="stSidebarNav"] a[href$="/older_events"] span,
+[data-testid="stSidebarNav"] a[href*="older_events"] span {
+    color: #4CAF50 !important;   /* green */
+    font-weight: 600;
+}
 [data-testid="stSidebarNav"] a[href$="/archive"] span,
 [data-testid="stSidebarNav"] a[href*="archive"] span {
     color: #424242 !important;   /* dark grey */

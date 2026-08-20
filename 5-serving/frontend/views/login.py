@@ -1,7 +1,7 @@
 import streamlit as st
 
 from auth import IDLE_TIMEOUT_SECONDS, login, verify
-from configuration.naming import NAME_HELP, NAME_MAX_CHARS, is_valid_name
+from configuration.naming import NAME_HELP, MAX_CHARS_HELP, NAME_MAX_CHARS, is_valid_name
 
 from components.branding import use_neutral_spinner
 
@@ -20,6 +20,7 @@ if st.session_state.pop("auth_notice", None) == "idle_timeout":
 with st.form("login_form"):
     st.markdown("**Username**")
     st.caption(NAME_HELP)
+    st.caption(MAX_CHARS_HELP)
     user_id = st.text_input("Username", max_chars=NAME_MAX_CHARS,
                             label_visibility="collapsed")
     password = st.text_input("Password", type="password")
