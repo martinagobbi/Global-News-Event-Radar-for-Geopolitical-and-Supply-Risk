@@ -18,26 +18,27 @@ docker compose --env-file .env.testing -f docker-compose.stores.yml up -d
 # 2. Pipeline (Ingestion; Parsing; Validation and Storage; Processing; Serving Backend)
 docker compose --env-file .env.testing up -d --build
 
-# 3. OPTIONAL: Silver data from articles spanning 27/06/2026 at 17:15 to 27/07/2026 at 17:15.
+# 3. OPTIONAL BUT NECESSARY FOR PROPER TESTING: Silver data from articles spanning 27/06/2026 at 17:15 to 27/07/2026 at 17:15.
 # This "seeded" data was chosen to make the testing-mode radar not empty at startup: the radar gets updated with the latest news every 15 minutes, and automatically drops news older than 365 days every midnight. Even seeding over a year of data will leave a gap in testing mode: all the per-15-minutes slices between the latest seeded/stored data and the data from the moment a tester starts up the testing-mode radar with these instructions.
 ./bootstrap/silver_snapshot.sh restore
 
 # 4. Three test profiles. Without any profiles, the gold layer stays empty.
+# After you run this command, you will have to wait around 2 minutes before running the next one: the time for every user to have their gold created for the first time.
 python3 5-serving/seed_test_users.py # Needs `requests` on the machine where this code is run. Also, may have to type `python` instead of `python3`.
 
-# 5. OPTIONAL: Gold data from articles spanning 27/06/2026 at 17:15 to 27/07/2026 at 17:15.
-# If you ran step 3., this will be computed anyways, but will take around 2 minutes. This command's execution might take less than 10 seconds.
-./bootstrap/gold_snapshot.sh restore
-
-# 6. Service frontend.
+# 5. Service frontend.
 # While all previous steps just need to be run on the backend, this is the only code that each frontend machine will need.
 docker compose -f 5-serving/docker-compose.serving.yml up --build
 
-# 7. You may then view the radar's UI via this link:
+# 6. You may then view the radar's UI via this link:
 [**http://localhost:8501**](http://localhost:8501){.uri}.
 
-# 8. You may then log in with one of these test accounts:
-[]
+# 7. You may then log in with one of these test profiles:
+|For login: Username       |For login: Password |FYI: Supply chain                   |FYI: Territories       |
+|--------------------------|--------------------|------------------------------------|-----------------------|
+| radar_electronics        | chips2026          | Semiconductors and electronics     | Asia-Pacific          |
+| radar_pharma             | vials2026          | Pharmaceuticals and biologics      | Europe                |
+| radar_agrifood           | grain2026          | Agri-food commodities              | Americas and Africa   |
 ```
 
 Here in testing mode, backend machines and frontend machines are the same one machine, but these steps are still kept separate to keep the production-level design (to also have distribution across machines, see intended mode below).

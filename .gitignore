@@ -72,3 +72,5 @@ README.html
 dev_notes.html
 # A file where I draft commit messages
 .prepping_latest_commit_message.txt
+# The gold seed is now out-of-date. Git-ignoring it indefinitely.
+bootstrap/gold_snapshot.sh
