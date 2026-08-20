@@ -66,6 +66,32 @@ CH_PASSWORD = os.getenv("CLICKHOUSE_PASSWORD", "")
 
 STATUS_FILE  = Path(os.getenv("STATUS_DIR", "/data/status")) / "pipeline_status.json"
 
+# ── Incremental gold ─────────────────────────────────────────────────────────
+# A watermark-triggered recompute normally re-evaluates ALL of silver for every
+# profile: a slice bringing 34 mentions rebuilt 111,430 candidates x 3 users in
+# ~134 s. Incremental considers only mentions newer than the last published
+# watermark, which is the same work for the same result in the common case.
+#
+# FULL_EVERY forces a full run periodically, because incremental can only ADD
+# (see spark_gold.recompute). Without it, rows that stopped matching, orphaned
+# articles and retention deletes would never be cleared. At the 15-minute
+# cadence, 12 puts a full rebuild roughly every three hours.
+#
+# The counter is in memory on purpose: a restart resets it to 0, and run 0 is
+# always full. Restarting therefore forces a clean rebuild, which is the safe
+# direction — the opposite of persisting it and resuming mid-cycle.
+INCREMENTAL_GOLD = os.getenv("INCREMENTAL_GOLD", "1") == "1"
+FULL_EVERY       = int(os.getenv("GOLD_FULL_EVERY", "12"))
+_incremental_runs = 0
+
+
+def _bump_incremental_counter() -> int:
+    """Return the current run number, then advance. Run 0 is always full."""
+    global _incremental_runs
+    n = _incremental_runs
+    _incremental_runs += 1
+    return n
+
 app = FastAPI(title="Supply Risk — Processing Layer")
 
 
@@ -179,13 +205,52 @@ def recompute_all() -> dict:
             logger.warning("could not read the silver watermark: %s", exc)
             watermark = postgres_writer.KEEP
 
-        result = spark_gold.recompute()
+        # ── Full or incremental? ────────────────────────────────────────────
+        # Incremental is an OPTIMISATION and is only correct when this run is
+        # genuinely "the previous gold, plus one more slice of mentions". Every
+        # condition below is a case where that premise fails, and each falls back
+        # to a full rebuild rather than producing a subtly wrong gold:
+        #
+        #   prev is None      gold has never been built, or the column predates
+        #                     this feature — there is no baseline to add to.
+        #   watermark <= prev silver did not move forwards. Either nothing new
+        #                     (no work) or it moved BACKWARDS — a trim, wipe or
+        #                     seed restore — after which gold must be rebuilt to
+        #                     match the smaller silver, which adding cannot do.
+        #   every FULL_EVERY  a periodic full run, so the things incremental can
+        #                     never do (drop rows that stopped matching, sweep
+        #                     orphans, honour retention deletes) still happen on
+        #                     a bounded schedule instead of never.
+        #
+        # INCREMENTAL_GOLD=0 disables it outright and restores the previous
+        # behaviour, which is the intended way to rule it out when diagnosing a
+        # gold that looks wrong.
+        since = None
+        if INCREMENTAL_GOLD and watermark and watermark is not postgres_writer.KEEP:
+            prev = postgres_writer.read_silver_watermark()
+            n = _bump_incremental_counter()
+            if prev is None:
+                logger.info("full recompute: no previous watermark recorded")
+            elif watermark <= prev:
+                logger.info("full recompute: watermark did not advance (%s -> %s)",
+                            prev, watermark)
+            elif n % FULL_EVERY == 0:
+                logger.info("full recompute: periodic full run (every %d)", FULL_EVERY)
+            else:
+                since = prev
+                logger.info("INCREMENTAL recompute: mentions after %s", since)
+
+        result = spark_gold.recompute(since=since)
         # The sweep and the status mirror stay here, in plain Python: they are small
         # transactional statements against PostgreSQL and MongoDB with nothing to
         # distribute. Spark's publish() runs the same sweep inside its own
         # transaction; running it again is harmless (it deletes what is already gone)
         # and keeps the behaviour identical whichever entry point was used.
-        n_orphans = _sweep_orphans()
+        # Skipped for the same reason publish() skips its own copy: the sweep
+        # asks "which articles does nobody reference now", which only a full run
+        # can answer. After an incremental run nothing was removed from
+        # user_articles, so nothing can newly have become an orphan.
+        n_orphans = 0 if since else _sweep_orphans()
         state = read_pipeline_status().get("state", "OK")
         postgres_writer.write_pipeline_status(
             state, datetime.now(timezone.utc), watermark=watermark)

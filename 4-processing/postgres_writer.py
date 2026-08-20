@@ -351,6 +351,26 @@ def mark_pipeline_stale() -> None:
     logger.warning("Marked pipeline_status=ERROR (silver stopped advancing)")
 
 
+def read_silver_watermark() -> str | None:
+    """
+    The slice id the gold layer was last built from, or None if never recorded.
+
+    This is the BASELINE an incremental recompute adds to: it answers "what was
+    already accounted for", so the next run only has to consider mentions newer
+    than it. Distinct from the live ClickHouse watermark, which answers "what is
+    in silver now" — the gap between the two is exactly the work to do.
+    """
+    try:
+        with _connect() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT silver_watermark FROM pipeline_status LIMIT 1")
+            row = cur.fetchone()
+            return row[0] if row and row[0] else None
+    except Exception as exc:  # noqa: BLE001 — caller falls back to a full run
+        logger.warning("could not read the stored silver watermark: %s", exc)
+        return None
+
+
 def write_pipeline_status(status: str, ts: datetime | None = None,
                           watermark: str | None | object = KEEP) -> None:
     """

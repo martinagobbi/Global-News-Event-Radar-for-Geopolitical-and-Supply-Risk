@@ -275,7 +275,7 @@ def _build_session() -> SparkSession:
     )
 
 
-def read_partitioned(spark, table: str):
+def read_partitioned(spark, table: str, where: str | None = None):
     """
     Parallel JDBC read of a whole ClickHouse table — NO LIMIT.
 
@@ -296,11 +296,26 @@ def read_partitioned(spark, table: str):
         logger.warning("%s is empty", table)
         return None
 
-    logger.info("reading %s over %d partitions (ids %s..%s)", table, READ_PARTITIONS, lo, hi)
+    # `where` narrows the read for an INCREMENTAL recompute. It is pushed into
+    # the ClickHouse query rather than applied in Spark, so the rows never cross
+    # the JDBC boundary at all — which is the entire point: the cost of a
+    # recompute is dominated by how many candidates reach the per-user
+    # predicates, and this is where that number is decided.
+    #
+    # The partition bounds stay the FULL min/max of GLOBALEVENTID even when
+    # filtering. That is deliberate: the bounds only decide how Spark splits the
+    # id range into concurrent queries, and a filtered read simply leaves most of
+    # those partitions empty. Narrowing them would mean a second round trip to
+    # ClickHouse for no benefit.
+    source = f"{table} FINAL" if not where else \
+             f"(SELECT * FROM {table} FINAL WHERE {where}) AS t"
+    logger.info("reading %s over %d partitions (ids %s..%s)%s",
+                table, READ_PARTITIONS, lo, hi,
+                f"  WHERE {where}" if where else "")
     return (
         spark.read.format("jdbc")
         .option("url", CH_URL)
-        .option("dbtable", f"{table} FINAL")       # FINAL collapses re-ingested duplicates
+        .option("dbtable", source)                 # FINAL collapses re-ingested duplicates
         .option("driver", "com.clickhouse.jdbc.ClickHouseDriver")
         .option("partitionColumn", "GLOBALEVENTID")
         .option("lowerBound", str(lo))
@@ -629,7 +644,7 @@ def drop_stage_tables() -> None:
     logger.info("stage tables dropped")
 
 
-def publish(processed_uids: list[str]) -> None:
+def publish(processed_uids: list[str], incremental: bool = False) -> None:
     """
     Move the staged rows into the live tables, in ONE transaction, reproducing
     exactly what the pandas path does:
@@ -648,7 +663,7 @@ def publish(processed_uids: list[str]) -> None:
         cur.execute(_UPSERT_ARTICLES)
         logger.info("articles: upserted %d staged rows", cur.rowcount)
 
-        if processed_uids:
+        if processed_uids and not incremental:
             cur.execute(
                 "DELETE FROM user_articles WHERE user_id = ANY(%(uids)s)",
                 {"uids": list(processed_uids)})
@@ -657,7 +672,31 @@ def publish(processed_uids: list[str]) -> None:
                 "INSERT INTO user_articles (user_id, doc_id, global_event_id) "
                 "SELECT user_id, doc_id, global_event_id FROM user_articles_stage")
             logger.info("user_articles: replaced %d rows with %d", deleted, cur.rowcount)
+        elif processed_uids:
+            # INCREMENTAL: add, never delete. The DELETE above is what makes a
+            # full run authoritative — it is also exactly what an incremental run
+            # must not do, since the staged rows are only the new slice's matches
+            # and deleting first would throw away every earlier match.
+            #
+            # ON CONFLICT DO NOTHING because the same (user, article, event) can
+            # legitimately arrive twice: GDELT re-publishes a mention across
+            # slices, and `since` is exclusive but the boundary row can repeat
+            # after a restore. The primary key makes the re-insert a no-op rather
+            # than an error.
+            cur.execute(
+                "INSERT INTO user_articles (user_id, doc_id, global_event_id) "
+                "SELECT user_id, doc_id, global_event_id FROM user_articles_stage "
+                "ON CONFLICT (user_id, doc_id, global_event_id) DO NOTHING")
+            logger.info("user_articles: added %d new rows (incremental)", cur.rowcount)
 
+        # SKIPPED when incremental. The sweep is an anti-join over the WHOLE of
+        # user_articles, asking "which articles does nobody reference now" — a
+        # question only a full run can answer, because only a full run has just
+        # established what every user's complete set is. Running it after an
+        # incremental publish would be wasted work at best: nothing has been
+        # removed from user_articles, so nothing can newly have become an orphan.
+        # Aged-out and no-longer-matching rows are cleared by the next full run
+        # and by retention, which is the trade the incremental path accepts.
         # Purge orphans AFTER user_articles has been rebuilt, so the anti-join
         # sees the new sets. Mirrors postgres_writer.delete_orphan_articles(), and
         # is inside the same transaction as everything else here.
@@ -668,29 +707,32 @@ def publish(processed_uids: list[str]) -> None:
         # unreferenced and must survive. ARCHIVED events are not protected —
         # archiving says the event does not matter. Skipping the sweep is the
         # safe failure.
-        sweep = ("DELETE FROM articles a WHERE NOT EXISTS "
-                 "(SELECT 1 FROM user_articles ua WHERE ua.doc_id = a.doc_id "
-                 "   AND ua.global_event_id = a.global_event_id)")
-        params: dict = {}
-        try:
-            import mongo_reader
-            protected = sorted(mongo_reader.get_protected_event_ids())
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Skipping orphan sweep: could not read tags (%s)", exc)
-            protected = None
-
-        if protected is None:
-            pass                                    # sweep skipped entirely
+        if incremental:
+            logger.info("orphan sweep skipped (incremental run)")
         else:
-            if protected:
-                # One array parameter for the whole set. Oracle needed it split
-                # into OR-ed 900-entry IN lists because its IN list caps at 1000.
-                sweep += " AND NOT (a.global_event_id = ANY(%(protected)s))"
-                params["protected"] = [str(p) for p in protected]
-            cur.execute(sweep, params)
-            if cur.rowcount:
-                logger.info("articles: removed %d orphaned rows (%d triaged "
-                            "events protected)", cur.rowcount, len(protected))
+            sweep = ("DELETE FROM articles a WHERE NOT EXISTS "
+                     "(SELECT 1 FROM user_articles ua WHERE ua.doc_id = a.doc_id "
+                     "   AND ua.global_event_id = a.global_event_id)")
+            params: dict = {}
+            try:
+                import mongo_reader
+                protected = sorted(mongo_reader.get_protected_event_ids())
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Skipping orphan sweep: could not read tags (%s)", exc)
+                protected = None
+
+            if protected is None:
+                pass                                # sweep skipped entirely
+            else:
+                if protected:
+                    # One array parameter for the whole set. Oracle needed it split
+                    # into OR-ed 900-entry IN lists because its IN list caps at 1000.
+                    sweep += " AND NOT (a.global_event_id = ANY(%(protected)s))"
+                    params["protected"] = [str(p) for p in protected]
+                cur.execute(sweep, params)
+                if cur.rowcount:
+                    logger.info("articles: removed %d orphaned rows (%d triaged "
+                                "events protected)", cur.rowcount, len(protected))
 
         state = read_pipeline_status()
         # The watermark is read back and re-inserted rather than left out. This
@@ -719,9 +761,47 @@ def publish(processed_uids: list[str]) -> None:
                     state, watermark or "unknown")
         conn.commit()
 
-def recompute(only_user: str | None = None) -> dict:
+def recompute(only_user: str | None = None, since: str | None = None) -> dict:
     """
     Rebuild the gold layer from silver. THE silver -> gold path, in both modes.
+
+    ── INCREMENTAL MODE (`since` set) ──────────────────────────────────────────
+    `since` is a GDELT slice id. When given, only mentions published AFTER it are
+    considered, and `user_articles` rows are ADDED rather than replaced. A slice
+    that brings 34 mentions then costs a catalogue of ~34 candidates instead of
+    the ~111,000 a full run evaluates — the per-user predicate is the dominant
+    cost of a recompute and it scales with candidates x profiles.
+
+    THE BOUNDARY IS ON MENTIONS, NOT EVENTS, and this is the subtle part. Gold is
+    keyed on (article, event) and an article IS a mention, so "what is new" must
+    be measured in mentions. Filtering events by DATEADDED would be wrong in a way
+    that loses data silently: GDELT keeps publishing mentions for an event for
+    days, so a slice routinely carries new articles about events ingested last
+    week. Those events are not new, their mentions are, and only the mention-side
+    boundary sees them. Events are therefore read in FULL and joined against —
+    they are the smaller table (104k rows / 13 MiB measured) and the join is not
+    what costs.
+
+    ── WHEN INCREMENTAL IS WRONG ───────────────────────────────────────────────
+    It can only ever ADD. Four things it therefore cannot do, each of which needs
+    a full run — see main.recompute_all(), which decides:
+
+      * A PREFERENCE CHANGE. A newly added keyword must be matched against all of
+        silver, because articles from weeks ago may now qualify. This is why
+        `only_user` (the change-stream path) always runs full and never passes
+        `since`.
+      * REMOVING rows that stopped matching. A user who narrows their preferences
+        keeps every previously matched row until a full run replaces the set.
+      * The ORPHAN SWEEP, which is an anti-join over the whole of user_articles.
+        It is skipped here and left to the full path.
+      * RETENTION. Deleting aged-out events must remove their gold rows; adding
+        cannot.
+
+    Consequently gold under incremental runs is a SUPERSET of what a full run
+    would produce, converging only when a full run happens. That is a deliberate
+    trade of exactness-at-every-instant for cost, and it is safe only because a
+    full run is still triggered by every preference change and can be forced at
+    any time.
 
     `only_user` is what the MongoDB change-stream trigger uses: when a single
     profile is edited there is no reason to re-evaluate everyone, so only that
@@ -747,9 +827,22 @@ def recompute(only_user: str | None = None) -> dict:
     # in which gold was never updated.
     postgres_writer.ensure_schema()
 
+    # A preference change can never be served incrementally (see the docstring),
+    # so refuse the combination outright rather than silently producing a
+    # half-rebuilt set for that user.
+    if since is not None and only_user is not None:
+        raise ValueError(
+            "recompute(only_user=..., since=...) is not a valid combination: a "
+            "preference change must re-evaluate ALL of silver for that user, "
+            "which an incremental run cannot do.")
+
     spark = _spark()
     events = read_partitioned(spark, "gdelt_events")
-    mentions = read_partitioned(spark, "gdelt_mentions")
+    # Quoted because DATEADDED / MentionTimeDate are Strings in ClickHouse; the
+    # ids are fixed width, so a lexicographic '>' is also chronological.
+    mentions = read_partitioned(
+        spark, "gdelt_mentions",
+        where=f"MentionTimeDate > '{since}'" if since else None)
     if events is None or mentions is None:
         logger.warning("silver is empty — nothing to do")
         return {"users": 0, "articles": 0, "status": "EMPTY"}
@@ -844,9 +937,11 @@ def recompute(only_user: str | None = None) -> dict:
     write_gold(per_user.select("user_id", "doc_id", "global_event_id"), "user_articles_stage",
                  mode="overwrite", truncate=True)
     n_articles = articles.count()
-    logger.info("staged %d articles for %d user(s)", n_articles, len(processed_uids))
+    logger.info("staged %d articles for %d user(s)%s", n_articles,
+                len(processed_uids),
+                f"  [incremental, mentions after {since}]" if since else "  [full]")
 
-    publish(processed_uids)
+    publish(processed_uids, incremental=since is not None)
     # Only dropped once the rows are safely published; if publish() raised, the
     # stage tables are left behind on purpose so the run can be inspected.
     drop_stage_tables()
