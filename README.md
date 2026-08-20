@@ -16,8 +16,8 @@ Two modes are in place: testing mode and intended mode. **Only testing mode can 
 docker compose --env-file .env.testing -f docker-compose.stores.yml up -d
 
 # 2. Pipeline (Ingestion; Parsing; Validation and Storage; Processing; Serving Backend)
+# It may mention "orphans", and that's fine: those are intended-mode versions of what you will be opening. They need to stay in place in case intended mode is every run, but intended mode is too heavy to work on one machine.
 docker compose --env-file .env.testing up -d --build
-# It may mention "orphans", and that's fine: those are intended-mode versions of what you will be opening. They need to stay in place in case intended mode is every run, but they are too heavy to work on one machine.
 
 # 3. OPTIONAL BUT NECESSARY FOR PROPER TESTING: Silver data from articles spanning 27/06/2026 at 17:15 to 27/07/2026 at 17:15.
 # This "seeded" data was chosen to make the testing-mode radar not empty at startup: the radar gets updated with the latest news every 15 minutes, and automatically drops news older than 365 days every midnight. Even seeding over a year of data will leave a gap in testing mode: all the per-15-minutes slices between the latest seeded/stored data and the data from the moment a tester starts up the testing-mode radar with these instructions.
@@ -47,15 +47,13 @@ Here in testing mode, backend machines and frontend machines are the same one ma
 ### Shutdown
 
 OPTIONAL: Remove all data except the one from the 30-days seed
-
 ``` bash
 docker compose --env-file .env.testing stop ingestion parsing validation        # Stops live data from being ingested
 ./bootstrap/silver_snapshot.sh trim seed                                        # Removes all non-30-day-seed data from silver
-docker exec pipeline_processing python3 -c "import main; main.recompute_all()"  # Removes all non-30-day-seed data from gold
+docker exec pipeline_processing python3 -c "import main; main.recompute_all()"  # Removes all non-30-day-seed data from gold (takes a little while, but this is not an action the system would normally perform)
 ```
 
-Not optional: shutdown procedure (that does not destroy the volumes, so user preferences and data for users stay intact)
-
+NOT OPTIONAL: shutdown procedure (that does not destroy the volumes, so user preferences and data for users stay intact)
 ``` bash
 docker compose -f 5-serving/docker-compose.serving.yml down
 docker compose --env-file .env.testing down

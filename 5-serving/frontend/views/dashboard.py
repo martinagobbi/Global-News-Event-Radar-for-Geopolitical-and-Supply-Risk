@@ -126,7 +126,7 @@ if _watermark:
         if _lag >= 8:
             if _watermark <= _SEED_LAST_SLICE:
                 st.caption(
-                    "This is the shipped seed — live ingestion has not delivered "
+                    "THIS IS THE SHIPPED SEED — live ingestion has not delivered "
                     "a slice yet. The first arrives within ~15 minutes of the "
                     "pipeline starting, and this line moves to today when it does."
                 )

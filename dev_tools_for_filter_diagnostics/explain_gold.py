@@ -222,7 +222,7 @@ def main() -> None:
     # MentionIdentifier, and the key to join on — while `mention_identifier`
     # holds the headline, because that is the field the serving tier displays
     # (see 4-processing/gold.py). Joining on the wrong one silently matches only
-    # the rows whose headline extraction failed and fell back to "No article title for " followed by the article URL.
+    # the rows whose headline extraction failed and fell back to "(No article title) " followed by the article URL.
     cur.execute("""
         SELECT ua.user_id, upper(encode(a.doc_id, 'hex')), a.document_identifier,
                a.global_event_id

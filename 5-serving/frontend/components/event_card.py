@@ -112,11 +112,18 @@ def render_event_card(event: dict, context: str = "main") -> None:
     if cameo_label:
         cameo_label = cameo_label.removesuffix(", not specified below")
 
-    card_title = (
-        articles[0]["mention_identifier"]
-        if articles and not articles[0]["mention_identifier"].startswith("No article title")
-        else event.get("card_title", f'"{event["cameo_label"]}" type of event (ID: {event["global_event_id"]})')
-    )
+    # 1. Search for the first article that has a valid title
+    card_title = None
+    for article in articles:
+        if not article.get("mention_identifier", "").startswith("(No article title"):
+            card_title = article["mention_identifier"]
+            break  # Stop at the first valid title we find
+
+    # 2. Fall back to the formatted event string if no valid titles were found
+    if not card_title:
+        # Use the cleaned cameo_label we defined just above (or fallback to the raw one if None)
+        display_label = cameo_label or event.get("cameo_label", "Unknown")
+        card_title = f'"{display_label}" type of event (ID: {event["global_event_id"]})'
 
     with st.container(border=True):
         st.markdown(f"### {card_title}")

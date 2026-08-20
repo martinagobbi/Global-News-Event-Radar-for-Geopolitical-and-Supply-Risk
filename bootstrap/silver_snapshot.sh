@@ -48,6 +48,19 @@ TABLES=(gdelt_events gdelt_mentions)
 # different period.
 SEED_LAST_SLICE="${SEED_LAST_SLICE:-20260727171500}"
 
+# How long `restore` keeps retrying an INSERT that fails, and how often. 20
+# minutes because the thing being waited out is a COLD START of the whole stores
+# tier — ClickHouse, Keeper forming its quorum, and the validation layer creating
+# the schema ON CLUSTER — and on a first run, with images still being pulled,
+# that can genuinely take many minutes. Failing at 5 would turn a slow start into
+# a spurious error and send someone debugging a system that was merely booting.
+#
+# The budget is per TABLE, so a two-table restore can spend up to 2x this in the
+# worst case. That is intentional: each table is a separate operation and a
+# failure on the second says nothing about the first, which has already landed.
+RESTORE_MAX_WAIT="${RESTORE_MAX_WAIT:-1200}"     # 20 minutes
+RESTORE_RETRY_EVERY="${RESTORE_RETRY_EVERY:-10}"
+
 ch() { docker exec -i "$CH_CONTAINER" clickhouse-client "$@"; }
 
 case "${1:-}" in
@@ -86,10 +99,14 @@ case "${1:-}" in
     printf '\n'
     if ! ch --query "EXISTS TABLE ${TABLES[0]}" 2>/dev/null | grep -q '^1$'; then
       echo "ERROR: ${TABLES[0]} still does not exist after 5 minutes." >&2
-      echo "       Is the pipeline running? Start it with:" >&2
+      echo "       Is the pipeline running? The VALIDATION layer owns this schema" >&2
+      echo "       and creates it at startup; the stores alone will not." >&2
       echo "         docker compose --env-file .env.testing up -d --build" >&2
       exit 1
     fi
+    # NOTE: passing this check does NOT mean the tables accept writes. It proves
+    # the name is registered, nothing more — see the retry around the INSERT
+    # below, which is what actually waits for the storage to be initialised.
 
     for t in "${TABLES[@]}"; do
       f="$SEED_DIR/$t.parquet"
@@ -105,7 +122,50 @@ case "${1:-}" in
       # success and restores NOTHING. Correctness does not depend on this
       # de-duplication anyway, because both tables are ReplacingMergeTree and
       # collapse genuine duplicate rows by key at merge/FINAL time.
-      ch --query "INSERT INTO $t SETTINGS insert_deduplicate = 0 FORMAT Parquet" < "$f"
+      # ── Retried, because EXISTS TABLE is not the same as "accepts writes" ────
+      # The wait above proves the table NAME is registered. It does not prove the
+      # storage behind it is initialised, and the two are genuinely separable:
+      #
+      #   Code: 667. DB::Exception: Table is not initialized yet. (NOT_INITIALIZED)
+      #
+      # Observed 2026-08-20 immediately after `docker compose up -d --build`. The
+      # rebuild recreated the validation container, which re-runs ensure_tables()
+      # (CREATE TABLE IF NOT EXISTS ... ON CLUSTER) at startup, and this INSERT
+      # landed while the Distributed table was mid-initialisation. The wait had
+      # reported "ready after 0s" because the name already existed from the
+      # previous run. Reads worked throughout — SELECT count() returned 104,016 —
+      # so only the write path was affected.
+      #
+      # The retry IS the real INSERT rather than a lighter probe, deliberately:
+      # any probe tests something slightly different from the operation it is
+      # standing in for, and that gap is exactly where this bug lived. Re-running
+      # a failed or partial INSERT is safe for the same reason restoring twice is
+      # safe — insert_deduplicate=0 forces the blocks through, and both tables are
+      # ReplacingMergeTree, so repeats collapse by key instead of duplicating.
+      deadline=$(( $(date +%s) + RESTORE_MAX_WAIT ))
+      attempt=0
+      until ch --query "INSERT INTO $t SETTINGS insert_deduplicate = 0 FORMAT Parquet" < "$f" 2>/tmp/.restore_err; do
+        attempt=$(( attempt + 1 ))
+        err=$(head -2 /tmp/.restore_err | tr '\n' ' ' | cut -c1-120)
+        if [ "$(date +%s)" -ge "$deadline" ]; then
+          echo >&2
+          echo "ERROR: $t could not be restored within ${RESTORE_MAX_WAIT}s ($attempt attempts)." >&2
+          echo "       Last error: $err" >&2
+          echo "       The stores may still be starting, or the schema may not match" >&2
+          echo "       the seed. Check:  docker logs pipeline_clickhouse_s1r1" >&2
+          rm -f /tmp/.restore_err
+          exit 1
+        fi
+        # Every failure is printed, not just the last. A silent retry loop is
+        # indistinguishable from a hang, and the error text is what says whether
+        # this is a startup race (retry will fix it) or a schema mismatch (it
+        # will not, and waiting out the full budget is pointless).
+        printf '  attempt %d failed, retrying in %ds: %s\n' \
+               "$attempt" "$RESTORE_RETRY_EVERY" "$err"
+        sleep "$RESTORE_RETRY_EVERY"
+      done
+      rm -f /tmp/.restore_err
+      [ "$attempt" -gt 0 ] && printf '  %-16s succeeded on attempt %d\n' "$t" "$(( attempt + 1 ))"
       rows=$(ch --query "SELECT count() FROM $t FINAL")
       # On a MULTI-SHARD cluster this count can read LOW — it is taken the moment
       # the insert returns, while the Distributed table is still handing rows to
