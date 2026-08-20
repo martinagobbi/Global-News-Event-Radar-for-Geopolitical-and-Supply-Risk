@@ -164,4 +164,4 @@ def render_event_card(event: dict, context: str = "main") -> None:
         else:
             st.info("No related articles available for this event.")
 
-        render_tag_buttons(event["global_event_id"], context=context)
+        render_tag_buttons(event["global_event_id"], context=context, user_tag=event.get("user_tag"))

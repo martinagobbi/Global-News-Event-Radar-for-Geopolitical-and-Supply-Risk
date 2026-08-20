@@ -70,7 +70,5 @@ Thumbs.db
 README.html
 # Dev notes rendered
 dev_notes.html
-# Dev notes themselves
-dev_notes.md
 # A file where I draft commit messages
 .prepping_latest_commit_message.txt
