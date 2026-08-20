@@ -68,6 +68,9 @@ Thumbs.db
 # 9. SMALL
 # Sometimes I will render a README.html from README.md
 README.html
+# The serving layer's README is not up to date, and hard to maintain
+./5-serving/README.md
+./5-serving/README.html
 # Dev notes rendered
 dev_notes.html
 # A file where I draft commit messages
