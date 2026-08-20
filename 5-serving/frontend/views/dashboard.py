@@ -244,10 +244,10 @@ with legend_col:
     st.subheader("Map legend")
     st.markdown(
         """
-        🔴 **Points** — monitored geographic locations.  
+        **Points** — monitored geographic locations.  
         Larger points indicate more events.
 
-        🔥 **Heatmap** — concentration of events.  
+        **Heatmap** — concentration of events.  
         Brighter areas indicate a higher concentration of events.
 
         *Colours indicate event concentration, not risk severity.*

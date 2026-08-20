@@ -1,6 +1,6 @@
 # Production-level design of the "Global-News Event Radar for Geopolitical and Supply Risk"
 
-This app gives users a customised and informative briefing of news of events that may threatent their supply chain's stability.
+This app gives users a customised and informative briefing of news of events that are of interest to their supply chain's stability (this will tend to be risks associated with the supply chain).
 
 This repository is "production-level" meaning that it deliberately avoids using one Docker app that puts together the data pipeline, the LTS systems, and the frontend into one Docker app to run `docker compose` on. Rather, these aspects are entirely separate, each with its own set of Docker containers making one Docker app to call `docker compose` on. Like in a production-level design, the only point of contact between the pipeline (which involves ingestion, parsing, validation, processing, and the backend of the storage) and the LTS systems is `pipeline_network` (a DNS with no published ports). Also like in a production-level design, the Docker app for the frontend of the service is even more separate from the other two Docker apps, with its only point of contact being a URL to the backend (`BACKEND_URL`): this way, multiple such frontend Docker apps can be run connected to the same backend. Starting up every part of the radar together is thus deliberately and necessarily a multi-step process that avoids using one Docker app for everything, even if Docker apps can already have multiple containers.
 
