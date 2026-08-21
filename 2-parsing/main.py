@@ -70,10 +70,12 @@ Environment variables
     BACKPRESSURE_MAX_WAIT    wait before reporting a stalled consumer (default 1800)
 """
 
+import csv
 import json
 import logging
 import os
 import time
+from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
@@ -97,6 +99,8 @@ FILE_STABLE_SECS = int(os.getenv("FILE_STABLE_SECONDS", "3"))
 STATE_DIR        = Path(os.getenv("STATE_DIR", "/data/state"))
 SLICE_STATE_FILE = STATE_DIR / "parsing_slices.json"
 DEAD_LETTER_DIR  = Path(os.getenv("DEAD_LETTER_DIR", "/data/dead_letter"))
+DEAD_LETTER_LOG_FILE = DEAD_LETTER_DIR / "dead_letter_log.csv"
+MAX_DEAD_LETTER_LOG_ROWS = int(os.getenv("MAX_DEAD_LETTER_LOG_ROWS", "10000"))
 MAX_SLICE_ATTEMPTS    = int(os.getenv("MAX_SLICE_ATTEMPTS", "3"))
 SLICE_ORPHAN_MAX_AGE  = int(os.getenv("SLICE_ORPHAN_MAX_AGE", str(60 * 60)))
 BACKPRESSURE_MAX_WAIT = int(os.getenv("BACKPRESSURE_MAX_WAIT", str(30 * 60)))
@@ -130,11 +134,53 @@ def _save_state(state: dict) -> None:
         logger.warning("Could not persist slice state: %s", exc)
 
 
+def _append_dead_letter_log(file_path: Path | str) -> bool:
+    """Append one row to the dead-letter log and return True when it was stored."""
+    DEAD_LETTER_DIR.mkdir(parents=True, exist_ok=True)
+    file_path = Path(file_path)
+    header = ["file_name", "dead_letter_day", "dead_letter_time"]
+    rows = [header]
+    if DEAD_LETTER_LOG_FILE.exists() and DEAD_LETTER_LOG_FILE.stat().st_size > 0:
+        with DEAD_LETTER_LOG_FILE.open("r", newline="", encoding="utf-8") as fh:
+            reader = csv.reader(fh)
+            rows = list(reader) or [header]
+        if not rows or rows[0] != header:
+            rows = [header] + rows
+
+    used = max(len(rows) - 1, 0)
+    if used >= MAX_DEAD_LETTER_LOG_ROWS:
+        logger.warning(
+            "Dead-letter log full (%d/%d rows); skipping %s (Dead-lettered files and related rows are automatically deleted one year from creation)",
+            used,
+            MAX_DEAD_LETTER_LOG_ROWS,
+            file_path.name,
+        )
+        return False
+
+    now = datetime.now()
+    rows.append([
+        file_path.name,
+        now.strftime("%Y-%m-%d"),
+        now.strftime("%H:%M:%S"),
+    ])
+
+    with DEAD_LETTER_LOG_FILE.open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.writer(fh)
+        writer.writerows(rows)
+
+    logger.info(
+        "Dead-letter log updated: %d/%d rows filled (Dead-lettered files and related rows are automatically deleted one year from creation)",
+        len(rows) - 1,
+        MAX_DEAD_LETTER_LOG_ROWS,
+    )
+    return True
+
+
 def _dead_letter(slice_id: str, paths, reason: str) -> None:
     """
     Move a slice's files out of the input directory so the pipeline can advance.
     They are MOVED, never deleted: an abandoned slice is evidence, and it can be
-    replayed by copying it back.
+    replayed by copying it back. Each file is also logged in DEAD_LETTER_DIR.
     """
     target = DEAD_LETTER_DIR / slice_id
     try:
@@ -142,6 +188,7 @@ def _dead_letter(slice_id: str, paths, reason: str) -> None:
         for p in paths:
             if p.exists():
                 os.replace(p, target / p.name)
+                _append_dead_letter_log(target / p.name)
         logger.error("Slice %s abandoned after %s — moved to %s", slice_id, reason, target)
     except OSError as exc:
         logger.error("Could not dead-letter slice %s (%s); deleting to unblock: %s",

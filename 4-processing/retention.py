@@ -1,9 +1,19 @@
 """
-4-processing/retention.py — the only automatic deletion in the pipeline.
+4-processing/retention.py — the pipeline's automatic cleanup job.
 
 Everything else in this system either appends or rebuilds. Silver is
 append-only; gold's `articles` is upserted (and swept of unreferenced rows);
 nothing ages out. Left alone, both stores grow for as long as the pipeline runs.
+
+This module removes stale data that is older than the configured retention window:
+
+    * events whose last article is older than RETENTION_DAYS, and everything
+      hanging off them in silver + gold + Mongo tags;
+    * dead-lettered files older than one year, as recorded in the dead-letter log
+      kept under DEAD_LETTER_DIR. The CSV log itself is never deleted.
+
+The dead-letter log is intentionally not part of the retention cleanup: it is a
+record of what was abandoned, where records over one year old are automatically wiped.
 
 This module removes events that have gone quiet for a year, and everything
 hanging off them:
@@ -44,6 +54,7 @@ survives with it, which also keeps the card ordering stable, since that ordering
 is keyed on the oldest article a card holds.
 """
 
+import csv
 import json
 import logging
 import os
@@ -55,9 +66,12 @@ from pathlib import Path
 logger = logging.getLogger("processing.retention")
 
 RETENTION_DAYS = float(os.getenv("RETENTION_DAYS", "365"))
+DEAD_LETTER_RETENTION_DAYS = float(os.getenv("DEAD_LETTER_RETENTION_DAYS", "365"))
 CLICKHOUSE_CLUSTER = os.getenv("CLICKHOUSE_CLUSTER", "gnews_cluster")
 STATE_DIR = Path(os.getenv("STATE_DIR", "/data/state"))
 RETENTION_STATE_FILE = STATE_DIR / "retention.json"
+DEAD_LETTER_DIR = Path(os.getenv("DEAD_LETTER_DIR", "/data/dead_letter"))
+DEAD_LETTER_LOG_FILE = DEAD_LETTER_DIR / "dead_letter_log.csv"
 # How often the scheduler re-checks whether midnight has passed. Short enough to
 # start the run promptly, long enough to cost nothing.
 TICK_SECONDS = int(os.getenv("RETENTION_TICK_SECONDS", "300"))
@@ -294,8 +308,75 @@ def delete_tags(event_ids: list[int]) -> int:
 
 # ── The job ──────────────────────────────────────────────────────────────────
 
+def purge_dead_letter_files(now: datetime | None = None) -> int:
+    """Delete stale dead-lettered files and their matching CSV rows, but never the CSV log itself."""
+    now = now or datetime.now(timezone.utc)
+    cutoff = now - timedelta(days=DEAD_LETTER_RETENTION_DAYS)
+    if not DEAD_LETTER_DIR.exists():
+        return 0
+
+    if not DEAD_LETTER_LOG_FILE.exists():
+        return 0
+
+    try:
+        with DEAD_LETTER_LOG_FILE.open("r", newline="", encoding="utf-8") as fh:
+            rows = list(csv.reader(fh))
+    except OSError:
+        logger.warning("dead_letter: could not read %s; skipping stale purge", DEAD_LETTER_LOG_FILE)
+        return 0
+
+    if not rows:
+        return 0
+    header = rows[0]
+    if header != ["file_name", "dead_letter_day", "dead_letter_time"]:
+        return 0
+
+    kept_rows = [header]
+    removed = 0
+    for row in rows[1:]:
+        if len(row) < 3:
+            continue
+        file_name = row[0].strip()
+        if not file_name or file_name == DEAD_LETTER_LOG_FILE.name:
+            continue
+        try:
+            stamped = datetime.strptime(f"{row[1].strip()} {row[2].strip()}", "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            kept_rows.append(row)
+            continue
+        if stamped.tzinfo is None:
+            stamped = stamped.replace(tzinfo=timezone.utc)
+
+        if stamped < cutoff:
+            stale_deleted = False
+            for match in DEAD_LETTER_DIR.rglob(file_name):
+                if match.is_file() and match != DEAD_LETTER_LOG_FILE:
+                    try:
+                        match.unlink()
+                        stale_deleted = True
+                        removed += 1
+                    except OSError as exc:
+                        logger.warning("dead_letter: could not delete stale file %s: %s", match, exc)
+            if stale_deleted:
+                continue
+
+        kept_rows.append(row)
+
+    if len(kept_rows) != len(rows):
+        with DEAD_LETTER_LOG_FILE.open("w", newline="", encoding="utf-8") as fh:
+            writer = csv.writer(fh)
+            writer.writerows(kept_rows)
+
+    if removed:
+        logger.info("dead_letter: removed %d stale file(s) and their log row(s) older than %s",
+                    removed, cutoff.date())
+    else:
+        logger.info("dead_letter: nothing older than %s — no deletions", cutoff.date())
+    return removed
+
+
 def run_once(ch_factory, now: datetime | None = None) -> dict:
-    """Find expired events and remove them from silver, gold and the tag store."""
+    """Find expired events and remove them from silver, gold, and stale dead-letter files."""
     now = now or datetime.now(timezone.utc)
     cutoff_dt = now - timedelta(days=RETENTION_DAYS)
     cutoff = cutoff_dt.strftime("%Y%m%d%H%M%S")
@@ -305,7 +386,9 @@ def run_once(ch_factory, now: datetime | None = None) -> dict:
         if not expired:
             logger.info("retention: nothing older than %s (%.0f days) — no deletions",
                         cutoff_dt.date(), RETENTION_DAYS)
-            return {"cutoff": cutoff, "events": 0, "articles": 0, "tags": 0}
+            dead_letter_removed = purge_dead_letter_files(now)
+            return {"cutoff": cutoff, "events": 0, "articles": 0, "tags": 0,
+                    "dead_letters_removed": dead_letter_removed}
 
         logger.info("retention: %d events have had no article since %s; removing",
                     len(expired), cutoff_dt.date())
@@ -313,7 +396,9 @@ def run_once(ch_factory, now: datetime | None = None) -> dict:
 
     articles, _ = delete_from_gold(expired)
     tags = delete_tags(expired)
-    return {"cutoff": cutoff, "events": len(expired), "articles": articles, "tags": tags}
+    dead_letter_removed = purge_dead_letter_files(now)
+    return {"cutoff": cutoff, "events": len(expired), "articles": articles,
+            "tags": tags, "dead_letters_removed": dead_letter_removed}
 
 
 def _loop(ch_factory) -> None:

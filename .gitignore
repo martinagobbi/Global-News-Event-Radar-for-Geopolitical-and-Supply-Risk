@@ -79,3 +79,7 @@ dev_notes.html
 bootstrap/gold_snapshot.sh
 # "Sectors"
 ./5-serving/frontend/configuration/sectors.py
+
+# 10. FOR LOCAL TESTING
+.venv/
+tests/
