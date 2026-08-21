@@ -77,3 +77,5 @@ dev_notes.html
 .prepping_latest_commit_message.txt
 # The gold seed is now out-of-date. Git-ignoring it indefinitely.
 bootstrap/gold_snapshot.sh
+# "Sectors"
+./5-serving/frontend/configuration/sectors.py

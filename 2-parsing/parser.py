@@ -78,21 +78,95 @@ RELEVANT_KNOWN_GROUPS = {
     "UN",
 }
 
-# ── F3: alternative supply-chain keywords ────────────────────────────────────
+# ── F3: alternative supply-chain keywords (chosen from thematic analysis) ────────────────────────────────────
 SUPPLY_CHAIN_KEYWORDS = {
-    "port", "porto", "harbor", "harbour",
-    "shipping", "freight", "cargo",
-    "customs", "dogana", "tariff", "tariffa",
-    "logistics", "logistica", "supply chain", "supply-chain",
-    "warehouse", "magazzino", "storage",
-    "refinery", "raffineria",
-    "factory", "fabbrica", "plant",
-    "semiconductor", "microchip",
-    "oil", "gas", "pipeline",
-    "railway", "railroad", "ferrovia",
-    "airport", "aeroporto",
-    "tanker", "container",
+    "port",
+    "harbor", "harbour",
+    "shipping",
+    "freight",
+    "cargo", "cargoes"
+    "customs",
+    "tariff",
+    "logistics",
+    "supply chain", "supply-chain",
+    "supply-side",
+    "warehouse",
+    "storage",
+    "refinery", "refineries"
+    "factory", "factories",
+    "plant",
+    "semiconductor",
+    "microchip",
+    "oil",
+    "gas",
+    "pipeline",
+    "railway",
+    "railroad",
+    "airport",
+    "tanker",
+    "container",
+
+    "avalanche",
+    "blizzard",
+    "wildfire",
+    "bushfire",
+    "cold wave",
+    "derecho",
+    "drought",
+    "earthquake",
+    "flash flood",
+    "haboob",
+    "heat wave",
+    "hurricane",
+    "lahar",
+    "landslide",
+    "limnic eruption",
+    "polar vortex event",
+    "riverine flood",
+    "sinkhole",
+    "storm surge",
+    "tornado",
+    "tornadoes",
+    "tropical cyclone",
+    "tsunami",
+    "typhoon",
+    "volcanic eruption",
+    "waterspout",
+
+    "inflation",
+    "deflation",
+
+    "terrorist attack",
 }
+"""
+"RISK_CATEGORY_OPTIONS", for reference.
+Many are being considered not for this parser logic but for the user-specific processing preferences downstream.
+
+Demand-side economic conditions
+Supply-side financial instability
+Supply-side raw materials quality issues
+Recent supply-side transit-related accidents
+Delay in obtaining governmental approvals
+New regulatory, legal, or bureaucratic plans and policies
+Climatic adverse situations
+Terrorist attacks on infrastructure
+Civil movements
+Labour disputes involving worker associations in key firms
+Dissatisfied employee unions from key firms
+Key firms choosing mergers
+Key firms choosing divestments
+Disasters in supply chain locations
+Disasters affecting involved companies
+Recent supply-chain-related theft history
+Recent supply-chain-related counterfeiting history
+Recent supply-side contract non-compliance
+Variations in climatic conditions
+Scandals related to key firms
+Sanctions on key firms
+Inflation in supply-side economy
+Major supply-side accidents or breakdowns
+Incentivising announcements by ruling political figures
+"""
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
