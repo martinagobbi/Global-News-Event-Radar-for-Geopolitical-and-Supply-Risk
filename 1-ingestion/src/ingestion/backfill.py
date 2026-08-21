@@ -112,11 +112,11 @@ def download_file(url: str, dest_path: Path, retries: int = MAX_RETRIES) -> bool
             return True
 
         except requests.exceptions.RequestException as e:
-            log.warning(f"Tentativo {attempt}/{retries} fallito per {url}: {e}")
+            log.warning(f"Attempt {attempt}/{retries} failed for {url}: {e}")
             if attempt < retries:
                 time.sleep(RETRY_DELAY_SEC * attempt)  # backoff lineare
 
-    log.error(f"Download fallito dopo {retries} tentativi: {url}")
+    log.error(f"Download failed after {retries} attempts: {url}")
     return False
 
 
@@ -138,8 +138,8 @@ def run_backfill(n_days: int = 30, workers: int = DEFAULT_WORKERS):
         workers: thread paralleli (default 4, max consigliato 6)
     """
     total = count_urls(n_days, file_types=("events", "mentions"))
-    log.info(f"Backfill avviato: ultimi {n_days} giorni")
-    log.info(f"File stimati da scaricare: ~{total} ({workers} thread paralleli)")
+    log.info(f"Backfill started: last {n_days} days")
+    log.info(f"Estimated files to download: ~{total} ({workers} parallel threads)")
     ensure_ingestion_dirs()
     log.info(f"ZIP directory: {RAW_ZIP_DIR.resolve()}")
     log.info(f"CSV hand-off directory: {RAW_CSV_DIR.resolve()}")
@@ -180,7 +180,7 @@ def run_backfill(n_days: int = 30, workers: int = DEFAULT_WORKERS):
                     else:
                         fail_count += 1
                 except Exception as e:
-                    log.error(f"Errore inatteso per {url}: {e}")
+                    log.error(f"Unexpected error for {url}: {e}")
                     fail_count += 1
 
                 pbar.update(1)
@@ -190,9 +190,9 @@ def run_backfill(n_days: int = 30, workers: int = DEFAULT_WORKERS):
                 )
 
     log.info("=" * 50)
-    log.info(f"Backfill completato.")
-    log.info(f"  Successi:    {success_count}")
-    log.info(f"  Falliti:     {fail_count} (principalmente 404 normali)")
+    log.info("Backfill complete.")
+    log.info(f"  Successful:  {success_count}")
+    log.info(f"  Failed:      {fail_count} (mostly normal 404 responses)")
     log.info(f"  ZIP dir:     {RAW_ZIP_DIR.resolve()}")
     log.info(f"  CSV dir:     {RAW_CSV_DIR.resolve()}")
     log.info("=" * 50)
@@ -203,13 +203,13 @@ def run_backfill(n_days: int = 30, workers: int = DEFAULT_WORKERS):
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Scarica i file GDELT degli ultimi N giorni."
+        description="Download GDELT files from the last N days."
     )
     parser.add_argument(
         "--days",
         type=int,
         default=30,
-        help="Numero di giorni da scaricare (default: 30)",
+        help="Number of days to download (default: 30)",
     )
     parser.add_argument(
         "--workers",

@@ -121,7 +121,7 @@ def fetch_latest_urls(session: requests.Session) -> Dict[str, str]:
         except requests.exceptions.HTTPError as http_err:
             # Se è un 404 ed abbiamo ancora tentativi, aspettiamo e riproviamo
             if response.status_code == 404 and attempt < retries:
-                print(f"[WARNING] GDELT ha risposto con 404 (tentativo {attempt}/{retries}). Il file si sta aggiornando. Riprovo tra {delay} secondi...")
+                print(f"[WARNING] GDELT returned 404 (attempt {attempt}/{retries}). The file is being updated. Retrying in {delay} seconds...")
                 time.sleep(delay)
                 continue
             raise http_err  # Se i tentativi sono finiti o è un altro errore, fallisci
@@ -163,13 +163,13 @@ def download_and_extract(session: requests.Session, file_url: str,
 def validate_and_cleanup(csv_path: Path, zip_path: Path) -> None:
     """Valida il CSV (ora nello staging), poi rimuove lo ZIP."""
     df = pd.read_csv(csv_path, sep="\t", header=None, low_memory=False)
-    print(f"[OK] CSV valido: {csv_path.name} | Righe rilevate: {len(df)}")
+    print(f"[OK] Valid CSV: {csv_path.name} | Rows detected: {len(df)}")
 
     # Il CSV resta nello staging finché lo slice non è completo (o scade il
     # deadline): solo allora viene spostato in RAW_CSV_DIR, dove il parsing lo
     # leggerà. Il parsing resta responsabile di cancellarlo dopo averlo processato.
     zip_path.unlink(missing_ok=True)
-    print(f"[CLEANUP] Rimosso ZIP raw: {zip_path.name}")
+    print(f"[CLEANUP] Removed raw ZIP: {zip_path.name}")
 
 
 # ── Staging and atomic release ───────────────────────────────────────────────
@@ -197,7 +197,7 @@ def staged_kinds(slice_id: str) -> dict:
         if not p.is_file() or p.name.startswith("."):
             continue
         if slice_id and not p.name.startswith(slice_id):
-            print(f"[WARNING] {p.name} non appartiene allo slice {slice_id}; ignorato")
+            print(f"[WARNING] {p.name} does not belong to slice {slice_id}; ignored")
             continue
         if p.name.endswith(EVENTS_NAME_SUFFIX):
             found["events"] = p
@@ -245,13 +245,13 @@ def _retrieve_into_staging(session: requests.Session, url: str, kind: str,
                            slice_id: str) -> bool:
     """Download one file into the slice's staging folder. Never raises."""
     try:
-        print(f"[INFO] Nuovo file {kind} rilevato: {Path(url).name}")
+        print(f"[INFO] New {kind} file detected: {Path(url).name}")
         csv_path, zip_path = download_and_extract(
             session, url, dest_dir=staging_dir_for(slice_id))
         validate_and_cleanup(csv_path, zip_path)
         return True
     except Exception as exc:                      # noqa: BLE001
-        print(f"[WARNING] {kind} non recuperato ({Path(url).name}): {exc}")
+        print(f"[WARNING] Could not retrieve {kind} ({Path(url).name}): {exc}")
         return False
 
 
@@ -275,7 +275,7 @@ def process_pipeline(session: requests.Session) -> None:
     latest_urls = fetch_latest_urls(session)
 
     if not latest_urls.get("events") or not latest_urls.get("mentions"):
-        print("[WARNING] Impossibile trovare gli URL di Events o Mentions nel file di controllo.")
+        print("[WARNING] Could not find the Events or Mentions URLs in the control file.")
         return
 
     event_url = latest_urls["events"]
@@ -284,7 +284,7 @@ def process_pipeline(session: requests.Session) -> None:
 
     # Already handled: this slice was released on an earlier cycle.
     if state.get("events") == event_url and state.get("mentions") == mention_url:
-        print("[SKIP] Tabella Events e Mentions già aggiornate all'ultimo rilascio.")
+        print("[SKIP] Events and Mentions tables are already up to date with the latest release.")
         return
 
     # 2. First attempt, through the normal path, for whatever is not yet staged.
@@ -316,7 +316,7 @@ def process_pipeline(session: requests.Session) -> None:
             # then be staged into this slice's folder — releasing a mismatched
             # pair of two different timestamps to parsing.
             retry_url = build_file_url(published, file_type)
-            print(f"[RETRY] {key} mancante per lo slice {slice_id}; riprovo da {retry_url}")
+            print(f"[RETRY] {key} missing for slice {slice_id}; retrying from {retry_url}")
             if _retrieve_into_staging(session, retry_url, key, slice_id):
                 state[key] = retry_url
 
@@ -325,10 +325,10 @@ def process_pipeline(session: requests.Session) -> None:
     #    GLOBALEVENTID), and mentions alone still attach to events already stored.
     final = staged_kinds(slice_id)
     if not final:
-        print(f"[WARNING] slice {slice_id}: nessun file recuperato entro il deadline.")
+        print(f"[WARNING] slice {slice_id}: no files retrieved before the deadline.")
     elif len(final) < 2:
-        print(f"[WARNING] slice {slice_id}: payload parziale "
-              f"({'+'.join(sorted(final))}) rilasciato dopo il deadline.")
+          print(f"[WARNING] slice {slice_id}: partial payload "
+              f"({'+'.join(sorted(final))}) released after the deadline.")
     release_slice(slice_id)
 
     # 5. Advance the event-time watermark and report anything that was missed.
@@ -352,20 +352,20 @@ def main() -> None:
     args = parse_args()
     with requests.Session() as session:
         if args.loop:
-            print("[START] Poller avviato in modalità continua (loop = 15 min)...")
+            print("[START] Poller started in continuous mode (loop = 15 min)...")
             while True:
                 started = time.monotonic()
                 try:
                     process_pipeline(session)
                 except Exception as exc:
-                    print(f"[ERROR] Errore nel ciclo di esecuzione: {exc}")
+                    print(f"[ERROR] Error during execution cycle: {exc}")
                 # Sleep the REMAINDER of the interval, not a fixed 15 minutes: a
                 # cycle that spent time retrying a missing file would otherwise
                 # push the next one to T+25 and drift further every time.
                 elapsed = time.monotonic() - started
                 time.sleep(max(0.0, POLL_INTERVAL_SECONDS - elapsed))
         else:
-            print("[START] Poller avviato per esecuzione singola...")
+            print("[START] Poller started for a single run...")
             process_pipeline(session)
 
 if __name__ == "__main__":
