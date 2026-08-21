@@ -75,6 +75,7 @@ DEAD_LETTER_DIR = Path(os.getenv("DEAD_LETTER_DIR", "/data/dead_letter"))
 DEAD_LETTER_LOG_FILE = DEAD_LETTER_DIR / "dead_letter_log.csv"
 MAX_DEAD_LETTER_LOG_ROWS = int(os.getenv("MAX_DEAD_LETTER_LOG_ROWS", "10000"))
 MAX_PAIR_ATTEMPTS = int(os.getenv("MAX_PAIR_ATTEMPTS", "3"))
+COMPLETE_SUFFIX = ".complete.json"
 
 
 def _load_attempts() -> dict:
@@ -161,13 +162,48 @@ def _dead_letter(paths, reason: str) -> None:
 
 
 def list_files() -> list[Path]:
-    """Return the data files currently in latest_files (ignores temp/hidden)."""
+    """Return handoff entries currently in latest_files (ignores temp/hidden)."""
     if not LATEST_FILES_DIR.exists():
         return []
     return sorted(
         p for p in LATEST_FILES_DIR.iterdir()
         if p.is_file() and not p.name.startswith(".")
     )
+
+
+def list_manifests() -> list[Path]:
+    """Return only parsing's atomically published slice-complete markers."""
+    return sorted(
+        p for p in LATEST_FILES_DIR.iterdir()
+        if p.is_file() and p.name.endswith(COMPLETE_SUFFIX)
+    ) if LATEST_FILES_DIR.exists() else []
+
+
+def manifest_paths(manifest: Path) -> list[Path]:
+    """Resolve the delivered data files declared by one completion marker."""
+    with manifest.open(encoding="utf-8") as fh:
+        payload = json.load(fh)
+    paths = []
+    for key in ("events", "mentions"):
+        name = payload.get(key)
+        if name:
+            path = LATEST_FILES_DIR / name
+            if not path.is_file():
+                raise FileNotFoundError(f"{key} file declared by {manifest.name} is missing")
+            paths.append(path)
+    if not paths:
+        raise ValueError(f"{manifest.name} declares no delivered files")
+    return paths
+
+
+def manifest_entries(manifest: Path) -> list[Path]:
+    """Return a manifest plus any data files belonging to its slice."""
+    slice_id = manifest.name.removesuffix(COMPLETE_SUFFIX)
+    entries = [manifest]
+    for path in list_files():
+        if path.name.startswith(slice_id) and path != manifest:
+            entries.append(path)
+    return entries
 
 
 def deduplicate_events(storage: Storage) -> None:
@@ -182,11 +218,11 @@ def deduplicate_events(storage: Storage) -> None:
         logger.warning("Events dedup failed (will converge at next merge): %s", exc)
 
 
-def process_pair(paths, storage: Storage) -> None:
-    """Validate + ingest one pair, then delete the two files."""
+def process_pair(paths, manifest: Path, storage: Storage) -> None:
+    """Validate the manifest's complete slice, then delete its handoff entries."""
     summary = validate_pair(paths, storage)
     deduplicate_events(storage)
-    for p in paths:
+    for p in [*paths, manifest]:
         try:
             Path(p).unlink()
         except OSError as exc:
@@ -239,7 +275,9 @@ def main() -> None:
         # ── Clear: a fresh processable slice, none of it from the error snapshot
         # A partial slice clears the error just as a full one does — the point is
         # that new work arrived, not how many files it came in.
-        if err_active and files and is_processable(files) and names.isdisjoint(snapshot):
+        manifests = list_manifests()
+
+        if err_active and manifests and names.isdisjoint(snapshot):
             status.clear_error()
             err_active = False
 
@@ -248,15 +286,18 @@ def main() -> None:
         if time.monotonic() - last_new_file_time > STALE_LIMIT_SECONDS:
             status.set_error("stale_latest_files", names)
 
-        # ── Process a fresh, valid slice (a pair, or a single file) ───────────
-        # Parsing publishes a lone file when ingestion released a partial slice
-        # after its retrieval deadline. Both halves are independently useful:
-        # events update the store on their own, and mentions attach to events
-        # already stored. Only an unrecognisable file is rejected.
-        if files and is_processable(files):
-            key = files[0].name.split(".")[0]
+        # ── Process only a parsing-closed slice ──────────────────────────────
+        # Data files alone are never sufficient: the completion manifest is
+        # renamed into place only after parsing has waited its full companion
+        # window and finished writing every delivered file.
+        if manifests:
+            manifest = manifests[0]
+            key = manifest.name.removesuffix(COMPLETE_SUFFIX)
             try:
-                process_pair(files, storage)
+                data_paths = manifest_paths(manifest)
+                if not is_processable(data_paths):
+                    raise ValueError(f"Invalid data entries for {manifest.name}")
+                process_pair(data_paths, manifest, storage)
                 prev_names = {p.name for p in list_files()}  # post-delete
                 if attempts.pop(key, None) is not None:
                     _save_attempts(attempts)
@@ -264,12 +305,9 @@ def main() -> None:
                 n = attempts.get(key, 0) + 1
                 attempts[key] = n
                 logger.exception("Processing failed for %s (attempt %d/%d): %s",
-                                 [p.name for p in files], n, MAX_PAIR_ATTEMPTS, exc)
+                                 manifest.name, n, MAX_PAIR_ATTEMPTS, exc)
                 if n >= MAX_PAIR_ATTEMPTS:
-                    # Set the pair aside rather than retrying it forever: parsing
-                    # publishes only when this directory is empty, so a pair that
-                    # can never succeed would halt the whole pipeline behind it.
-                    _dead_letter(files, f"{n} failed attempts")
+                    _dead_letter(manifest_entries(manifest), f"{n} failed attempts")
                     attempts.pop(key, None)
                     status.set_error("dead_letter", {key})
                     prev_names = {p.name for p in list_files()}

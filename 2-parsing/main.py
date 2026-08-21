@@ -25,11 +25,10 @@ GDELT file: DATEADDED (events, column 59) and MentionTimeDate (mentions, col 2).
 Hand-off rules to layer 3 (validation):
     * tab-separated, header-less, official GDELT column order — matches
       gdelt.load_table();
-    * atomic write (temp name -> rename), mentions renamed LAST, so the watcher
-      never sees a half-written file;
-    * back-pressure: a new pair is published only when latest_files is empty
-      (the previous pair has been consumed), so validation — which can take
-      minutes to enrich — is never overrun.
+        * each output file is written to private staging and renamed only when complete;
+        * a completion manifest is renamed LAST. Validation watches manifests, not data
+            files, so it never treats one file of an open slice as complete;
+        * a singleton waits PARSING_PAIR_TIMEOUT_SECONDS for its companion.
 
 Watermarking
 ------------
@@ -68,6 +67,10 @@ Environment variables
     MAX_SLICE_ATTEMPTS       tries before dead-lettering   (default 3)
     SLICE_ORPHAN_MAX_AGE     age at which a half-pair is abandoned (default 3600)
     BACKPRESSURE_MAX_WAIT    wait before reporting a stalled consumer (default 1800)
+    Ingestion moves files here as soon as each download is complete. Parsing
+    holds a singleton in private staging until the companion arrives or the
+    parsing timeout closes the slice.
+    PARSING_PAIR_TIMEOUT_SECONDS  wait for a companion file (default 180)
 """
 
 import csv
@@ -75,7 +78,7 @@ import json
 import logging
 import os
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -92,9 +95,11 @@ logger = logging.getLogger("parsing")
  
 RAW_CSV_DIR      = Path(os.getenv("RAW_CSV_DIR", os.getenv("INGESTION_CSV_DIR", "/data/raw/csv")))
 LATEST_FILES_DIR = Path(os.getenv("LATEST_FILES_DIR", "/data/latest_files"))
+PARSED_STAGING_DIR = Path(os.getenv("PARSED_STAGING_DIR", "/data/parsed_staging"))
 FILTER_EVENTS    = os.getenv("FILTER_EVENTS", "1") == "1"
 SCAN_INTERVAL    = int(os.getenv("SCAN_INTERVAL_SECONDS", "5"))
 FILE_STABLE_SECS = int(os.getenv("FILE_STABLE_SECONDS", "3"))
+PARSING_PAIR_TIMEOUT = int(os.getenv("PARSING_PAIR_TIMEOUT_SECONDS", "180"))
 
 STATE_DIR        = Path(os.getenv("STATE_DIR", "/data/state"))
 SLICE_STATE_FILE = STATE_DIR / "parsing_slices.json"
@@ -107,6 +112,7 @@ BACKPRESSURE_MAX_WAIT = int(os.getenv("BACKPRESSURE_MAX_WAIT", str(30 * 60)))
 
 EVENTS_SUFFIX   = ".export.CSV"
 MENTIONS_SUFFIX = ".mentions.CSV"
+COMPLETE_SUFFIX = ".complete.json"
 
 
 # ── Watermark + retry state ──────────────────────────────────────────────────
@@ -117,9 +123,10 @@ def _load_state() -> dict:
         with SLICE_STATE_FILE.open(encoding="utf-8") as fh:
             state = json.load(fh)
         return {"watermark": state.get("watermark") or "",
-                "attempts": dict(state.get("attempts") or {})}
+            "attempts": dict(state.get("attempts") or {}),
+            "slices": dict(state.get("slices") or {})}
     except (OSError, ValueError):
-        return {"watermark": "", "attempts": {}}
+        return {"watermark": "", "attempts": {}, "slices": {}}
 
 
 def _save_state(state: dict) -> None:
@@ -215,10 +222,10 @@ def _stable(path: Path) -> bool:
         return False
  
  
-def _ready_slices() -> list[tuple[str, Path | None, Path | None]]:
+def _available_slices() -> list[tuple[str, Path | None, Path | None]]:
     """
-    Find slices ready to publish, as (slice_id, events_path, mentions_path) with
-    either path possibly None.
+    Find stable source files grouped by slice. A singleton is returned so it can
+    be parsed into private staging, but it is not yet ready for validation.
 
     Singletons are published, not held. The ingestion layer assembles a slice in
     a staging folder and moves it here only once it is complete or its retrieval
@@ -240,12 +247,12 @@ def _ready_slices() -> list[tuple[str, Path | None, Path | None]]:
             continue
         (events if p.name.endswith(EVENTS_SUFFIX) else mentions)[sl] = p
 
-    ready = []
+    available = []
     for sl in sorted(set(events) | set(mentions)):       # oldest slice first
         ev, mn = events.get(sl), mentions.get(sl)
         if all(_stable(p) for p in (ev, mn) if p is not None):
-            ready.append((sl, ev, mn))
-    return ready
+            available.append((sl, ev, mn))
+    return available
  
  
 def _sweep_orphans() -> None:
@@ -292,16 +299,57 @@ def _atomic_write(df: pd.DataFrame, final: Path) -> None:
     tmp = final.with_name(f".{final.name}.tmp")
     df.to_csv(tmp, sep="\t", header=False, index=False)
     os.replace(tmp, final)
- 
- 
-def process_pair(slice_id: str, ev_path: Path | None, mn_path: Path | None) -> None:
-    """
-    Filter events, keep mentions, publish, delete the sources.
 
-    Either path may be None: ingestion releases a partial slice once its retrieval
-    deadline has passed, and both halves are independently useful downstream. The
-    write order is unchanged — events first, mentions LAST — so a consumer never
-    observes a pair mid-write.
+
+def _write_manifest(slice_id: str, events_name: str | None,
+                    mentions_name: str | None) -> None:
+    """Publish the admission marker only after all data files are in place."""
+    LATEST_FILES_DIR.mkdir(parents=True, exist_ok=True)
+    final = LATEST_FILES_DIR / f"{slice_id}{COMPLETE_SUFFIX}"
+    tmp = final.with_name(f".{final.name}.tmp")
+    payload = {
+        "slice_id": slice_id,
+        "events": events_name,
+        "mentions": mentions_name,
+        "closed_at": datetime.now(timezone.utc).isoformat(),
+    }
+    with tmp.open("w", encoding="utf-8") as fh:
+        json.dump(payload, fh)
+    os.replace(tmp, final)
+
+
+def _publish_slice(slice_id: str, events_name: str | None,
+                   mentions_name: str | None) -> None:
+    """Move parsed outputs, then atomically publish the validation marker."""
+    source_dir = PARSED_STAGING_DIR / slice_id
+    LATEST_FILES_DIR.mkdir(parents=True, exist_ok=True)
+    for name in (events_name, mentions_name):
+        if name is not None:
+            os.replace(source_dir / name, LATEST_FILES_DIR / name)
+    _write_manifest(slice_id, events_name, mentions_name)
+
+
+def _parse_to_staging(slice_id: str, ev_path: Path | None,
+                      mn_path: Path | None) -> tuple[str | None, str | None]:
+    """Parse newly arrived files into a private per-slice output directory."""
+    output_dir = PARSED_STAGING_DIR / slice_id
+    output_dir.mkdir(parents=True, exist_ok=True)
+    events_name = f"{slice_id}{EVENTS_SUFFIX}"
+    mentions_name = f"{slice_id}{MENTIONS_SUFFIX}"
+    if ev_path is not None and not (output_dir / events_name).exists():
+        process_pair(slice_id, ev_path, None, output_dir=output_dir)
+    if mn_path is not None and not (output_dir / mentions_name).exists():
+        process_pair(slice_id, None, mn_path, output_dir=output_dir)
+    return (events_name if (output_dir / events_name).exists() else None,
+            mentions_name if (output_dir / mentions_name).exists() else None)
+ 
+ 
+def process_pair(slice_id: str, ev_path: Path | None, mn_path: Path | None,
+                 output_dir: Path | None = None) -> None:
+    """
+    Filter events and write the available output into the requested directory.
+
+    Either path may be None while parsing fills its private per-slice staging area.
     """
     events_out = mentions_df = None
     n_events_in = 0
@@ -335,17 +383,12 @@ def process_pair(slice_id: str, ev_path: Path | None, mn_path: Path | None) -> N
                                   names=MENTIONS_COLUMNS, dtype=str,
                                   keep_default_na=False, low_memory=False)
 
-    LATEST_FILES_DIR.mkdir(parents=True, exist_ok=True)
-    # events first, mentions LAST — unchanged, and still true when only one exists.
+    destination = output_dir or LATEST_FILES_DIR
+    destination.mkdir(parents=True, exist_ok=True)
     if events_out is not None:
-        _atomic_write(events_out, LATEST_FILES_DIR / f"{slice_id}{EVENTS_SUFFIX}")
+        _atomic_write(events_out, destination / f"{slice_id}{EVENTS_SUFFIX}")
     if mentions_df is not None:
-        _atomic_write(mentions_df, LATEST_FILES_DIR / f"{slice_id}{MENTIONS_SUFFIX}")
- 
-    # Parsing owns deletion of the consumed source files.
-    for p in (ev_path, mn_path):
-        if p is not None:
-            p.unlink(missing_ok=True)
+        _atomic_write(mentions_df, destination / f"{slice_id}{MENTIONS_SUFFIX}")
 
     kinds = "+".join(k for k, v in (("events", ev_path), ("mentions", mn_path))
                      if v is not None)
@@ -357,57 +400,60 @@ def process_pair(slice_id: str, ev_path: Path | None, mn_path: Path | None) -> N
  
 def main() -> None:
     state = _load_state()
-    logger.info("Parsing (file-based) started — %s -> %s (filter=%s, watermark=%s)",
+    logger.info("Parsing started — %s -> %s (filter=%s, companion_timeout=%ds, watermark=%s)",
                 RAW_CSV_DIR, LATEST_FILES_DIR, "on" if FILTER_EVENTS else "off",
-                state["watermark"] or "none yet")
-
-    blocked_since: float | None = None
-    reported_block = False
+                PARSING_PAIR_TIMEOUT, state["watermark"] or "none yet")
 
     while True:
-        _sweep_orphans()
-        published = False
-        pairs = _ready_slices()                     # oldest slice first
+        for slice_id, ev_path, mn_path in _available_slices():
+            if slice_id not in state["slices"]:
+                state["slices"][slice_id] = {
+                    "first_seen": time.time(), "closed": False}
+                _save_state(state)
+            slice_state = state["slices"][slice_id]
 
-        if pairs:
-            if _latest_files_empty():
-                blocked_since, reported_block = None, False
-                slice_id, ev, mn = pairs[0]
-                try:
-                    process_pair(slice_id, ev, mn)
-                    published = True
-                    # The watermark only ever moves forwards: a slice arriving
-                    # late must not drag it back over ground already covered.
+            if slice_state.get("closed"):
+                # A file for a closed slice arrived after parsing's decision.
+                late = [p for p in (ev_path, mn_path) if p is not None]
+                if late:
+                    _dead_letter(slice_id, late, "arrived after slice closure")
+                continue
+
+            try:
+                events_name, mentions_name = _parse_to_staging(
+                    slice_id, ev_path, mn_path)
+                both_available = ev_path is not None and mn_path is not None
+                timed_out = time.time() - float(slice_state["first_seen"]) >= PARSING_PAIR_TIMEOUT
+
+                if ((both_available and events_name and mentions_name)
+                    or (timed_out and (events_name or mentions_name))):
+                    # A timed-out side is represented by null in the manifest.
+                    # The marker is the only signal validation is allowed to use.
+                    _publish_slice(slice_id, events_name, mentions_name)
+                    for path in (ev_path, mn_path):
+                        if path is not None:
+                            path.unlink(missing_ok=True)
+                    slice_state.update({"closed": True, "closed_at": time.time()})
+                    state["attempts"].pop(slice_id, None)
                     if slice_id > state["watermark"]:
                         state["watermark"] = slice_id
+                    _save_state(state)
+                    logger.info("Closed slice %s (events=%s, mentions=%s)",
+                                slice_id, events_name is not None,
+                                mentions_name is not None)
+            except Exception as exc:  # noqa: BLE001
+                attempts = state["attempts"].get(slice_id, 0) + 1
+                state["attempts"][slice_id] = attempts
+                logger.error("Failed to parse slice %s (attempt %d/%d): %s",
+                             slice_id, attempts, MAX_SLICE_ATTEMPTS, exc)
+                if attempts >= MAX_SLICE_ATTEMPTS:
+                    _dead_letter(slice_id, [p for p in (ev_path, mn_path) if p],
+                                 f"{attempts} failed attempts")
+                    state["slices"].pop(slice_id, None)
                     state["attempts"].pop(slice_id, None)
-                    _save_state(state)
-                except Exception as exc:
-                    attempts = state["attempts"].get(slice_id, 0) + 1
-                    state["attempts"][slice_id] = attempts
-                    logger.error("Failed to process slice %s (attempt %d/%d): %s",
-                                 slice_id, attempts, MAX_SLICE_ATTEMPTS, exc)
-                    if attempts >= MAX_SLICE_ATTEMPTS:
-                        # Give up on this slice rather than blocking every later
-                        # one behind it — bounded lateness, not infinite retry.
-                        _dead_letter(slice_id, [ev, mn], f"{attempts} failed attempts")
-                        state["attempts"].pop(slice_id, None)
-                    _save_state(state)
-            else:
-                # Validation has not drained the previous pair. Waiting is correct
-                # back-pressure, but a wait with no end is a stall, so say so.
-                now = time.monotonic()
-                if blocked_since is None:
-                    blocked_since = now
-                elif not reported_block and now - blocked_since > BACKPRESSURE_MAX_WAIT:
-                    logger.error(
-                        "latest_files has not been consumed for %.0f min — validation "
-                        "appears stalled; %d slice(s) waiting to publish",
-                        (now - blocked_since) / 60, len(pairs))
-                    reported_block = True
+                _save_state(state)
 
-        if not published:
-            time.sleep(SCAN_INTERVAL)
+        time.sleep(SCAN_INTERVAL)
  
  
 if __name__ == "__main__":
