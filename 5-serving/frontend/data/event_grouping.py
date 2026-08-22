@@ -27,6 +27,11 @@ def _number(value: Any) -> int:
     except (TypeError, ValueError):
         return -1
 
+def _float_value(value: Any) -> float:
+    try:
+        return float(str(value).strip())
+    except (TypeError, ValueError):
+        return 0.0
 
 def _mention_set(event: dict) -> set[str]:
     return {
@@ -78,7 +83,7 @@ def group_events(events: list[dict]) -> list[dict]:
         key=lambda event: (
             _date_value(event.get("oldest_article_time")),
             _date_value(event.get("event_date")),
-            _number(event.get("global_event_id")),
+            -_float_value(event.get("goldstein")), # Stronger NEGATIVE Goldstein score takes priority
         ),
         reverse=True,
     )

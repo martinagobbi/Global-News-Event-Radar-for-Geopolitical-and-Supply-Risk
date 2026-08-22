@@ -43,7 +43,7 @@ def get_event_detail(user_id: str, global_event_id: str) -> dict:
 
 def get_archived_events(user_id: str) -> list[dict]:
     payload = get_json(f"/users/{user_id}/archived-events")
-    return payload["events"]
+    return group_events(payload["events"])
 
 
 def get_tagged_events(user_id: str, tag: str) -> list[dict]:
