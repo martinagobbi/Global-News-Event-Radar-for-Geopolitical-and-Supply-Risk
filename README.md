@@ -24,7 +24,7 @@ docker compose --env-file .env.testing up -d --build
 ./bootstrap/silver_snapshot.sh restore
 
 # 4. Three test profiles. Without any profiles, the gold layer stays empty.
-# After you run this command, you may have to wait around 2 minutes before running the next one: the time for every user to have their gold created for the first time.
+# After you run this command, you may have to wait around 2 minutes before running the next one: around 30 seconds for every user to have their gold created for the first time (this is a seed: any other user-related computes are parallel across users and do not take this long).
 python3 5-serving/seed_test_users.py # Needs `requests` on the machine where this code is run. Also, may have to type `python` instead of `python3`.
 
 # 5. Service frontend.

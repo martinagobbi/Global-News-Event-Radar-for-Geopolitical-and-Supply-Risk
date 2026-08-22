@@ -16,15 +16,16 @@ This layer watches that directory and, for every slice whose events AND mentions
 files are both present and stable, it:
     1. keeps only supply-chain-relevant events (parser.passes_filter),
     2. keeps ALL mentions raw (validation does the referential-integrity filter),
-    3. writes the pair into LATEST_FILES_DIR (/data/latest_files) for layer 3,
+     3. projects the retained columns and writes the pair into
+         LATEST_FILES_DIR (/data/latest_files) for layer 3,
     4. deletes the consumed source files from RAW_CSV_DIR.
 
 A "slice" is identified by its 15-minute timestamp, which is uniform within one
 GDELT file: DATEADDED (events, column 59) and MentionTimeDate (mentions, col 2).
 
 Hand-off rules to layer 3 (validation):
-    * tab-separated, header-less, official GDELT column order — matches
-      gdelt.load_table();
+        * tab-separated, header-less, reduced GDELT column order — matches
+            gdelt.load_table();
     * atomic write (temp name -> rename), mentions renamed LAST, so the watcher
       never sees a half-written file;
     * back-pressure: a new pair is published only when latest_files is empty
@@ -81,6 +82,7 @@ from pathlib import Path
 import pandas as pd
 
 from parser import (passes_filter, GDELT_COLUMNS, MENTIONS_COLUMNS,
+                    PARSED_EVENT_COLUMNS, PARSED_MENTION_COLUMNS,
                     check_field_width, EVENTS_FIELD_COUNT, MENTIONS_FIELD_COUNT)
  
 logging.basicConfig(
@@ -322,6 +324,7 @@ def process_pair(slice_id: str, ev_path: Path | None, mn_path: Path | None) -> N
             events_out = events_df[mask]
         else:
             events_out = events_df
+        events_out = events_out[PARSED_EVENT_COLUMNS]
 
     if mn_path is not None:
         # Matters MORE than the events check above, not less. A shifted events
@@ -334,6 +337,7 @@ def process_pair(slice_id: str, ev_path: Path | None, mn_path: Path | None) -> N
         mentions_df = pd.read_csv(mn_path, sep="\t", header=None,
                                   names=MENTIONS_COLUMNS, dtype=str,
                                   keep_default_na=False, low_memory=False)
+        mentions_df = mentions_df[PARSED_MENTION_COLUMNS]
 
     LATEST_FILES_DIR.mkdir(parents=True, exist_ok=True)
     # events first, mentions LAST — unchanged, and still true when only one exists.

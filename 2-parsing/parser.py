@@ -33,6 +33,18 @@ GDELT_COLUMNS = [
     "DATEADDED", "SOURCEURL",
 ]
 
+EVENT_COLUMNS_TO_DROP = [
+    column for column in GDELT_COLUMNS
+    if column not in {
+        "GlobalEventID", "Day", "Actor1Name", "Actor1CountryCode",
+        "Actor2Name", "Actor2CountryCode", "EventCode", "EventRootCode",
+        "GoldsteinScale", "NumArticles", "AvgTone",
+        "Actor1Geo_CountryCode", "Actor2Geo_CountryCode",
+        "ActionGeo_FullName", "ActionGeo_CountryCode", "ActionGeo_Lat",
+        "ActionGeo_Long", "DATEADDED", "SOURCEURL",
+    }
+]
+
 # ── F1: CAMEO event codes relevant to supply-chain risk ──────────────────────
 # Source: Chukwuka et al. (2023), Sultana et al. (2024)
 RELEVANT_EVENT_CODES = {
@@ -494,6 +506,18 @@ MENTIONS_COLUMNS = [
     "MentionDocTone",           # 13
     "MentionDocTranslationInfo",# 14
     "Extras",                   # 15
+]
+
+MENTION_COLUMNS_TO_DROP = [
+    "EventTimeDate", "MentionType", "Actor1CharOffset", "Actor2CharOffset",
+    "ActionCharOffset", "MentionDocTranslationInfo", "Extras", "enriched",
+]
+
+PARSED_EVENT_COLUMNS = [
+    column for column in GDELT_COLUMNS if column not in EVENT_COLUMNS_TO_DROP
+]
+PARSED_MENTION_COLUMNS = [
+    column for column in MENTIONS_COLUMNS if column not in MENTION_COLUMNS_TO_DROP
 ]
 
 

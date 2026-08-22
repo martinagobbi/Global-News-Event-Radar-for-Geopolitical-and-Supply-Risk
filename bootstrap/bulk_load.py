@@ -50,9 +50,10 @@ import pandas as pd
 sys.path.insert(0, "/app/parsing")
 sys.path.insert(0, "/app/validation")
 
-from parser import passes_filter, GDELT_COLUMNS, MENTIONS_COLUMNS   # 2-parsing
-from gdelt import (EVENT_COLUMNS, MENTION_COLUMNS,                     # 3-validation
-                   check_field_width, EXPECTED_FIELD_COUNT)
+from parser import (passes_filter, GDELT_COLUMNS, MENTIONS_COLUMNS,
+                    PARSED_EVENT_COLUMNS, PARSED_MENTION_COLUMNS)
+from gdelt import (EVENT_COLUMNS, MENTION_COLUMNS,
+                   check_field_width, RAW_EXPECTED_FIELD_COUNT)
 from storage import Storage                                          # 3-validation
 
 # The two layers name the same GDELT columns differently: parsing calls the key
@@ -108,7 +109,7 @@ def read_zip(path: Path, columns: list) -> pd.DataFrame:
         member = zf.namelist()[0]
         raw = zf.read(member)
         kind = "events" if len(columns) >= 61 else "mentions"
-        check_field_width(raw, EXPECTED_FIELD_COUNT[kind], kind, path)
+        check_field_width(raw, RAW_EXPECTED_FIELD_COUNT[kind], kind, path)
         return pd.read_csv(io.BytesIO(raw), sep="\t", header=None, names=columns,
                            dtype=str, keep_default_na=False, low_memory=False)
 
@@ -186,8 +187,10 @@ def main() -> None:
 
         # Switch to the names the silver schema uses (positional: same columns,
         # same order, e.g. GlobalEventID -> GLOBALEVENTID).
+        kept = kept[PARSED_EVENT_COLUMNS].copy()
         kept.columns = EVENT_COLUMNS
         mentions = mentions.copy()
+        mentions = mentions[PARSED_MENTION_COLUMNS].copy()
         mentions.columns = MENTION_COLUMNS[:len(mentions.columns)]
 
         # validation's referential-integrity rule

@@ -27,7 +27,7 @@ import pandas as pd
 logger = logging.getLogger("validation.gdelt")
 
 # ── Official GDELT 2.0 column names (order matters: index = file column) ──────
-EVENT_COLUMNS = [
+RAW_EVENT_COLUMNS = [
     "GLOBALEVENTID", "Day", "MonthYear", "Year", "FractionDate",
     "Actor1Code", "Actor1Name", "Actor1CountryCode", "Actor1KnownGroupCode",
     "Actor1EthnicCode", "Actor1Religion1Code", "Actor1Religion2Code",
@@ -50,7 +50,7 @@ EVENT_COLUMNS = [
     "DATEADDED", "SOURCEURL",
 ]
 
-MENTION_COLUMNS = [
+RAW_MENTION_COLUMNS = [
     "GLOBALEVENTID", "EventTimeDate", "MentionTimeDate", "MentionType",
     "MentionSourceName", "MentionIdentifier", "SentenceID",
     "Actor1CharOffset", "Actor2CharOffset", "ActionCharOffset",
@@ -59,8 +59,30 @@ MENTION_COLUMNS = [
     # ── Enrichment fields appended by the parsing layer (Newspaper3k) ─────────
     # A raw 16-column GDELT mentions file leaves these three empty (see
     # load_table's fillna); an enriched 19-column file fills them.
-    "article_title", "article_keywords", "enriched",
 ]
+
+EVENT_COLUMNS_TO_DROP = {
+    "MonthYear", "Year", "FractionDate", "Actor1Code", "Actor1KnownGroupCode",
+    "Actor1EthnicCode", "Actor1Religion1Code", "Actor1Religion2Code",
+    "Actor1Type1Code", "Actor1Type2Code", "Actor1Type3Code", "Actor2Code",
+    "Actor2KnownGroupCode", "Actor2EthnicCode", "Actor2Religion1Code",
+    "Actor2Religion2Code", "Actor2Type1Code", "Actor2Type2Code",
+    "Actor2Type3Code", "IsRootEvent", "EventBaseCode", "QuadClass",
+    "NumMentions", "NumSources", "Actor1Geo_Type",
+    "Actor1Geo_FullName", "Actor1Geo_ADM1Code", "Actor1Geo_ADM2Code",
+    "Actor1Geo_Lat", "Actor1Geo_Long", "Actor1Geo_FeatureID", "Actor2Geo_Type",
+    "Actor2Geo_FullName", "Actor2Geo_ADM1Code", "Actor2Geo_ADM2Code",
+    "Actor2Geo_Lat", "Actor2Geo_Long", "Actor2Geo_FeatureID", "ActionGeo_Type",
+    "ActionGeo_ADM1Code", "ActionGeo_ADM2Code", "ActionGeo_FeatureID",
+}
+MENTION_COLUMNS_TO_DROP = {
+    "EventTimeDate", "MentionType", "Actor1CharOffset", "Actor2CharOffset",
+    "ActionCharOffset", "MentionDocTranslationInfo", "Extras", "enriched",
+}
+EVENT_COLUMNS = [c for c in RAW_EVENT_COLUMNS if c not in EVENT_COLUMNS_TO_DROP]
+MENTION_COLUMNS = [c for c in RAW_MENTION_COLUMNS if c not in MENTION_COLUMNS_TO_DROP]
+MENTION_COLUMNS += ["article_title", "article_keywords", "enriched"]
+RAW_EXPECTED_FIELD_COUNT = {"events": len(RAW_EVENT_COLUMNS), "mentions": 16}
 
 # The single column shared by both tables.
 EVENT_ID = "GLOBALEVENTID"
@@ -92,7 +114,7 @@ def classify(path) -> str:
 # RAW input widths — deliberately NOT len(EVENT_COLUMNS) / len(MENTION_COLUMNS).
 # Mentions arrive 16 wide and are read against 19 names so the three enrichment
 # columns pad in empty; conflating the two numbers would reject every file.
-EXPECTED_FIELD_COUNT = {"events": 61, "mentions": 16}
+EXPECTED_FIELD_COUNT = {"events": len(EVENT_COLUMNS), "mentions": 9}
 
 
 def check_field_width(raw: bytes, expected: int, kind: str, path=None) -> None:
