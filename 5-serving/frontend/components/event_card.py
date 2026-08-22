@@ -124,7 +124,7 @@ def render_event_card(event: dict, context: str = "main") -> None:
     if not card_title:
         # Use the cleaned cameo_label we defined just above (or fallback to the raw one if None)
         display_label = cameo_label or event.get("cameo_label", "Unknown")
-        card_title = f'"{display_label}" type of event (ID: {event["global_event_id"]})'
+        card_title = f'"{display_label}" type of event'
 
     with st.container(border=True):
         st.markdown(f"### {card_title}")

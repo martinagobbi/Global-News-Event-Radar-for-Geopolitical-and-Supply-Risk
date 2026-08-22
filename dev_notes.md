@@ -7,7 +7,13 @@ editor_options:
     wrap: 72
 ---
 
+
 # Global News Event Radar — Geopolitical & Supply Risk
+
+To start everything at once:
+```
+docker compose --env-file .env.testing -f docker-compose.stores.yml up -d && docker compose --env-file .env.testing up -d --build && ./bootstrap/silver_snapshot.sh restore && python3 5-serving/seed_test_users.py && docker compose -f 5-serving/docker-compose.serving.yml up --build
+```
 
 A five-layer pipeline that polls GDELT every 15 minutes, retains
 supply-chain-relevant events, enriches and stores them, and serves each
@@ -1931,7 +1937,7 @@ and the order matters for the same reason `trim` exists:
 ``` bash
 docker compose --env-file .env.testing stop ingestion parsing validation  # stop live writes
 ./bootstrap/silver_snapshot.sh wipe
-ENRICH=1 docker compose -f docker-compose.bootstrap.yml run --rm bootstrap
+ENRICH=1 docker compose --env-file .env.testing -f docker-compose.bootstrap.yml run --rm bootstrap
 ./bootstrap/silver_snapshot.sh trim 20260727171500   # the last slice in the release
 ./bootstrap/silver_snapshot.sh export
 ```

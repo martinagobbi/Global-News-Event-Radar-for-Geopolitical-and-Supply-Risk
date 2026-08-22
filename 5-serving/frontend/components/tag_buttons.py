@@ -33,15 +33,6 @@ def render_tag_buttons(global_event_ids: list[str], context: str = "main", user_
     k_arc_yellow = f"{context}_arc_to_yellow_{global_event_id}"
     k_arc_unarc = f"{context}_unarchive_{global_event_id}"
 
-    all_keys = [
-        k_main_red, k_main_yellow, k_main_arc,
-        k_red_untag, k_red_yellow, k_red_arc,
-        k_yellow_red, k_yellow_untag, k_yellow_arc,
-        k_arc_red, k_arc_yellow, k_arc_unarc,
-    ]
-
-    is_clicked = any(st.session_state.get(k) for k in all_keys)
-
     # Determine visual layout
     layout = context
     if context == "main":
@@ -92,21 +83,21 @@ def render_tag_buttons(global_event_ids: list[str], context: str = "main", user_
     col1, col2, col3 = st.columns(3)
 
     if layout == "main":
-        col1.button("🔴 Apply tag: Needs action from us", key=k_main_red, disabled=is_clicked, use_container_width=True)
-        col2.button("🟡 Apply tag: Look out for developments", key=k_main_yellow, disabled=is_clicked, use_container_width=True)
-        col3.button("Archive: Not important", key=k_main_arc, disabled=is_clicked, use_container_width=True)
+        col1.button("🔴 Apply tag: Needs action from us", key=k_main_red, use_container_width=True)
+        col2.button("🟡 Apply tag: Look out for developments", key=k_main_yellow, use_container_width=True)
+        col3.button("Archive: Not important", key=k_main_arc, use_container_width=True)
 
     elif layout == "red":
-        col1.button("🔴 Untag", key=k_red_untag, disabled=is_clicked, use_container_width=True)
-        col2.button("🟡 Untag, then apply tag:\n\"Look out for developments\"", key=k_red_yellow, disabled=is_clicked, use_container_width=True)
-        col3.button("Untag, then archive", key=k_red_arc, disabled=is_clicked, use_container_width=True)
+        col1.button("🔴 Untag", key=k_red_untag, use_container_width=True)
+        col2.button("🟡 Untag, then apply tag:\n\"Look out for developments\"", key=k_red_yellow, use_container_width=True)
+        col3.button("Untag, then archive", key=k_red_arc, use_container_width=True)
 
     elif layout == "yellow":
-        col1.button("🔴 Untag, then apply tag:\n\"Needs action from us\"", key=k_yellow_red, disabled=is_clicked, use_container_width=True)
-        col2.button("🟡 Untag", key=k_yellow_untag, disabled=is_clicked, use_container_width=True)
-        col3.button("Untag, then archive", key=k_yellow_arc, disabled=is_clicked, use_container_width=True)
+        col1.button("🔴 Untag, then apply tag:\n\"Needs action from us\"", key=k_yellow_red, use_container_width=True)
+        col2.button("🟡 Untag", key=k_yellow_untag, use_container_width=True)
+        col3.button("Untag, then archive", key=k_yellow_arc, use_container_width=True)
 
     elif layout == "archive":
-        col1.button("🔴 Unarchive, then apply tag:\n\"Needs action from us\"", key=k_arc_red, disabled=is_clicked, use_container_width=True)
-        col2.button("🟡 Unarchive, then apply tag:\n\"Look out for developments\"", key=k_arc_yellow, disabled=is_clicked, use_container_width=True)
-        col3.button("Unarchive", key=k_arc_unarc, disabled=is_clicked, use_container_width=True)
+        col1.button("🔴 Unarchive, then apply tag:\n\"Needs action from us\"", key=k_arc_red, use_container_width=True)
+        col2.button("🟡 Unarchive, then apply tag:\n\"Look out for developments\"", key=k_arc_yellow, use_container_width=True)
+        col3.button("Unarchive", key=k_arc_unarc, use_container_width=True)
