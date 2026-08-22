@@ -22,7 +22,6 @@ docker compose --env-file .env.testing up -d --build
 # 3. OPTIONAL BUT NECESSARY FOR PROPER TESTING: Silver data from articles spanning 27/06/2026 at 17:15 to 27/07/2026 at 17:15.
 # This "seeded" data was chosen to make the testing-mode radar not empty at startup: the radar gets updated with the latest news every 15 minutes, and automatically drops news older than 365 days every midnight. Even seeding over a year of data will leave a gap in testing mode: all the per-15-minutes slices between the latest seeded/stored data and the data from the moment a tester starts up the testing-mode radar with these instructions.
 ./bootstrap/silver_snapshot.sh restore
-
 # 4. Three test profiles. Without any profiles, the gold layer stays empty.
 # After you run this command, you may have to wait around 2 minutes before running the next one: around 30 seconds for every user to have their gold created for the first time (this is a seed: any other user-related computes are parallel across users and do not take this long).
 python3 5-serving/seed_test_users.py # Needs `requests` on the machine where this code is run. Also, may have to type `python` instead of `python3`.
@@ -46,11 +45,11 @@ Here in testing mode, backend machines and frontend machines are the same one ma
 
 ### Shutdown
 
-OPTIONAL: Remove all data except the one from the 30-days seed
+OPTIONAL: Reset silver so the next startup can restore the seed cleanly
 ``` bash
 docker compose --env-file .env.testing stop ingestion parsing validation        # Stops live data from being ingested
-./bootstrap/silver_snapshot.sh trim seed                                        # Removes all non-30-day-testing-seed data from silver
-docker exec pipeline_processing python3 -c "import main; main.recompute_all()"  # Removes all non-30-day-testing-seed data from gold (can take a few minutes, but this is indeed not an action the system would normally perform under any circumstance)
+./bootstrap/silver_snapshot.sh wipe                                             # Removes all silver data and prevents repeated restores accumulating physical duplicates
+docker exec pipeline_processing python3 -c "import main; main.recompute_all()"  # Recomputes gold from the now-empty silver layer (can take a few minutes, but this is indeed not an action the system would normally perform under any circumstance)
 ```
 
 NOT OPTIONAL: shutdown procedure (that does not destroy the volumes, so user preferences and data for users stay intact)
