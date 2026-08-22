@@ -145,8 +145,11 @@ def render_event_card(event: dict, context: str = "main") -> None:
                 "report on a relevant event."
             )
 
+        num_articles = len(articles)
+        articles_display = "≥20" if num_articles >= 20 else str(num_articles)
+
         meta = st.columns(2)
-        meta[0].metric("Number of articles", len(articles))
+        meta[0].metric("Number of articles", articles_display)
         meta[1].metric("Goldstein score", event["goldstein"])
 
         date_to_show = str(event["event_date"]).removesuffix(" 00:00:00")
@@ -175,7 +178,7 @@ def render_event_card(event: dict, context: str = "main") -> None:
                     f"{i + 1}. {a['mention_identifier']}": a
                     for i, a in enumerate(articles)
                 }
-                with st.expander(f"All {len(articles)} articles (they are more than {PREVIEW_ARTICLES})"):
+                with st.expander(f"All {articles_display} articles (they are more than {PREVIEW_ARTICLES})"):
                     selected_label = st.selectbox(
                         "Choose an article to open",
                         options=list(article_labels.keys()),
