@@ -65,7 +65,8 @@ CREATE TABLE articles (
   goldstein           DOUBLE PRECISION,
   cameo_code          VARCHAR(10),
   cameo_label         VARCHAR(200),
-  actor               VARCHAR(500),
+  actor_1             VARCHAR(500),
+  actor_2             VARCHAR(500),
   latitude            DOUBLE PRECISION,
   longitude           DOUBLE PRECISION,
   -- The article's own timestamp (silver's MentionTimeDate). event_date below is
