@@ -50,10 +50,10 @@ def _leader_key(event: dict) -> tuple[Any, ...]:
             default=-1,
         )
     return (
-        _date_value(event.get("event_date")),
-        _date_value(event.get("date_added")),
-        max_confidence,
-        _number(event.get("global_event_id")),
+        max_confidence, # The leader is the one with the highest `confidence`
+        _date_value(event.get("event_date")), # If there's a tie, choose by recency of event
+        _date_value(event.get("date_added")), # Etc.
+        _number(event.get("global_event_id")), # Etc.
     )
 
 
