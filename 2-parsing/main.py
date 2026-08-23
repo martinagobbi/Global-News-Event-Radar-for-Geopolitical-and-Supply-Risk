@@ -81,7 +81,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from parser import (passes_filter, GDELT_COLUMNS, MENTIONS_COLUMNS,
+from parser import (PermanentError, passes_filter, GDELT_COLUMNS, MENTIONS_COLUMNS,
                     PARSED_EVENT_COLUMNS, PARSED_MENTION_COLUMNS,
                     check_field_width, EVENTS_FIELD_COUNT, MENTIONS_FIELD_COUNT)
  
@@ -103,9 +103,18 @@ SLICE_STATE_FILE = STATE_DIR / "parsing_slices.json"
 DEAD_LETTER_DIR  = Path(os.getenv("DEAD_LETTER_DIR", "/data/dead_letter"))
 DEAD_LETTER_LOG_FILE = DEAD_LETTER_DIR / "dead_letter_log.csv"
 MAX_DEAD_LETTER_LOG_ROWS = int(os.getenv("MAX_DEAD_LETTER_LOG_ROWS", "10000"))
-MAX_SLICE_ATTEMPTS    = int(os.getenv("MAX_SLICE_ATTEMPTS", "3"))
+MAX_SLICE_ATTEMPTS    = int(os.getenv("MAX_SLICE_ATTEMPTS", "3"))   # log line only
+# See 3-validation_and_storage/main.py for the reasoning: a deterministic failure
+# is set aside at once (PermanentError), and a transient one is given a budget in
+# SECONDS, because a count cannot express "wait out a restart".
+TRANSIENT_MAX_WAIT    = int(os.getenv("TRANSIENT_MAX_WAIT", "600"))
 SLICE_ORPHAN_MAX_AGE  = int(os.getenv("SLICE_ORPHAN_MAX_AGE", str(60 * 60)))
 BACKPRESSURE_MAX_WAIT = int(os.getenv("BACKPRESSURE_MAX_WAIT", str(30 * 60)))
+
+# slice_id -> monotonic time of its first TRANSIENT failure. In memory, unlike
+# state["attempts"], because a restart should hand a slice a fresh budget rather
+# than resume a stale clock.
+_first_failure: dict[str, float] = {}
 
 EVENTS_SUFFIX   = ".export.CSV"
 MENTIONS_SUFFIX = ".mentions.CSV"
@@ -385,17 +394,33 @@ def main() -> None:
                     if slice_id > state["watermark"]:
                         state["watermark"] = slice_id
                     state["attempts"].pop(slice_id, None)
+                    _first_failure.pop(slice_id, None)
+                    _save_state(state)
+                except PermanentError as exc:
+                    # The raw file itself is malformed — wrong column count. No
+                    # number of re-reads changes the bytes, and every retry costs
+                    # a full parse of the slice while later slices queue behind
+                    # this one.
+                    logger.error("Permanently rejected slice %s: %s", slice_id, exc)
+                    _dead_letter(slice_id, [ev, mn], f"permanently rejected: {exc}")
+                    state["attempts"].pop(slice_id, None)
+                    _first_failure.pop(slice_id, None)
                     _save_state(state)
                 except Exception as exc:
+                    # Assumed transient; bounded by elapsed time, not by a count.
                     attempts = state["attempts"].get(slice_id, 0) + 1
                     state["attempts"][slice_id] = attempts
-                    logger.error("Failed to process slice %s (attempt %d/%d): %s",
-                                 slice_id, attempts, MAX_SLICE_ATTEMPTS, exc)
-                    if attempts >= MAX_SLICE_ATTEMPTS:
+                    first_seen = _first_failure.setdefault(slice_id, time.monotonic())
+                    waited = time.monotonic() - first_seen
+                    logger.error("Failed to process slice %s (attempt %d, %.0fs of %ds): %s",
+                                 slice_id, attempts, waited, TRANSIENT_MAX_WAIT, exc)
+                    if waited >= TRANSIENT_MAX_WAIT:
                         # Give up on this slice rather than blocking every later
                         # one behind it — bounded lateness, not infinite retry.
-                        _dead_letter(slice_id, [ev, mn], f"{attempts} failed attempts")
+                        _dead_letter(slice_id, [ev, mn],
+                                     f"{attempts} attempts over {waited:.0f}s")
                         state["attempts"].pop(slice_id, None)
+                        _first_failure.pop(slice_id, None)
                     _save_state(state)
             else:
                 # Validation has not drained the previous pair. Waiting is correct

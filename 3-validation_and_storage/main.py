@@ -52,7 +52,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from gdelt import is_processable
+from gdelt import is_processable, PermanentError
 from storage import Storage
 from validator import validate_pair
 import status
@@ -74,7 +74,17 @@ ATTEMPTS_FILE = STATE_DIR / "validation_attempts.json"
 DEAD_LETTER_DIR = Path(os.getenv("DEAD_LETTER_DIR", "/data/dead_letter"))
 DEAD_LETTER_LOG_FILE = DEAD_LETTER_DIR / "dead_letter_log.csv"
 MAX_DEAD_LETTER_LOG_ROWS = int(os.getenv("MAX_DEAD_LETTER_LOG_ROWS", "10000"))
+# Retained for the log line only; the dead-letter decision is now made on
+# ELAPSED TIME (below), because a count says nothing about how long a store has
+# been unavailable.
 MAX_PAIR_ATTEMPTS = int(os.getenv("MAX_PAIR_ATTEMPTS", "3"))
+
+# How long a pair may keep failing TRANSIENTLY before it is set aside. Sized
+# against what it is meant to survive: a ClickHouse or Keeper restart, which the
+# stores take tens of seconds to recover from, plus margin. Deterministic
+# failures never reach this budget — they raise PermanentError and are set aside
+# on the first attempt.
+TRANSIENT_MAX_WAIT = int(os.getenv("TRANSIENT_MAX_WAIT", "600"))   # 10 minutes
 
 
 def _load_attempts() -> dict:
@@ -218,6 +228,10 @@ def main() -> None:
     last_new_file_time = time.monotonic()
     prev_names: set[str] = {p.name for p in list_files()}
     attempts = _load_attempts()
+    # key -> monotonic time of its FIRST transient failure. In memory only: a
+    # restart resets the budget, which is the safe direction (a slice gets a
+    # fresh 10 minutes rather than being dead-lettered by a stale timestamp).
+    first_failure: dict[str, float] = {}
 
     logger.info("Validation watcher started on %s (interval=%ds, stale_limit=%ds, "
                 "max_attempts=%d)",
@@ -258,19 +272,44 @@ def main() -> None:
             try:
                 process_pair(files, storage)
                 prev_names = {p.name for p in list_files()}  # post-delete
+                first_failure.pop(key, None)
                 if attempts.pop(key, None) is not None:
                     _save_attempts(attempts)
+            except PermanentError as exc:
+                # Deterministic: the bytes on disk are wrong, and reading them
+                # again cannot change that. Retrying would re-run the whole cycle
+                # — including the enrichment scrape — twice more to reach an
+                # identical conclusion, while parsing stays blocked behind this
+                # pair (it publishes only when latest_files is empty).
+                logger.error("Permanently rejected %s: %s",
+                             [p.name for p in files], exc)
+                _dead_letter(files, f"permanently rejected: {exc}")
+                attempts.pop(key, None)
+                status.set_error("dead_letter", {key})
+                prev_names = {p.name for p in list_files()}
+                _save_attempts(attempts)
             except Exception as exc:  # noqa: BLE001
+                # Assumed TRANSIENT — a store still starting, a dropped
+                # connection, a scrape that timed out. Bounded by ELAPSED TIME
+                # rather than a count: three attempts at WATCH_INTERVAL apart is
+                # only ~90 s, which is shorter than a ClickHouse restart, so a
+                # count-bounded budget dead-lettered slices that a few more
+                # seconds would have saved. The count is still tracked, for the
+                # log line only.
                 n = attempts.get(key, 0) + 1
+                first_seen = first_failure.setdefault(key, time.monotonic())
+                waited = time.monotonic() - first_seen
                 attempts[key] = n
-                logger.exception("Processing failed for %s (attempt %d/%d): %s",
-                                 [p.name for p in files], n, MAX_PAIR_ATTEMPTS, exc)
-                if n >= MAX_PAIR_ATTEMPTS:
+                logger.exception("Processing failed for %s (attempt %d, %.0fs of %ds): %s",
+                                 [p.name for p in files], n, waited,
+                                 TRANSIENT_MAX_WAIT, exc)
+                if waited >= TRANSIENT_MAX_WAIT:
                     # Set the pair aside rather than retrying it forever: parsing
                     # publishes only when this directory is empty, so a pair that
                     # can never succeed would halt the whole pipeline behind it.
-                    _dead_letter(files, f"{n} failed attempts")
+                    _dead_letter(files, f"{n} attempts over {waited:.0f}s")
                     attempts.pop(key, None)
+                    first_failure.pop(key, None)
                     status.set_error("dead_letter", {key})
                     prev_names = {p.name for p in list_files()}
                 _save_attempts(attempts)

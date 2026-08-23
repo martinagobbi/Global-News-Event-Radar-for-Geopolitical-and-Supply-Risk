@@ -422,6 +422,35 @@ def to_silver_event(record: dict) -> dict:
 # layer scrapes with Newspaper3k.
 
 # GDELT 2.0 Mentions columns (16 columns, 0-based index)
+class PermanentError(Exception):
+    """
+    A failure that retrying cannot fix.
+
+    The retry policy in this pipeline was decided by WHERE an exception was
+    caught, not by WHETHER the error was retryable, and everything therefore got
+    the same three attempts. That is wrong in both directions at once:
+
+      * Deterministic input errors — a file with the wrong number of columns, a
+        Confidence of 3000, a DATEADDED that is not a timestamp — are a property
+        of the bytes on disk. The second and third attempts read the same bytes
+        and fail identically, having re-run the whole cycle (including the
+        enrichment scrape) to reach the same conclusion.
+      * Genuinely transient errors got a budget far too small to help. Three
+        attempts at WATCH_INTERVAL apart is about 90 seconds, so a ClickHouse
+        restart and a permanently malformed slice were indistinguishable: both
+        dead-lettered, for opposite reasons.
+
+    Raising this type says "do not retry, set it aside now". Anything else is
+    assumed transient and keeps the retry budget.
+
+    Deliberately NOT a subclass of ValueError: the checks used to raise
+    ValueError and were caught by the same broad `except Exception`, so making
+    this distinguishable is the entire point. Defined once per layer because
+    parsing and validation are separate images with no shared package — the same
+    reason check_field_width is duplicated rather than imported.
+    """
+
+
 # ── Field-width guard ────────────────────────────────────────────────────────
 # GDELT's column count is a fixed part of its format, and every read in this
 # project supplies the names positionally (`header=None, names=[...]`). That
@@ -472,7 +501,7 @@ def check_field_width(path, expected: int, kind: str) -> None:
                 continue
             actual = len(line.rstrip("\n").split("\t"))
             if actual > expected:
-                raise ValueError(
+                raise PermanentError(
                     f"Looks like GDELT added more columns than expected to this "
                     f"file! {kind} file {getattr(path, 'name', path)} has {actual} "
                     f"fields, expected {expected}. Refusing to parse it: reading "
@@ -480,7 +509,7 @@ def check_field_width(path, expected: int, kind: str) -> None:
                     f"slice silently."
                 )
             if actual < expected:
-                raise ValueError(
+                raise PermanentError(
                     f"Looks like GDELT removed columns, or this file is "
                     f"truncated! {kind} file {getattr(path, 'name', path)} has "
                     f"{actual} fields, expected {expected}. Refusing to parse it."

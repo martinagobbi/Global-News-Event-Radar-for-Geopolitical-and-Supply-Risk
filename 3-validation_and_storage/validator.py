@@ -31,7 +31,7 @@ from datetime import datetime
 import pandas as pd      # check_confidence() uses to_numeric for the range test
 
 from enrichment import enrich_dataframe
-from gdelt import EVENT_ID, classify, load_table, save_table
+from gdelt import EVENT_ID, classify, load_table, save_table, PermanentError
 
 logger = logging.getLogger("validation.validator")
 
@@ -122,7 +122,7 @@ def check_confidence(mentions_df, path=None) -> None:
     if not non_numeric.empty:
         parts.append(f"{len(non_numeric)} non-numeric "
                      f"(e.g. {sorted(set(non_numeric))[:_MAX_REPORTED]})")
-    raise ValueError(
+    raise PermanentError(
         f"Confidence is a percentage and must be {CONFIDENCE_MIN}–{CONFIDENCE_MAX}: "
         f"{name} has " + "; ".join(parts) +
         f", out of {len(present)} non-empty values. Refusing to store this slice."
@@ -195,7 +195,7 @@ def check_dateadded(events_df, path=None) -> None:
 
     n_bad = int(present.isin(bad).sum())
     name = getattr(path, "name", path) or "<events>"
-    raise ValueError(
+    raise PermanentError(
         f"DATEADDED must be a 14-digit GDELT slice timestamp (YYYYMMDDHHMMSS): "
         f"{name} has {n_bad} invalid value(s) across {len(bad)} distinct form(s) "
         f"(e.g. {sorted(bad)[:_MAX_REPORTED]}), out of {len(present)} non-empty. "
@@ -233,7 +233,7 @@ def validate_pair(paths, storage) -> dict:
     """
     events_path, mentions_path = _split_pair(paths)
     if events_path is None and mentions_path is None:
-        raise ValueError("validate_pair requires at least one events or mentions file")
+        raise PermanentError("validate_pair requires at least one events or mentions file")
 
     events_df = load_table(events_path) if events_path is not None else None
     mentions_df = load_table(mentions_path) if mentions_path is not None else None

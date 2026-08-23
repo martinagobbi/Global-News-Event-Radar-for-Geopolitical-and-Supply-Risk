@@ -106,6 +106,35 @@ def classify(path) -> str:
     return "unknown"
 
 
+class PermanentError(Exception):
+    """
+    A failure that retrying cannot fix.
+
+    The retry policy in this pipeline was decided by WHERE an exception was
+    caught, not by WHETHER the error was retryable, and everything therefore got
+    the same three attempts. That is wrong in both directions at once:
+
+      * Deterministic input errors — a file with the wrong number of columns, a
+        Confidence of 3000, a DATEADDED that is not a timestamp — are a property
+        of the bytes on disk. The second and third attempts read the same bytes
+        and fail identically, having re-run the whole cycle (including the
+        enrichment scrape) to reach the same conclusion.
+      * Genuinely transient errors got a budget far too small to help. Three
+        attempts at WATCH_INTERVAL apart is about 90 seconds, so a ClickHouse
+        restart and a permanently malformed slice were indistinguishable: both
+        dead-lettered, for opposite reasons.
+
+    Raising this type says "do not retry, set it aside now". Anything else is
+    assumed transient and keeps the retry budget.
+
+    Deliberately NOT a subclass of ValueError: the checks used to raise
+    ValueError and were caught by the same broad `except Exception`, so making
+    this distinguishable is the entire point. Defined once per layer because
+    parsing and validation are separate images with no shared package — the same
+    reason check_field_width is duplicated rather than imported.
+    """
+
+
 # ── Field-width guard ────────────────────────────────────────────────────────
 # Mirrors 2-parsing/parser.check_field_width. Duplicated rather than imported
 # because parsing and validation are separate images with no shared package; the
@@ -139,14 +168,14 @@ def check_field_width(raw: bytes, expected: int, kind: str, path=None) -> None:
         actual = len(line.split("\t"))
         name = getattr(path, "name", path) or "<bytes>"
         if actual > expected:
-            raise ValueError(
+            raise PermanentError(
                 f"Looks like GDELT added more columns than expected to this "
                 f"file! {kind} file {name} has {actual} fields, expected "
                 f"{expected}. Refusing to load it: reading it positionally "
                 f"would shift every column."
             )
         if actual < expected:
-            raise ValueError(
+            raise PermanentError(
                 f"Looks like GDELT removed columns, or this file is truncated! "
                 f"{kind} file {name} has {actual} fields, expected {expected}. "
                 f"Refusing to load it."
@@ -205,7 +234,7 @@ def load_table(path) -> pd.DataFrame:
     elif kind == "mentions":
         columns = MENTION_COLUMNS
     else:
-        raise ValueError(f"Cannot classify GDELT file: {path.name}")
+        raise PermanentError(f"Cannot classify GDELT file: {path.name}")
 
     raw = _read_bytes(path)
     # Width check before the read. `on_bad_lines="skip"` does NOT cover this: it
