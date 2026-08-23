@@ -75,6 +75,9 @@ services:
       restart_policy:
         condition: any
         delay: 5s
+      resources:
+        limits:
+          memory: 256M
 
   parsing:
     image: ${REGISTRY:-localhost:5000}/radar-parsing:latest
@@ -86,6 +89,9 @@ services:
       placement:
         constraints: ["node.labels.role == pipeline"]
       restart_policy: { condition: any, delay: 5s }
+      resources:
+        limits:
+          memory: 256M
 
   validation:
     image: ${REGISTRY:-localhost:5000}/radar-validation:latest
@@ -106,6 +112,9 @@ services:
       placement:
         constraints: ["node.labels.role == pipeline"]
       restart_policy: { condition: any, delay: 5s }
+      resources:
+        limits:
+          memory: 512M
 
   # ── Spark cluster: the silver -> gold compute ──────────────────────────────
   # Intended mode is the reason this exists as a cluster at all. Testing mode
@@ -147,6 +156,9 @@ services:
       placement:
         constraints: ["node.labels.role == pipeline"]
       restart_policy: { condition: any, delay: 5s }
+      resources:
+        limits:
+          memory: 768M
 
   spark-worker:
     image: bitnamilegacy/spark:3.5
@@ -186,6 +198,9 @@ services:
       placement:
         constraints: ["node.labels.role == pipeline"]
       restart_policy: { condition: any, delay: 5s }
+      resources:
+        limits:
+          memory: 2.5G
 
   processing:
     image: ${REGISTRY:-localhost:5000}/radar-processing:latest
@@ -215,6 +230,9 @@ services:
       placement:
         constraints: ["node.labels.role == pipeline"]
       restart_policy: { condition: any, delay: 5s }
+      resources:
+        limits:
+          memory: 2.2G
 
   # Stateless -> run several, spread across the swarm, behind Swarm's routing mesh
   # (any node's :8000 reaches a healthy replica).
@@ -240,6 +258,9 @@ services:
       placement:
         constraints: ["node.labels.role == pipeline"]
       restart_policy: { condition: any, delay: 5s }
+      resources:
+        limits:
+          memory: 128M
 
 volumes:
   # Local per-node scratch — a rescheduled task gets a fresh, empty one (fine:

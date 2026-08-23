@@ -110,6 +110,9 @@ services:
       <<: *ch-deploy
       endpoint_mode: dnsrr
       placement: { constraints: ["node.labels.store == store1"] }
+      resources:
+        limits:
+          memory: 512M
 
   clickhouse-keeper-2:
     hostname: clickhouse-keeper-2
@@ -123,6 +126,9 @@ services:
       <<: *ch-deploy
       endpoint_mode: dnsrr
       placement: { constraints: ["node.labels.store == store2"] }
+      resources:
+        limits:
+          memory: 512M
 
   clickhouse-keeper-3:
     hostname: clickhouse-keeper-3
@@ -136,6 +142,9 @@ services:
       <<: *ch-deploy
       endpoint_mode: dnsrr
       placement: { constraints: ["node.labels.store == store3"] }
+      resources:
+        limits:
+          memory: 512M
 
   # ══ Silver: 2 shards × 3 replicas, one server per machine ══════════════════
   # Shard 1 = s1r1 + s1r2 + s1r3 (store1/2/3), shard 2 = s2r1 + s2r2 + s2r3
@@ -160,6 +169,9 @@ services:
       <<: *ch-deploy
       endpoint_mode: dnsrr
       placement: { constraints: ["node.labels.store == store1"] }
+      resources:
+        limits:
+          memory: 4.5G
 
   clickhouse-s1r2:
     hostname: clickhouse-s1r2
@@ -179,6 +191,9 @@ services:
       <<: *ch-deploy
       endpoint_mode: dnsrr
       placement: { constraints: ["node.labels.store == store2"] }
+      resources:
+        limits:
+          memory: 4.5G
 
   clickhouse-s1r3:
     hostname: clickhouse-s1r3
@@ -198,6 +213,9 @@ services:
       <<: *ch-deploy
       endpoint_mode: dnsrr
       placement: { constraints: ["node.labels.store == store3"] }
+      resources:
+        limits:
+          memory: 4.5G
 
   clickhouse-s2r1:
     hostname: clickhouse-s2r1
@@ -217,6 +235,9 @@ services:
       <<: *ch-deploy
       endpoint_mode: dnsrr
       placement: { constraints: ["node.labels.store == store4"] }
+      resources:
+        limits:
+          memory: 4.5G
 
   clickhouse-s2r2:
     hostname: clickhouse-s2r2
@@ -236,6 +257,9 @@ services:
       <<: *ch-deploy
       endpoint_mode: dnsrr
       placement: { constraints: ["node.labels.store == store5"] }
+      resources:
+        limits:
+          memory: 4.5G
 
   clickhouse-s2r3:
     hostname: clickhouse-s2r3
@@ -255,6 +279,9 @@ services:
       <<: *ch-deploy
       endpoint_mode: dnsrr
       placement: { constraints: ["node.labels.store == store6"] }
+      resources:
+        limits:
+          memory: 4.5G
 
   # ══ Profiles and tags: 3-member MongoDB replica set ════════════════════════
   # One member per machine, on store4/5/6. All three advertise plain service
@@ -270,6 +297,9 @@ services:
       <<: *ch-deploy
       endpoint_mode: dnsrr
       placement: { constraints: ["node.labels.store == store4"] }
+      resources:
+        limits:
+          memory: 3.5G
 
   mongo2:
     hostname: mongo2
@@ -281,6 +311,9 @@ services:
       <<: *ch-deploy
       endpoint_mode: dnsrr
       placement: { constraints: ["node.labels.store == store5"] }
+      resources:
+        limits:
+          memory: 3.5G
 
   mongo3:
     hostname: mongo3
@@ -292,6 +325,9 @@ services:
       <<: *ch-deploy
       endpoint_mode: dnsrr
       placement: { constraints: ["node.labels.store == store6"] }
+      resources:
+        limits:
+          memory: 3.5G
 
   # Swarm has no run-once job, so this is a service with restart_policy: none —
   # it runs, initiates or reconfigures rs0, exits, and stays "Complete". Its
@@ -339,6 +375,9 @@ services:
       replicas: 1
       restart_policy: { condition: none }
       placement: { constraints: ["node.labels.store == store4"] }
+      resources:
+        limits:
+          memory: 256M
 
   # ══ Gold: 3-node PostgreSQL under Patroni ══════════════════════════════════
   # etcd holds Patroni's leader lock. Three nodes, one per machine, on store1/2/3
@@ -358,6 +397,9 @@ services:
       <<: *ch-deploy
       endpoint_mode: dnsrr
       placement: { constraints: ["node.labels.store == store1"] }
+      resources:
+        limits:
+          memory: 512M
 
   etcd-2:
     image: quay.io/coreos/etcd:v3.5.15
@@ -373,6 +415,9 @@ services:
       <<: *ch-deploy
       endpoint_mode: dnsrr
       placement: { constraints: ["node.labels.store == store2"] }
+      resources:
+        limits:
+          memory: 512M
 
   etcd-3:
     image: quay.io/coreos/etcd:v3.5.15
@@ -388,6 +433,9 @@ services:
       <<: *ch-deploy
       endpoint_mode: dnsrr
       placement: { constraints: ["node.labels.store == store3"] }
+      resources:
+        limits:
+          memory: 512M
 
   # Spilo = PostgreSQL + Patroni in one image. Patroni elects a leader through
   # the etcd lock above; if the leader stops renewing it, a replica promotes
@@ -441,6 +489,9 @@ services:
       <<: *ch-deploy
       endpoint_mode: dnsrr
       placement: { constraints: ["node.labels.store == store1"] }
+      resources:
+        limits:
+          memory: 2.5G
 
   postgres-2:
     <<: *patroni-node
@@ -449,6 +500,9 @@ services:
       <<: *ch-deploy
       endpoint_mode: dnsrr
       placement: { constraints: ["node.labels.store == store2"] }
+      resources:
+        limits:
+          memory: 2.5G
 
   postgres-3:
     <<: *patroni-node
@@ -457,6 +511,9 @@ services:
       <<: *ch-deploy
       endpoint_mode: dnsrr
       placement: { constraints: ["node.labels.store == store3"] }
+      resources:
+        limits:
+          memory: 2.5G
 
 # ── Configs ──────────────────────────────────────────────────────────────────
 # Immutable once created: to change one, give it a new name and update the
