@@ -63,6 +63,7 @@ Thumbs.db
 # committed — it is small, already filtered, and is what fills the silver volume
 # at startup.
 **/data/raw/mentions/*
+**/data/raw/events/*
 **/data/release/*
 
 # 9. SMALL
@@ -79,6 +80,7 @@ dev_notes.html
 .prepping_latest_commit_message.txt
 # The gold seed is now out-of-date. Git-ignoring it indefinitely.
 bootstrap/gold_snapshot.sh
+**/data/gold_seed/*
 # "Sectors"
 ./5-serving/frontend/configuration/sectors.py
 

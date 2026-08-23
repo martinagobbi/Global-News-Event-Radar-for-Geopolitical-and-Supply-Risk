@@ -6,7 +6,7 @@ This repository is "production-level" meaning that it deliberately avoids using 
 
 Two modes are in place: testing mode and intended mode. **Only testing mode can be run on one machine, so only testing mode can be used when running the whole radar to observe and evaluate how the radar operates.** In contrast, intended mode is boilerplate to make testing mode's data distributed across machines: intended mode was curated at every relevant step of the creation of testing mode, but to test intended mode, significant hardware is required, without which Docker Swarm will refuse to start intended mode. In a nutshell, testing mode is the only mode that can run on one machine, and intended mode is a curated but untested draft of the setup to make the same pipeline run on multiple machines.
 
-## Testing mode: startup, shutdown, explanation of the processes
+## Testing mode: startup, shutdown
 
 ### Startup
 
@@ -28,10 +28,10 @@ docker compose --env-file .env.testing up -d --build
 # While all previous steps just need to be run on the backend/operator machine, this is the only code that each frontend machine will need.
 docker compose -f 5-serving/docker-compose.serving.yml up --build
 
-# 6. You may then view the radar's UI via this link:
+# 5. You may then view the radar's UI via this link:
 [**http://localhost:8501**](http://localhost:8501){.uri}.
 
-# 7. You may then log in with one of these test profiles:
+# 6. You may then log in with one of these test profiles:
 # |For login: Username       |For login: Password |FYI: Supply chain                   |FYI: Territories       |
 # |--------------------------|--------------------|------------------------------------|-----------------------|
 # | radar_electronics        | chips2026          | Semiconductors and electronics     | Asia-Pacific          |
@@ -66,13 +66,9 @@ NOT OPTIONAL: shutdown procedure (that does not destroy the volumes, so user pre
 docker compose -f 5-serving/docker-compose.serving.yml down && docker compose --env-file .env.testing down && docker compose --env-file .env.testing -f docker-compose.stores.yml down
 ```
 
-### Explanation of the process
-
-## Intended mode: startup, shutdown, explanation of the processes
+## Intended mode: startup, shutdown
 
 ### Startup
 
 ### Shutdown
-
-### Explanation of the process
 
