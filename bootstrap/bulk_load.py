@@ -5,6 +5,11 @@ ZIP files, bypassing the 15-minute-at-a-time pipeline.
 
 Why this exists
 ---------------
+This script can use Pandas because it is NOT part of the actual data pipeline.
+This script only builds what is needed to simulate what the frontend looks like
+after the ACTUAL pipeline (that uses PySpark instead of Pandas wherever applicable)
+has been running for weeks.
+
 The live pipeline processes ONE 15-minute slice at a time: parsing publishes a
 pair only when `latest_files` is empty, and validation then enriches and stores
 it. Measured on this project, a slice costs about a minute end to end, so a
