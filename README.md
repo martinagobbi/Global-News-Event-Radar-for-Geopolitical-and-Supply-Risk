@@ -43,6 +43,17 @@ docker compose -f 5-serving/docker-compose.serving.yml up --build
 
 Here in testing mode, backend machines and frontend machines are the same one machine, but these steps are still kept separate to keep the production-level design (to also have distribution across machines, see intended mode below).
 
+ONLY IF NEEDED: Rebuilding the 30-day test seed:
+``` bash
+# REQUIRES ingestion, parsing, and validation to be on first. (So, first perform steps 1 and 2 of Startup)
+docker compose --env-file .env.testing stop ingestion parsing validation  # stop live writes
+./bootstrap/silver_snapshot.sh wipe
+ENRICH=1 docker compose --env-file .env.testing -f docker-compose.bootstrap.yml run --rm bootstrap # WARNING: enrichment makes it take hours to download the full 30 days --- you might want to wrap this command: `caffeinate -is -c 'ENRICH=1 docker compose --env-file .env.testing -f docker-compose.bootstrap.yml run --rm bootstrap'`.
+./bootstrap/silver_snapshot.sh trim 20260727171500   # the last slice in the release
+./bootstrap/silver_snapshot.sh export
+# Once the seed is created, you can run Startup steps 3 onwards.
+```
+
 ### Shutdown
 
 OPTIONAL: Reset silver so the next startup can restore the seed cleanly

@@ -1935,9 +1935,10 @@ committed; `data/release/` and `data/raw/` are not.
 and the order matters for the same reason `trim` exists:
 
 ``` bash
+# REQUIRES ingestion, parsing, and validation to be on first. (So, first perform steps 1 and 2 of Startup)
 docker compose --env-file .env.testing stop ingestion parsing validation  # stop live writes
 ./bootstrap/silver_snapshot.sh wipe
-ENRICH=1 docker compose --env-file .env.testing -f docker-compose.bootstrap.yml run --rm bootstrap
+ENRICH=1 docker compose --env-file .env.testing -f docker-compose.bootstrap.yml run --rm bootstrap # WARNING: might want to run with `caffeinate`!!!
 ./bootstrap/silver_snapshot.sh trim 20260727171500   # the last slice in the release
 ./bootstrap/silver_snapshot.sh export
 ```
