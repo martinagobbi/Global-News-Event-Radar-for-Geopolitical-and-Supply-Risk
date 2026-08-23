@@ -334,7 +334,7 @@ def build_catalogue(events, mentions, cameo_lookup):
     story doesn't appear several times on one card.
     """
     ev = events.select(
-        "GLOBALEVENTID", "Day", "EventCode", "GoldsteinScale", "Actor1Name",
+        "GLOBALEVENTID", "Day", "EventCode", "GoldsteinScale",
         "ActionGeo_FullName", "ActionGeo_CountryCode",
         "ActionGeo_Lat", "ActionGeo_Long", "DATEADDED",
         "Actor1CountryCode", "Actor2CountryCode",
@@ -343,7 +343,7 @@ def build_catalogue(events, mentions, cameo_lookup):
     mn = mentions.select(
         "GLOBALEVENTID", "MentionIdentifier", "InRawText", "Confidence",
         "MentionDocTone", "article_title", "article_keywords", "enriched",
-        "MentionTimeDate",
+        "MentionTimeDate", "MentionSourceName",
     ).filter(F.col("MentionIdentifier").isNotNull() & (F.trim("MentionIdentifier") != ""))
 
     df = mn.join(ev, on="GLOBALEVENTID", how="inner")
@@ -367,7 +367,11 @@ def build_catalogue(events, mentions, cameo_lookup):
           .withColumn("risk_category", F.lit(""))
           .withColumn("goldstein", F.col("GoldsteinScale").cast("double"))
           .withColumn("cameo_code", F.col("EventCode").cast("string"))
-          .withColumn("actor", F.col("Actor1Name"))
+          # The publisher the article came from (e.g. "bbc.co.uk"), shown on the
+          # card so a reader can see the source before clicking. Replaces the
+          # former `actor` column, which carried Actor1Name and was never read
+          # by the serving layer.
+          .withColumn("mention_source_name", F.col("MentionSourceName"))
           .withColumn("latitude", F.col("ActionGeo_Lat").cast("double"))
           .withColumn("longitude", F.col("ActionGeo_Long").cast("double"))
           .withColumn("event_date", event_date)
@@ -493,7 +497,7 @@ def user_predicate(profile: dict):
 ARTICLE_COLUMNS = [
     "doc_id", "document_identifier", "mention_identifier", "global_event_id",
     "in_raw_text", "confidence", "mention_doc_tone", "country", "risk_category",
-    "goldstein", "cameo_code", "cameo_label", "actor", "latitude", "longitude",
+    "goldstein", "cameo_code", "cameo_label", "mention_source_name", "latitude", "longitude",
     "event_date", "date_added", "age_days", "mention_time",
 ]
 
@@ -530,7 +534,7 @@ def write_gold(df, table: str, mode: str = "append", truncate: bool = False) -> 
 _ARTICLE_UPSERT_COLUMNS = [
     "doc_id", "document_identifier", "mention_identifier", "global_event_id",
     "in_raw_text", "confidence", "mention_doc_tone", "country", "risk_category",
-    "goldstein", "cameo_code", "cameo_label", "actor", "latitude", "longitude",
+    "goldstein", "cameo_code", "cameo_label", "mention_source_name", "latitude", "longitude",
     "event_date", "date_added", "age_days", "mention_time",
 ]
 
@@ -581,7 +585,7 @@ _STAGE_DDL = {
           mention_doc_tone DOUBLE PRECISION,
           country VARCHAR(200), risk_category VARCHAR(500),
           goldstein DOUBLE PRECISION,
-          cameo_code VARCHAR(10), cameo_label VARCHAR(200), actor VARCHAR(500),
+          cameo_code VARCHAR(10), cameo_label VARCHAR(200), mention_source_name VARCHAR(500),
           latitude DOUBLE PRECISION, longitude DOUBLE PRECISION,
           event_date TIMESTAMP, date_added TIMESTAMP, age_days SMALLINT,
           mention_time TIMESTAMP)

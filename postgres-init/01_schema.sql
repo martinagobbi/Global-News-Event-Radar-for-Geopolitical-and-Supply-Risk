@@ -65,7 +65,10 @@ CREATE TABLE articles (
   goldstein           DOUBLE PRECISION,
   cameo_code          VARCHAR(10),
   cameo_label         VARCHAR(200),
-  actor               VARCHAR(500),
+  -- The publisher the article came from (GDELT's MentionSourceName, e.g.
+  -- "bbc.co.uk"). Shown on the card next to each link. Replaced the former
+  -- `actor` column (Actor1Name), which no serving query ever selected.
+  mention_source_name VARCHAR(500),
   latitude            DOUBLE PRECISION,
   longitude           DOUBLE PRECISION,
   -- The article's own timestamp (silver's MentionTimeDate). event_date below is

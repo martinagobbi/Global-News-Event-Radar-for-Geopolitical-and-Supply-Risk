@@ -26,6 +26,21 @@ def _tag_badge(tag: str | None) -> str:
     return "You did not apply a tag"
 
 
+def _link_label(article: dict) -> str:
+    """
+    The clickable text for one article link: the headline, then the publisher.
+
+    `mention_source_name` is GDELT's MentionSourceName carried through silver and
+    gold (e.g. "bbc.co.uk"), so a reader can see where a story comes from before
+    clicking — the headline alone often does not say. Absent or empty (an older
+    gold row written before the column existed, or a mention GDELT gave no source
+    for) simply yields the headline unchanged, rather than an empty "()".
+    """
+    label = str(article.get("mention_identifier", "") or "")
+    source = str(article.get("mention_source_name", "") or "").strip()
+    return f"{label} ({source})" if source else label
+
+
 def render_event_card(event: dict, context: str = "main") -> None:
     """Render a single event card."""
     global_event_id = event["global_event_id"]
@@ -166,7 +181,7 @@ def render_event_card(event: dict, context: str = "main") -> None:
             for i, a in enumerate(articles[:PREVIEW_ARTICLES]):
                 if i == 0:
                     st.caption("---------------------------------------------------------")
-                st.markdown(f"- [{a['mention_identifier']}]({a['url']})")
+                st.markdown(f"- [{_link_label(a)}]({a['url']})")
                 st.caption(
                     f"Confidence: {a['confidence']}%       |"
                     f"       Tone: {a['mention_doc_tone']}"
@@ -175,7 +190,7 @@ def render_event_card(event: dict, context: str = "main") -> None:
 
             if len(articles) > PREVIEW_ARTICLES:
                 article_labels = {
-                    f"{i + 1}. {a['mention_identifier']}": a
+                    f"{i + 1}. {_link_label(a)}": a
                     for i, a in enumerate(articles)
                 }
                 with st.expander(f"All {articles_display} articles (they are more than {PREVIEW_ARTICLES})"):

@@ -475,7 +475,8 @@ services:
           # exist when the script needs it.
           post_init: /bootstrap/init-gold.sh
     configs:
-      # _v2: 01_schema.sql gained pipeline_status.silver_watermark. Swarm configs
+      # _v3: 01_schema.sql dropped `actor` and gained mention_source_name (and,
+      # earlier, silver_watermark + date_added). Swarm configs
       # are immutable, so the same name cannot carry changed content — see the
       # Configs block at the foot of this file.
       - source: pg_gold_schema_v3

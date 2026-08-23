@@ -8,7 +8,7 @@ Connection defaults match 5-serving/backend/postgres_store.py. The three tables
 
     articles(doc_id BYTEA PK, document_identifier, mention_identifier,
              global_event_id, in_raw_text, confidence, mention_doc_tone, country,
-             risk_category, goldstein, cameo_code, cameo_label, actor,
+             risk_category, goldstein, cameo_code, cameo_label, mention_source_name,
              latitude, longitude, event_date, date_added, age_days, mention_time)
     user_articles(user_id, doc_id)   PK (user_id, doc_id)
     pipeline_status(status, timestamp_of_last_update)
@@ -75,7 +75,7 @@ def _doc_id(document_identifier: str) -> bytes:
 _ARTICLE_COLUMNS = [
     "doc_id", "document_identifier", "mention_identifier", "global_event_id",
     "in_raw_text", "confidence", "mention_doc_tone", "country", "risk_category",
-    "goldstein", "cameo_code", "cameo_label", "actor", "latitude", "longitude",
+    "goldstein", "cameo_code", "cameo_label", "mention_source_name", "latitude", "longitude",
     "event_date", "date_added", "age_days", "mention_time",
 ]
 
@@ -101,6 +101,8 @@ _ADDED_COLUMNS = [
     # same for every article on a card.
     ("mention_time", "TIMESTAMP"),
     ("date_added", "TIMESTAMP"),
+    # Added when `actor` was dropped: the article publisher, shown on the card.
+    ("mention_source_name", "VARCHAR(500)"),
 ]
 
 # Same idea, for pipeline_status. postgres-init/01_schema.sql declares this column
@@ -192,7 +194,7 @@ def _migrate_to_pair_key(cur) -> None:
           goldstein           DOUBLE PRECISION,
           cameo_code          VARCHAR(10),
           cameo_label         VARCHAR(200),
-          actor               VARCHAR(500),
+          mention_source_name VARCHAR(500),
           latitude            DOUBLE PRECISION,
           longitude           DOUBLE PRECISION,
           mention_time        TIMESTAMP,
