@@ -159,6 +159,23 @@ services:
       - "8000:8000"
     networks:
       - pipeline_network
+  
+  # One-shot database seeder — seeds test accounts automatically on fresh installs
+  seeder:
+    build:
+      context: ./5-serving/backend
+      dockerfile: Dockerfile
+    container_name: pipeline_seeder
+    restart: "no"
+    depends_on:
+      - backend
+    environment:
+      BACKEND_URL: http://backend:8000
+    volumes:
+      - ./5-serving/seed_test_users.py:/app/seed_test_users.py
+    command: python /app/seed_test_users.py
+    networks:
+      - pipeline_network
 
 volumes:
   # Disposable scratch for the in-flight slices. Local to whichever machine runs

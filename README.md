@@ -12,25 +12,20 @@ Two modes are in place: testing mode and intended mode. **Only testing mode can 
 
 ```bash
 # 1. Stores
-
 docker compose --env-file .env.testing -f docker-compose.stores.yml up -d
 
 # 2. Pipeline (Ingestion; Parsing; Validation and Storage; Processing; Serving Backend)
 # It may mention "orphans", and that's fine: those are intended-mode versions of what you will be opening. They need to stay in place in case intended mode is every run, but intended mode is too heavy to work on one machine.
+# NOTE: This step now includes an automated one-shot "seeder" container. It will wait for the backend to be ready and automatically create the three test profiles idempotently. 
 docker compose --env-file .env.testing up -d --build
 
 # 3. OPTIONAL BUT NECESSARY FOR PROPER TESTING: Silver data from articles spanning 27/06/2026 at 17:15 to 27/07/2026 at 17:15.
 # This "seeded" data was chosen to make the testing-mode radar not empty at startup: the radar gets updated with the latest news every 15 minutes, and automatically drops news older than 365 days every midnight. Even seeding over a year of data will leave a gap in testing mode: all the per-15-minutes slices between the latest seeded/stored data and the data from the moment a tester starts up the testing-mode radar with these instructions.
+# IMPORTANT: After this step, you may have to wait around 2 minutes: around 30 seconds of which are for every seeded user to have their gold data computed for the first time by the processing layer.
 ./bootstrap/silver_snapshot.sh restore
 
-# 4. Three idempotently-created test profiles. Without any profiles, the gold layer stays empty.
-# WARNING: the first attempt of this may fail because ClickHouse will still be starting up,
-# but it will automaticall retry, which might fix the problem without you having to do anything.
-# After you run this command, you may have to wait around 2 minutes before running the next one: around 30 seconds for every user to have their gold created for the first time (this is a seed: any other user-related computes are parallel across users and do not take this long).
-python3 5-serving/seed_test_users.py # Needs `requests` on the machine where this code is run. Also, may have to type `python` instead of `python3`.
-
-# 5. Service frontend.
-# While all previous steps just need to be run on the backend, this is the only code that each frontend machine will need.
+# 4. Service frontend.
+# While all previous steps just need to be run on the backend/operator machine, this is the only code that each frontend machine will need.
 docker compose -f 5-serving/docker-compose.serving.yml up --build
 
 # 6. You may then view the radar's UI via this link:

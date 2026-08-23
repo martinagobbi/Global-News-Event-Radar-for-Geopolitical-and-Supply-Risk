@@ -272,11 +272,7 @@ def _wait_for_backend() -> bool:
     Block until the backend answers, or BACKEND_WAIT_SECONDS elapses.
 
     This is the only step of the setup that runs outside Docker, so it is the one
-    most likely to be started a moment too early — the backend container is up but
-    still opening its database connections. Every other component in the pipeline
-    retries an unavailable dependency every five seconds; without the same
-    courtesy here the script simply raised, and the three profiles were never
-    created, which leaves the gold layer permanently empty.
+    most likely to be started a moment too early...
     """
     deadline = time.monotonic() + BACKEND_WAIT_SECONDS
     announced = False
