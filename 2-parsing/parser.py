@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 # ── GDELT column names (61 columns, 0-based index) ───────────────────────────
 GDELT_COLUMNS = [
-    "GlobalEventID", "Day", "MonthYear", "Year", "FractionDate",
+    "GLOBALEVENTID", "Day", "MonthYear", "Year", "FractionDate",
     "Actor1Code", "Actor1Name", "Actor1CountryCode", "Actor1KnownGroupCode",
     "Actor1EthnicCode", "Actor1Religion1Code", "Actor1Religion2Code",
     "Actor1Type1Code", "Actor1Type2Code", "Actor1Type3Code",
@@ -36,7 +36,7 @@ GDELT_COLUMNS = [
 EVENT_COLUMNS_TO_DROP = [
     column for column in GDELT_COLUMNS
     if column not in {
-        "GlobalEventID", "Day", "Actor1Name", "Actor1CountryCode",
+        "GLOBALEVENTID", "Day", "Actor1Name", "Actor1CountryCode",
         "Actor2Name", "Actor2CountryCode", "EventCode", "EventRootCode",
         "GoldsteinScale", "NumArticles", "AvgTone",
         "Actor1Geo_CountryCode", "Actor2Geo_CountryCode",
@@ -289,9 +289,10 @@ def passes_filter(record: dict) -> bool:
     positionally-keyed ones, though nothing produces those any more — see the
     KEY RENAMING header above.
     """
-    # Positional-record guard, vestigial. It cannot fire on current input: both
-    # callers read their CSV with `names=`, so the first key is a column name
-    # like "GLOBALEVENTID", which is neither an int nor a digit string.
+    # The positional-record guard `if record` is vestigial.
+    # It cannot fire on current input: both callers read their CSV with `names=`,
+    # so the first key is a column name like "GLOBALEVENTID", which is
+    # neither an int nor a digit string.
     #
     # Left in place because it is genuinely cheap and cannot misfire. It costs
     # one iterator and two isinstance checks per row, and no GDELT column name is
@@ -302,7 +303,7 @@ def passes_filter(record: dict) -> bool:
     # every lookup returning "".
     if record:
         first_key = next(iter(record))
-        if isinstance(first_key, int) or (isinstance(first_key, str) and first_key.isdigit()):
+        if isinstance(first_key, int) or (isinstance(first_key, str) and first_key.isdigit()):  # Always false! The column name is "GLOBALEVENTID", not an int or an all-digit string.
             record = rename_integer_keys(record)
 
     if not has_relevant_event_code(record):
@@ -391,7 +392,7 @@ def to_silver_event(record: dict) -> dict:
     fips_country = adm1[:2] if len(adm1) >= 2 else ""
 
     return {
-        "event_id":     _safe_str(record.get("GlobalEventID", "")),
+        "event_id":     _safe_str(record.get("GLOBALEVENTID", "")),
         "date":         _safe_str(record.get("Day", "")),
         "event_code":   _safe_str(record.get("EventCode", "")),
         "event_root":   _safe_str(record.get("EventRootCode", "")),
@@ -461,7 +462,7 @@ class PermanentError(Exception):
 # field to the DataFrame index and shifts every name one position left, so each
 # value lands under its neighbour's name. Measured on a real 513-row slice with
 # one extra column appended: no exception, shape still (513, 61), but
-# GlobalEventID held `20250816` (a Day), SOURCEURL held the new value, and
+# GLOBALEVENTID held `20250816` (a Day), SOURCEURL held the new value, and
 # passes_filter selected 2 rows instead of 11.
 #
 # Downstream that is worse than an error, because the corruption is plausible:
@@ -519,7 +520,7 @@ def check_field_width(path, expected: int, kind: str) -> None:
 
 
 MENTIONS_COLUMNS = [
-    "GlobalEventID",            # 0  links the mention to an event
+    "GLOBALEVENTID",            # 0  links the mention to an event
     "EventTimeDate",            # 1
     "MentionTimeDate",          # 2
     "MentionType",              # 3  1=web, 2=citation, 3=core, ...
@@ -582,7 +583,7 @@ def to_silver_mention(record: dict) -> dict:
             return 0.0
 
     return {
-        "event_id":         _safe_str(record.get("GlobalEventID", "")),
+        "event_id":         _safe_str(record.get("GLOBALEVENTID", "")),
         "event_time":       _safe_str(record.get("EventTimeDate", "")),
         "mention_time":     _safe_str(record.get("MentionTimeDate", "")),
         "mention_type":     _safe_str(record.get("MentionType", "")),

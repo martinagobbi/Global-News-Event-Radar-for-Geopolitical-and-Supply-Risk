@@ -53,10 +53,32 @@ def _split_pair(paths):
     return events_path, mentions_path
 
 
-def _event_id_series(df):
-    """GLOBALEVENTID column coerced to a clean integer Series (bad -> 0)."""
+def _event_id_series(df, path=None):
+    """
+    Validates that GLOBALEVENTID contains only integers, then safely casts to int64.
+    Raises ValueError if bad data is found, triggering dead-lettering.
+    """
     import pandas as pd
-    return pd.to_numeric(df[EVENT_ID], errors="coerce").fillna(0).astype("int64")
+    
+    if df is None or EVENT_ID not in df.columns:
+        return pd.Series(dtype="int64")
+
+    # 1. Hard Validation (Tripwire)
+    values = df[EVENT_ID].astype(str).str.strip()
+    present = values[values != ""]
+    bad = present[~present.str.isdigit()]
+    
+    if not bad.empty:
+        name = getattr(path, "name", path) or "<file>"
+        raise ValueError(
+            f"GLOBALEVENTID must be a valid integer: "
+            f"{name} has {len(bad)} invalid value(s) "
+            f"(e.g. {sorted(set(bad))[:_MAX_REPORTED]}). "
+            f"Refusing to store this slice."
+        )
+
+    # 2. Safe Extraction
+    return pd.to_numeric(df[EVENT_ID], errors="coerce").dropna().astype("int64")
 
 
 # ── Confidence range check ───────────────────────────────────────────────────
@@ -255,9 +277,9 @@ def validate_pair(paths, storage) -> dict:
     # ── GLOBALEVENTID referential integrity, then enrich and append ───────────
     if mentions_df is not None:
         # With no events file this is empty, so every id goes to the store lookup.
-        event_ids_here = (set(_event_id_series(events_df).tolist())
+        event_ids_here = (set(_event_id_series(events_df, events_path).tolist())
                           if events_df is not None else set())
-        mention_ids = _event_id_series(mentions_df)
+        mention_ids = _event_id_series(mentions_df, mentions_path)
 
         # Only the ids NOT already in the current events file need a store lookup.
         to_lookup = set(mention_ids.tolist()) - event_ids_here

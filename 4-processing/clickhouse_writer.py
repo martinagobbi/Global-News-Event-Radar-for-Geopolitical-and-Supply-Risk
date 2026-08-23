@@ -22,11 +22,11 @@ CREATE TABLE IF NOT EXISTS silver_events (
     actor2          String,
     country_code    String,
     fips_country    String,
-    lat             Float64,
-    lon             Float64,
-    goldstein       Float64,
-    avg_tone        Float64,
-    num_articles    Int32,
+    lat             Nullable(Float64),
+    lon             Nullable(Float64),
+    goldstein       Nullable(Float64),
+    avg_tone        Nullable(Float64),
+    num_articles    Nullable(Int32),
     source_url      String,
     source          String,
     inserted_at     DateTime DEFAULT now()
@@ -300,11 +300,22 @@ class ClickHouseWriter:
 # INTERNAL HELPERS
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def _parse_float(val):
+    try:
+        return float(val) if val not in (None, "") else None
+    except (ValueError, TypeError):
+        return None
+
+def _parse_int(val):
+    try:
+        return int(val) if val not in (None, "") else None
+    except (ValueError, TypeError):
+        return None
+
 def _event_to_row(event: dict) -> tuple:
     """
     Convert a silver event dict into the ordered tuple expected by
     clickhouse-driver for the INSERT statement.
-    Column order must match exactly the columns listed in _INSERT_SQL.
     """
     return (
         str(event.get("event_id", "")),
@@ -315,11 +326,11 @@ def _event_to_row(event: dict) -> tuple:
         str(event.get("actor2", "")),
         str(event.get("country_code", "")),
         str(event.get("fips_country", "")),
-        float(event.get("lat", 0.0)),
-        float(event.get("lon", 0.0)),
-        float(event.get("goldstein", 0.0)),
-        float(event.get("avg_tone", 0.0)),
-        int(event.get("num_articles", 0)),
+        _parse_float(event.get("lat")),
+        _parse_float(event.get("lon")),
+        _parse_float(event.get("goldstein")),
+        _parse_float(event.get("avg_tone")),
+        _parse_int(event.get("num_articles")),
         str(event.get("source_url", "")),
         str(event.get("source", "gdelt_events")),
     )

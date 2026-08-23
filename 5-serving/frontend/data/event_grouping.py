@@ -84,6 +84,7 @@ def group_events(events: list[dict]) -> list[dict]:
             _date_value(event.get("oldest_article_time")),
             _date_value(event.get("event_date")),
             -_float_value(event.get("goldstein")), # Stronger NEGATIVE Goldstein score takes priority
+            _number(event.get("global_event_id")),
         ),
         reverse=True,
     )

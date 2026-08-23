@@ -75,11 +75,9 @@ from gdelt import (EVENT_COLUMNS, MENTION_COLUMNS,
                    check_field_width, RAW_EXPECTED_FIELD_COUNT)
 from storage import Storage                                          # 3-validation
 
-# The two layers name the same GDELT columns differently: parsing calls the key
-# "GlobalEventID", while validation and the ClickHouse schema call it
-# "GLOBALEVENTID". Both lists describe the same columns in the same order, so the
-# frames are read with parsing's names (which passes_filter expects) and then
-# renamed positionally to validation's names before being written.
+# The frames are read with parsing's names (which passes_filter expects) and then
+# renamed positionally to validation's names before being written, even though both layers
+# should agree on all names anyways.
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -205,7 +203,7 @@ def main() -> None:
             continue
 
         # Switch to the names the silver schema uses (positional: same columns,
-        # same order, e.g. GlobalEventID -> GLOBALEVENTID).
+        # same order).
         kept = kept[PARSED_EVENT_COLUMNS].copy()
         kept.columns = EVENT_COLUMNS
         mentions = mentions.copy()

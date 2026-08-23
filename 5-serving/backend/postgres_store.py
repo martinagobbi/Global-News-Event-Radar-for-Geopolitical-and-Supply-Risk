@@ -196,8 +196,8 @@ def _dedupe_by_title(articles: list[dict]) -> list[dict]:
 
 
 def _sort_and_cap(articles: list[dict], limit: int = 20) -> list[dict]:
-    """Confidence DESC, abs(MentionDocTone) ASC, capped at limit."""
-    articles.sort(key=lambda a: (-a["confidence"], abs(a["mention_doc_tone"])))
+    """Confidence DESC, abs(MentionDocTone) ASC, GLOBALEVENTID ASC, capped at limit."""
+    articles.sort(key=lambda a: (-a["confidence"], abs(a["mention_doc_tone"]), abs(a["global_event_id"])))
     return _dedupe_by_title(articles)[:limit]
 
 
