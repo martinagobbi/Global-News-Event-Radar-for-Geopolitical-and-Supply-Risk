@@ -45,6 +45,20 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
+import warnings
+from dateutil.parser import UnknownTimezoneWarning
+
+# Newspaper3k (from `enrichment`, imported below) will extract dates
+# even if we don't want it to (GDELT already provides dates).
+# Sometimes, Newspaper3k can't extract a date due to time zone ambiguity.
+# Let's suppress that warning: it's for a problem we won't even have.
+warnings.filterwarnings("ignore", category=UnknownTimezoneWarning)
+# When dateutil makes this an exception instead of a warning,
+# the error message I get may change, but Newspaper3k should still be able
+# to give me the info I will actually save. At that point, a different
+# "swallow this message" line will have to be added here.
+
+
 import pandas as pd
 
 sys.path.insert(0, "/app/parsing")
