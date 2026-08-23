@@ -206,7 +206,12 @@ PROFILES: dict[str, dict] = {
     },
 }
 
-COMMON = {"briefing_days": 30, "older_news_days": 90, "status": "registered"}
+COMMON = {
+    "briefing_days": 30, 
+    "older_news_days": 90, 
+    "status": "registered",
+    "timezone": "Europe/Rome",
+}
 
 
 # ── Self-checks ─────────────────────────────────────────────────────────────

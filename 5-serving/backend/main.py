@@ -26,6 +26,18 @@ from postgres_store import (
 logger = logging.getLogger(__name__)
 app = FastAPI(title="Global News Event Radar — Backend")
 
+from pydantic import BaseModel, Field
+from typing import Optional
+
+class UserProfile(BaseModel):
+    user_id: str
+    territories: list[str] = []
+    keywords: dict[str, list[str]] = {}
+    briefing_days: int = Field(default=30, ge=1, le=90)
+    older_news_days: int = Field(default=90, ge=31, le=365)
+    status: str = "registered"
+    display_name: Optional[str] = None
+    timezone: str = "Europe/Rome"  # Defaults to UTC+1 / UTC+2 (CEST)
 
 # ── Global error handler ───────────────────────────────────────────────────
 # Catches any unhandled exception and returns a structured JSON error instead
@@ -105,9 +117,20 @@ def read_profile(user_id: str) -> dict:
 
 
 @app.put("/users/{user_id}/profile")
-def update_profile(user_id: str, profile: dict) -> dict:
+def update_profile(user_id: str, profile: UserProfile) -> dict:
     try:
-        return save_profile(user_id, profile)
+        # Security check: ensure path ID matches body ID
+        if user_id != profile.user_id:
+            raise HTTPException(
+                status_code=400, 
+                detail="Path user_id does not match profile user_id"
+            )
+        
+        # .model_dump() converts the Pydantic object back into a standard dictionary
+        # Note: Use .dict() instead of .model_dump() if you are on an older Pydantic v1 release.
+        return save_profile(user_id, profile.model_dump())
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error("save_profile failed for %s: %s", user_id, e)
         raise HTTPException(

@@ -28,6 +28,9 @@ from components.recompute_notice import (
 )
 from components.retention_notice import render_retention_notice
 
+import time
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 STATUS_POLL_SECONDS  = 30
 DATA_REFRESH_SECONDS = 900   # 15 minutes — aligned with ingestion cadence
@@ -46,6 +49,9 @@ try:
 
     profile = get_user_profile(user_id)
     territory_options = get_territory_options()
+
+    user_tz = profile.get("timezone", "Europe/Rome")
+    tz = ZoneInfo(user_tz)
 
     # ── Pipeline / store status (always re-fetched, cheap) ─────────────────────
     system_status = get_system_status()
@@ -80,10 +86,19 @@ elif status_code == "503-MONGO":
         "might not load or save correctly until this is resolved."
     )
 elif system_status.get("status") == "ERROR":
-    last_update = system_status.get("timestamp_of_last_update", "an unknown time")
+    last_update_raw = system_status.get("timestamp_of_last_update")
+    if last_update_raw:
+        try:
+            last_update_dt = datetime.fromisoformat(str(last_update_raw).replace("Z", "+00:00")).astimezone(tz)
+            last_update_str = f"{last_update_dt:%Y-%m-%d %H:%M} {last_update_dt:%Z}"
+        except ValueError:
+            last_update_str = str(last_update_raw)
+    else:
+        last_update_str = "an unknown time"
+
     st.error(
         "Due to technical difficulties, this dashboard has not been updated with the latest events since "
-        f"{last_update} (UTC)."
+        f"{last_update_str}."
     )
 
 # ── Preferences just changed: the pool is being rebuilt ────────────────────
@@ -117,13 +132,18 @@ if _watermark:
         _light = "🟢" if _lag <= 1 else ("🟡" if _lag == 2 else "🔴")
         _behind = ("up to date" if _lag == 0 else
                    f"{_lag} slice{'s' if _lag > 1 else ''} behind")
+
+        _wm_local = _wm_dt.astimezone(tz)
+        _expected_local = _expected.astimezone(tz)
+        _tz_name = _wm_local.strftime("%Z")
+
         st.caption(
-            f"{_light} Newest data held: **{_wm_dt:%Y-%m-%d %H:%M} UTC** "
-            f"({_behind}). Latest GDELT slice now: {_expected:%Y-%m-%d %H:%M} UTC. {((_lag >= 8) and (_watermark <= _SEED_LAST_SLICE))*'**THIS IS THE SHIPPED SEED FOR TESTING** — live ingestion has not delivered a slice yet. Live data arrives every ~15 minutes (the rate at which GDELT publishes them) starting when this pipeline starts, and this line moves to today when it does.'}"
+            f"{_light} Newest data held: **{_wm_local:%Y-%m-%d %H:%M} {_tz_name}** "
+            f"({_behind}). Latest GDELT slice now: {_expected_local:%Y-%m-%d %H:%M} {_tz_name}. {((_lag >= 8) and (_watermark <= _SEED_LAST_SLICE))*'**THIS IS THE SHIPPED SEED FOR TESTING** — live ingestion has not delivered a slice yet. Live data arrives every ~15 minutes (the rate at which GDELT publishes them) starting when this pipeline starts, and this line moves to today when it does.'}"
         )
         if (_lag >= 8) and (_watermark > _SEED_LAST_SLICE):
             st.caption(
-                f"Live data reached {_wm_dt:%Y-%m-%d %H:%M} UTC and then "
+                f"Live data reached {_wm_local:%Y-%m-%d %H:%M} {_tz_name} and then "
                 "stopped. Ingestion, parsing, validation and processing are "
                 "all worth checking — a machine that slept, or a processing "
                 "layer that cannot publish, both look like this."

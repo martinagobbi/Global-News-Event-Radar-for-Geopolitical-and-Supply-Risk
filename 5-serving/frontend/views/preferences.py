@@ -10,7 +10,7 @@ from components.recompute_notice import mark_recompute_pending, render_recompute
 from data.api_client import BackendUnavailable
 from data.gold_layer import get_events_version
 from data.user_store import get_user_profile, is_first_login, save_user_profile
-
+from zoneinfo import available_timezones
 
 use_neutral_spinner()
 st.title("User setup")
@@ -94,6 +94,36 @@ st.caption(
 
 st.caption("---------------------------------------------------------")
 
+st.subheader("Time Zone")
+st.caption("Select your local time zone for dates and timestamps across the dashboard.")
+
+all_tzs = sorted(list(available_timezones()))
+DEFAULT_TZ = "Europe/Rome"
+
+# If the profile doesn't have a timezone yet, use the default
+current_tz = profile.get("timezone", DEFAULT_TZ)
+default_idx = all_tzs.index(current_tz) if current_tz in all_tzs else 0
+
+selected_timezone = st.selectbox(
+    "Preferred time zone",
+    options=all_tzs,
+    index=default_idx,
+)
+
+st.subheader("Time Zone")
+st.caption("Please select your local time zone for dates and timestamps across the dashboard.")
+
+default_tz = profile.get("timezone", "UTC")
+default_idx = all_tzs.index(default_tz) if default_tz in all_tzs else 0
+
+selected_timezone = st.selectbox(
+    "Preferred time zone",
+    options=all_tzs,
+    index=default_idx,
+)
+
+st.caption("---------------------------------------------------------")
+
 # Bottom Save Profile button
 if already_registered:
     st.write("**PLEASE REMEMBER TO CLICK \"SAVE PROFILE\" TO SAVE ANY EDITS YOU MAKE ON THIS PAGE.**")
@@ -116,6 +146,7 @@ if save_top or save_bottom:
             "briefing_days":   briefing_days,
             "older_news_days": older_news_days,
             "status":          "registered",
+            "timezone":        selected_timezone,
         })
     except BackendUnavailable:
         st.error(
