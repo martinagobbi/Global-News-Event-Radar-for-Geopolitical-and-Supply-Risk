@@ -248,13 +248,7 @@ services:
       - "8000:8000"
     networks: [pipeline_network]
     deploy:
-      replicas: 3
-      # Pinned with everything else in this stack. Three replicas are only
-      # ~0.2 GiB together, so this is not about memory pressure — it is that a
-      # store machine has no spare allowance for anything (see spark-worker
-      # above), and an unpinned service is one Swarm reschedule away from
-      # landing on one. Published ports are unaffected: the routing mesh answers
-      # :8000 on EVERY node regardless of where the tasks actually run.
+      replicas: 1
       placement:
         constraints: ["node.labels.role == pipeline"]
       restart_policy: { condition: any, delay: 5s }
