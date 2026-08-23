@@ -71,6 +71,8 @@ README.html
 # The serving layer's README is not up to date, and hard to maintain
 ./5-serving/README.md
 ./5-serving/README.html
+# Dev notes (too much faff to maintain)
+dev_notes.md
 # Dev notes rendered
 dev_notes.html
 # A file where I draft commit messages

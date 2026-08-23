@@ -22,7 +22,8 @@ docker compose --env-file .env.testing up -d --build
 # 3. OPTIONAL BUT NECESSARY FOR PROPER TESTING: Silver data from articles spanning 27/06/2026 at 17:15 to 27/07/2026 at 17:15.
 # This "seeded" data was chosen to make the testing-mode radar not empty at startup: the radar gets updated with the latest news every 15 minutes, and automatically drops news older than 365 days every midnight. Even seeding over a year of data will leave a gap in testing mode: all the per-15-minutes slices between the latest seeded/stored data and the data from the moment a tester starts up the testing-mode radar with these instructions.
 ./bootstrap/silver_snapshot.sh restore
-# 4. Three test profiles. Without any profiles, the gold layer stays empty.
+
+# 4. Three idempotently-created test profiles. Without any profiles, the gold layer stays empty.
 # WARNING: the first attempt of this may fail because ClickHouse will still be starting up,
 # but it will automaticall retry, which might fix the problem without you having to do anything.
 # After you run this command, you may have to wait around 2 minutes before running the next one: around 30 seconds for every user to have their gold created for the first time (this is a seed: any other user-related computes are parallel across users and do not take this long).
