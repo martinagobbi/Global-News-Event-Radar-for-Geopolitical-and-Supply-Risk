@@ -305,6 +305,56 @@ def _atomic_write(df: pd.DataFrame, final: Path) -> None:
     os.replace(tmp, final)
  
  
+MANIFEST_SUFFIX = ".slice.json"
+
+
+def _write_manifest(slice_id: str, kinds: list[str]) -> None:
+    """
+    Declare, to the validation layer, exactly which files this slice consists of.
+
+    ── Why a manifest and not a timing heuristic ────────────────────────────────
+    A slice is published as up to TWO files, written by two separate os.replace()
+    calls. Each rename is atomic on its own; the pair is not. A consumer scanning
+    between them sees an events-only slice and — because a lone file is a
+    legitimate final state here — cannot tell that apart from a slice that really
+    does contain only events.
+
+    Guessing from timing (is the file old enough to be settled?) answers the
+    question with a probability rather than a fact, and silently reopens the race
+    if the interval is ever retuned. This states the fact instead: parsing ALREADY
+    KNOWS what it is publishing, because _ready_slices() hands it (slice_id, ev,
+    mn) with either possibly None, and ingestion has already made that call final
+    — a slice reaches /data/raw/csv only once it is complete or its retrieval
+    deadline has passed, and ingestion never revisits it.
+
+    ── Written LAST, deliberately ───────────────────────────────────────────────
+    The manifest is the last thing written, so its existence proves every file it
+    names is already in place. Validation therefore needs no waiting logic at
+    all: no manifest means "not ready", and a manifest means "these files, all of
+    them, now".
+
+    Writing it FIRST would have expressed the same intent but created a new
+    failure mode — a crash between manifest and data would leave validation
+    waiting for files that never arrive, needing its own timeout to escape. The
+    ordering makes the crash case self-correcting instead: the slice is simply
+    not picked up, and the files sit until the orphan sweep collects them.
+    """
+    payload = {
+        "slice_id": slice_id,
+        "kinds": sorted(kinds),
+        "files": sorted(f"{slice_id}{EVENTS_SUFFIX}" if k == "events"
+                        else f"{slice_id}{MENTIONS_SUFFIX}" for k in kinds),
+        "complete": sorted(kinds) == ["events", "mentions"],
+        "written_at": datetime.now(timezone.utc).isoformat(),
+    }
+    final = LATEST_FILES_DIR / f"{slice_id}{MANIFEST_SUFFIX}"
+    tmp = final.with_name(f".{final.name}.tmp")
+    tmp.write_text(json.dumps(payload), encoding="utf-8")
+    os.replace(tmp, final)
+    logger.info("slice %s manifest: %s (complete=%s)",
+                slice_id, "+".join(payload["kinds"]) or "none", payload["complete"])
+
+
 def process_pair(slice_id: str, ev_path: Path | None, mn_path: Path | None) -> None:
     """
     Filter events, keep mentions, publish, delete the sources.
@@ -354,6 +404,12 @@ def process_pair(slice_id: str, ev_path: Path | None, mn_path: Path | None) -> N
         _atomic_write(events_out, LATEST_FILES_DIR / f"{slice_id}{EVENTS_SUFFIX}")
     if mentions_df is not None:
         _atomic_write(mentions_df, LATEST_FILES_DIR / f"{slice_id}{MENTIONS_SUFFIX}")
+
+    # LAST. Everything above is now on disk, so this file appearing is what tells
+    # validation the slice is whole — see _write_manifest.
+    _kinds = ([ "events" ] if events_out is not None else []) + \
+             ([ "mentions" ] if mentions_df is not None else [])
+    _write_manifest(slice_id, _kinds)
  
     # Parsing owns deletion of the consumed source files.
     for p in (ev_path, mn_path):

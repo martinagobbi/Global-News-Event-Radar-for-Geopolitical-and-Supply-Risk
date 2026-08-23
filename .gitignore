@@ -87,3 +87,4 @@ bootstrap/gold_snapshot.sh
 # 10. FOR LOCAL TESTING
 .venv/
 tests/
+diffs_to_make_sense_of/

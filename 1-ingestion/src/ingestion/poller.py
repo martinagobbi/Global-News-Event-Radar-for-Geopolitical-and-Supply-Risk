@@ -35,6 +35,9 @@ POLL_INTERVAL_SECONDS = 15 * 60
 SLICE_RETRIEVAL_DEADLINE = int(os.getenv("SLICE_RETRIEVAL_DEADLINE", "600"))
 # How often to re-attempt a missing file inside that window.
 RETRY_TICK = int(os.getenv("RETRY_TICK", "60"))
+# Re-read cadence for a control file that parsed but listed no URLs.
+CONTROL_FILE_RETRY_TICK = int(os.getenv("CONTROL_FILE_RETRY_TICK", "3"))
+CONTROL_FILE_MAX_WAIT   = int(os.getenv("CONTROL_FILE_MAX_WAIT", "120"))
 
 EVENTS_NAME_SUFFIX = ".export.CSV"
 MENTIONS_NAME_SUFFIX = ".mentions.CSV"
@@ -274,13 +277,71 @@ def process_pipeline(session: requests.Session) -> None:
     # 1. Recupera gli ultimi URL disponibili
     latest_urls = fetch_latest_urls(session)
 
-    if not latest_urls.get("events") or not latest_urls.get("mentions"):
-        print("[WARNING] Could not find the Events or Mentions URLs in the control file.")
+    # ── One URL present, the other missing ──────────────────────────────────
+    # This used to `return` outright, which was the one gap in the retrieval
+    # design: everything below — staging, the slice-addressed retry, the
+    # deadline, the partial release — sits DOWNSTREAM of this check, so a
+    # lastupdate.txt listing only one of the two files skipped the whole slice
+    # without a single retry, and the poller then slept the remainder of 15
+    # minutes.
+    #
+    # The missing URL does not have to be waited for: it is DERIVABLE. GDELT
+    # names every file after its own slice, so the id embedded in whichever URL
+    # did arrive is enough to construct the other, which is exactly what the
+    # retry loop below already does via build_file_url(). Synthesising it here
+    # feeds the normal machinery instead of adding a second waiting mechanism.
+    #
+    # Only a control file with NEITHER url is unusable, because then there is no
+    # slice id to build anything from.
+    ev_url = latest_urls.get("events")
+    mn_url = latest_urls.get("mentions")
+
+    # NEITHER url: nothing to derive a slice id from, so the only option is to
+    # look again. Note fetch_latest_urls() already retries the
+    # HTTP fetch itself; this covers the different case of a fetch that SUCCEEDS
+    # and returns a control file with no usable URLs in it.
+    if not ev_url and not mn_url:
+        waited = 0
+        while waited < CONTROL_FILE_MAX_WAIT:
+            time.sleep(CONTROL_FILE_RETRY_TICK)
+            waited += CONTROL_FILE_RETRY_TICK
+            latest_urls = fetch_latest_urls(session)
+            ev_url = latest_urls.get("events")
+            mn_url = latest_urls.get("mentions")
+            if ev_url or mn_url:
+                print(f"[INFO] Control file listed no URLs; found "
+                      f"{'events' if ev_url else 'mentions'} after {waited}s")
+                break
+        if not ev_url and not mn_url:
+            print(f"[WARNING] Control file still lists neither URL after "
+                  f"{CONTROL_FILE_MAX_WAIT}s — skipping this cycle.")
+            return
+
+    slice_id = slice_of_url(ev_url or "") or slice_of_url(mn_url or "")
+    if not slice_id:
+        print("[WARNING] Could not read a slice id from the control file URLs "
+              f"(events={ev_url!r} mentions={mn_url!r}) — skipping this cycle.")
         return
 
-    event_url = latest_urls["events"]
-    mention_url = latest_urls["mentions"]
-    slice_id = slice_of_url(event_url) or slice_of_url(mention_url)
+    if not ev_url or not mn_url:
+        missing = "events" if not ev_url else "mentions"
+        try:
+            published = datetime.strptime(slice_id, "%Y%m%d%H%M%S").replace(
+                tzinfo=timezone.utc)
+        except (ValueError, TypeError):
+            print(f"[WARNING] slice id {slice_id!r} is not a timestamp; cannot "
+                  f"derive the {missing} URL — skipping this cycle.")
+            return
+        derived = build_file_url(published, missing)
+        print(f"[INFO] Control file omitted the {missing} URL for slice "
+              f"{slice_id}; derived it as {derived}")
+        if missing == "events":
+            ev_url = derived
+        else:
+            mn_url = derived
+
+    event_url = ev_url
+    mention_url = mn_url
 
     # Already handled: this slice was released on an earlier cycle.
     if state.get("events") == event_url and state.get("mentions") == mention_url:

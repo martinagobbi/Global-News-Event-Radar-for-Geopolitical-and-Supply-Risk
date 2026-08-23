@@ -29,7 +29,7 @@ docker compose --env-file .env.testing up -d --build
 docker compose -f 5-serving/docker-compose.serving.yml up --build
 
 # 5. You may then view the radar's UI via this link:
-[**http://localhost:8501**](http://localhost:8501){.uri}.
+# http://localhost:8501
 
 # 6. You may then log in with one of these test profiles:
 # |For login: Username       |For login: Password |FYI: Supply chain                   |FYI: Territories       |

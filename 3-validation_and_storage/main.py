@@ -66,6 +66,8 @@ logger = logging.getLogger("validation")
 
 LATEST_FILES_DIR = Path(os.getenv("LATEST_FILES_DIR", "/data/latest_files"))
 WATCH_INTERVAL = int(os.getenv("WATCH_INTERVAL", "30"))
+# Matches 2-parsing/main.py's FILE_STABLE_SECONDS. See list_files().
+FILE_STABLE_SECONDS = int(os.getenv("FILE_STABLE_SECONDS", "3"))
 STALE_LIMIT_SECONDS = int(os.getenv("STALE_LIMIT_SECONDS", str(35 * 60)))
 STARTUP_RETRY_DELAY = 5
 
@@ -155,6 +157,9 @@ def _dead_letter(paths, reason: str) -> None:
     """
     key = Path(paths[0]).name.split(".")[0]
     target = DEAD_LETTER_DIR / key
+    # Include the manifest, or latest_files never empties and parsing's
+    # back-pressure blocks every later slice behind this one.
+    paths = list(paths) + [LATEST_FILES_DIR / f"{key}{MANIFEST_SUFFIX}"]
     try:
         target.mkdir(parents=True, exist_ok=True)
         for p in paths:
@@ -170,14 +175,73 @@ def _dead_letter(paths, reason: str) -> None:
             Path(p).unlink(missing_ok=True)
 
 
+MANIFEST_SUFFIX = ".slice.json"
+
+
+def read_manifest(slice_id: str) -> dict | None:
+    """
+    The manifest parsing wrote for this slice, or None if it is not there yet.
+
+    Parsing writes the manifest LAST, after every data file it intends to
+    publish, so its presence is the completeness signal: no manifest means the
+    slice is still being written or was never published; a manifest means the
+    files it names are all on disk now.
+    """
+    path = LATEST_FILES_DIR / f"{slice_id}{MANIFEST_SUFFIX}"
+    try:
+        with path.open(encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return None
+
+
 def list_files() -> list[Path]:
-    """Return the data files currently in latest_files (ignores temp/hidden)."""
+    """
+    The data files of the one slice parsing has declared ready — or [] if none.
+
+    ── Why a manifest and not a file-age heuristic ──────────────────────────────
+    A slice is up to TWO files, published by two separate os.replace() calls.
+    Each rename is atomic; the pair is not. A scan landing between them sees an
+    events-only slice — and because a lone file is a LEGITIMATE final state here
+    (ingestion deliberately releases partial slices once its retrieval deadline
+    passes), the directory alone cannot distinguish that from a slice which
+    really does contain only events.
+
+    Judging by file age answers this with a probability rather than a fact: it
+    guesses that "too new" means "still being written", it silently reopens the
+    race if the interval is ever retuned, and it delays every slice by the
+    threshold even when nothing is racing.
+
+    The manifest answers it with a fact. Parsing knows what it is publishing
+    BEFORE it publishes anything — _ready_slices() hands it (slice_id, events,
+    mentions) with either possibly None, and ingestion has already made that
+    determination final. So parsing simply states it.
+
+    Data files are returned only when the manifest exists AND every file it names
+    is present. The manifest is not itself a data file; process_pair deletes it
+    with the rest.
+    """
     if not LATEST_FILES_DIR.exists():
         return []
-    return sorted(
-        p for p in LATEST_FILES_DIR.iterdir()
-        if p.is_file() and not p.name.startswith(".")
-    )
+
+    manifests = sorted(LATEST_FILES_DIR.glob(f"*{MANIFEST_SUFFIX}"))
+    if not manifests:
+        return []
+
+    slice_id = manifests[0].name[: -len(MANIFEST_SUFFIX)]
+    manifest = read_manifest(slice_id)
+    if manifest is None:
+        return []
+
+    expected = [LATEST_FILES_DIR / n for n in manifest.get("files", [])]
+    missing = [q.name for q in expected if not q.is_file()]
+    if missing:
+        # Should be impossible: the manifest is written last. Report rather than
+        # process a subset, which is the exact failure this exists to prevent.
+        logger.warning("slice %s manifest lists %s but %s absent — waiting",
+                       slice_id, manifest.get("files"), missing)
+        return []
+    return sorted(expected)
 
 
 def deduplicate_events(storage: Storage) -> None:
@@ -196,6 +260,12 @@ def process_pair(paths, storage: Storage) -> None:
     """Validate + ingest one pair, then delete the two files."""
     summary = validate_pair(paths, storage)
     deduplicate_events(storage)
+    # The manifest is consumed with its slice. Left behind it would advertise a
+    # slice whose data files are gone, and list_files() would log "manifest lists
+    # X but X absent" on every poll for ever.
+    if paths:
+        _sid = Path(paths[0]).name.split(".")[0]
+        (LATEST_FILES_DIR / f"{_sid}{MANIFEST_SUFFIX}").unlink(missing_ok=True)
     for p in paths:
         try:
             Path(p).unlink()
