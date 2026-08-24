@@ -27,6 +27,28 @@ logger = logging.getLogger("processing.triggers")
 
 WATERMARK_POLL_SECONDS = int(os.getenv("WATERMARK_POLL_SECONDS", "60"))
 CHANGE_STREAM_RETRY_SECONDS = int(os.getenv("CHANGE_STREAM_RETRY_SECONDS", "5"))
+# How long to wait, after the LAST profile change, before actually recomputing —
+# and the hard ceiling on how long a burst can postpone recomputing at all.
+#
+# Motivation: seeding N test users writes N profiles in quick succession, and
+# without this, each write independently triggers recompute_user(), which
+# rebuilds the whole catalogue (~90s for 3 users, measured) from scratch every
+# time — 3 users cost 3x the catalogue build for work that could share ONE.
+# Debouncing collapses a burst into a single recompute, chosen once the burst
+# goes quiet.
+#
+# DEBOUNCE_SECONDS is the quiet-period trigger: reset on every new change, so a
+# steady trickle of edits keeps postponing. MAX_WAIT_SECONDS bounds that: a
+# burst that never goes quiet for DEBOUNCE_SECONDS still flushes once this much
+# time has passed since the FIRST unflushed change, so profile edits are never
+# delayed indefinitely.
+CHANGE_STREAM_DEBOUNCE_SECONDS = float(os.getenv("CHANGE_STREAM_DEBOUNCE_SECONDS", "2"))
+CHANGE_STREAM_DEBOUNCE_MAX_WAIT_SECONDS = float(
+    os.getenv("CHANGE_STREAM_DEBOUNCE_MAX_WAIT_SECONDS", "10"))
+# Upper bound per poll of the change stream cursor, so the debounce loop wakes
+# up often enough to notice "quiet for DEBOUNCE_SECONDS" promptly rather than
+# blocking in the driver for an unbounded getMore.
+CHANGE_STREAM_MAX_AWAIT_MS = int(os.getenv("CHANGE_STREAM_MAX_AWAIT_MS", "500"))
 # Two missed 15-minute slices plus margin. Beyond this, silver has stopped
 # growing and the gold on display is no longer being refreshed.
 SILVER_STALE_SECONDS = int(os.getenv("SILVER_STALE_SECONDS", str(45 * 60)))
@@ -103,29 +125,91 @@ def _silver_watermark_loop(ch_factory, recompute_all, report_stale=None) -> None
         time.sleep(WATERMARK_POLL_SECONDS)
 
 
-def _users_change_stream_loop(recompute_user) -> None:
-    """Recompute a single user whenever their Mongo profile changes."""
+def _flush_pending(pending: set[str], recompute_user, recompute_all) -> None:
+    """
+    Apply a debounced batch of changed user ids with the cheapest call that
+    covers it.
+
+    ONE uid -> recompute_user(uid). Preserves today's behaviour for the common
+    case (a single person editing their own preferences): no catalogue rebuilt
+    for anyone else.
+
+    MORE THAN ONE -> recompute_all(). This is deliberately the SAME full
+    rebuild the watermark trigger uses, not a "recompute just these uids"
+    variant — spark_gold.recompute(only_user=...) only accepts one user, and
+    building a multi-user variant would duplicate recompute_all's catalogue
+    logic for a path that exists purely to save the catalogue build once. It is
+    also strictly safe: recompute_all() evaluates every profile, changed or
+    not, so unrelated users are simply re-confirmed rather than affected.
+    """
+    if not pending:
+        return
+    users = sorted(pending)
+    try:
+        if len(users) == 1:
+            logger.info("Debounced change for %s -> recompute_user()", users[0])
+            recompute_user(users[0])
+        else:
+            logger.info("Debounced changes for %d users (%s) -> recompute_all()",
+                        len(users), ", ".join(users))
+            recompute_all()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("recompute for %s failed: %s", users, exc)
+
+
+def _users_change_stream_loop(recompute_user, recompute_all) -> None:
+    """
+    Recompute changed users' gold, debounced.
+
+    A burst of near-simultaneous profile writes — bulk-seeding test accounts is
+    the motivating case, see CHANGE_STREAM_DEBOUNCE_SECONDS above — used to
+    trigger one independent recompute_user() PER WRITE, each rebuilding the
+    whole candidate catalogue from scratch. Debouncing collapses a burst into
+    one recompute, chosen once new changes stop arriving (or after
+    CHANGE_STREAM_DEBOUNCE_MAX_WAIT_SECONDS, whichever comes first).
+
+    try_next() (not the blocking `for change in stream` this replaced) is what
+    makes debouncing possible: it returns None on a quiet cursor instead of
+    blocking indefinitely, so the loop can notice "no new change for
+    DEBOUNCE_SECONDS" and flush. max_await_time_ms bounds each individual poll
+    so that noticing is prompt rather than waiting out a long server-side
+    getMore first.
+    """
     while True:
         try:
             collection = mongo_reader.users_collection()
             logger.info("Watching '%s' change stream for profile updates…",
                         collection.name)
-            with collection.watch(full_document="updateLookup") as stream:
-                for change in stream:
-                    if change.get("operationType") not in ("insert", "update", "replace"):
-                        continue
-                    doc = change.get("fullDocument") or {}
-                    doc_key = change.get("documentKey") or {}
-                    uid = str(doc.get("_id") or doc_key.get("_id")
-                              or doc.get("user_id") or "")
-                    if not uid:
-                        continue
-                    logger.info("Profile %s (%s) -> recompute_user()",
-                                uid, change.get("operationType"))
-                    try:
-                        recompute_user(uid)
-                    except Exception as exc:  # noqa: BLE001
-                        logger.warning("recompute_user(%s) failed: %s", uid, exc)
+            with collection.watch(full_document="updateLookup",
+                                  max_await_time_ms=CHANGE_STREAM_MAX_AWAIT_MS) as stream:
+                pending: set[str] = set()
+                first_pending_at = None
+                last_change_at = None
+                while True:
+                    change = stream.try_next()
+                    now = time.monotonic()
+
+                    if change is not None:
+                        if change.get("operationType") in ("insert", "update", "replace"):
+                            doc = change.get("fullDocument") or {}
+                            doc_key = change.get("documentKey") or {}
+                            uid = str(doc.get("_id") or doc_key.get("_id")
+                                      or doc.get("user_id") or "")
+                            if uid:
+                                if not pending:
+                                    first_pending_at = now
+                                pending.add(uid)
+                                last_change_at = now
+                        continue    # check for more without waiting out the debounce
+
+                    # Cursor went quiet for this poll. Decide whether to flush.
+                    if pending and (
+                        now - last_change_at >= CHANGE_STREAM_DEBOUNCE_SECONDS
+                        or now - first_pending_at >= CHANGE_STREAM_DEBOUNCE_MAX_WAIT_SECONDS
+                    ):
+                        _flush_pending(pending, recompute_user, recompute_all)
+                        pending = set()
+                        first_pending_at = last_change_at = None
         except Exception as exc:  # noqa: BLE001 — retry (e.g. rs not yet initiated)
             logger.warning("users change stream error: %s; retry in %ds",
                            exc, CHANGE_STREAM_RETRY_SECONDS)
@@ -139,7 +223,7 @@ def start(ch_factory, recompute_all, recompute_user, report_stale=None) -> None:
         name="silver-watermark", daemon=True,
     ).start()
     threading.Thread(
-        target=_users_change_stream_loop, args=(recompute_user,),
+        target=_users_change_stream_loop, args=(recompute_user, recompute_all),
         name="users-change-stream", daemon=True,
     ).start()
     logger.info("Background triggers started (watermark poll every %ds)",

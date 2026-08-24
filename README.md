@@ -24,7 +24,6 @@ docker compose --env-file .env.testing up -d --build
 
 # 3. OPTIONAL BUT NECESSARY FOR PROPER TESTING: Silver data from articles spanning 27/06/2026 at 17:15 to 27/07/2026 at 17:15.
 # This "seeded" data was chosen to make the testing-mode radar not empty at startup: the radar gets updated with the latest news every 15 minutes, and automatically drops news older than 365 days every midnight. Even seeding over a year of data will leave a gap in testing mode: all the per-15-minutes slices between the latest seeded/stored data and the data from the moment a tester starts up the testing-mode radar with these instructions.
-# IMPORTANT: After this step, you may have to wait around 2 minutes: around 30 seconds of which are for every seeded user to have their gold data computed for the first time by the processing layer.
 ./bootstrap/silver_snapshot.sh restore
 
 # 4. Service frontend.
@@ -50,8 +49,8 @@ Here in testing mode, backend machines and frontend machines are the same one ma
 # REQUIRES ingestion, parsing, and validation to be on first. (So, first perform at least steps 1 and 2 of Startup)
 
 # Steps 1 through 6 below as one line:
-docker compose --env-file .env.testing stop ingestion parsing validation && ./bootstrap/silver_snapshot.sh wipe && ./bootstrap/silver_snapshot.sh trim 20260727171500 && ./bootstrap/silver_snapshot.sh export && docker compose --env-file .env.testing start ingestion parsing validation
-
+# WARNING: might keep your computer awake for hours unless you stop the process or close the computer.
+caffeinate -is bash -c "docker compose --env-file .env.testing stop ingestion parsing validation && ./bootstrap/silver_snapshot.sh wipe && env ENRICH=1 docker compose --env-file .env.testing -f docker-compose.bootstrap.yml run --rm bootstrap && ./bootstrap/silver_snapshot.sh trim 20260727171500 && ./bootstrap/silver_snapshot.sh export && docker compose --env-file .env.testing start ingestion parsing validation"
 # 1.
 docker compose --env-file .env.testing stop ingestion parsing validation  # stop live writes
 

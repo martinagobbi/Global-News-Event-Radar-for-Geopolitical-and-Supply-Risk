@@ -22,6 +22,7 @@ from __future__ import annotations
 import os
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from itertools import combinations
 
 import requests
@@ -295,6 +296,18 @@ def _wait_for_backend() -> bool:
             time.sleep(BACKEND_RETRY_SECONDS)
 
 
+def _put_profile(user_id: str, profile: dict) -> tuple[str, Exception | None]:
+    payload = {"user_id": user_id, **COMMON, **profile}
+    try:
+        response = requests.put(
+            f"{BACKEND_URL}/users/{user_id}/profile", json=payload, timeout=30
+        )
+        response.raise_for_status()
+        return user_id, None
+    except requests.RequestException as exc:
+        return user_id, exc
+
+
 def seed() -> int:
     if not _wait_for_backend():
         return 1
@@ -302,21 +315,40 @@ def seed() -> int:
     _check_minimum_answers()
     _check_territories_known()
 
+    # Fired CONCURRENTLY, not one PUT at a time. This is not about the network
+    # round trips — those were never the cost. Each profile write makes the
+    # processing layer's Mongo change-stream trigger recompute that user, and
+    # sequential writes used to mean N separate recomputes, each rebuilding the
+    # whole candidate catalogue from scratch (~90s of catalogue-build cost for
+    # 3 users, measured, dominating the total). The trigger now DEBOUNCES
+    # (see 4-processing/triggers.py, CHANGE_STREAM_DEBOUNCE_SECONDS): several
+    # profile writes landing close together collapse into a single
+    # recompute_all(), which is one catalogue build for all of them. Firing the
+    # requests concurrently is what makes "close together" reliable — a
+    # sequential loop only achieves it by accident, if every request happens to
+    # complete faster than the debounce window.
+    #
+    # This is why parallelising the writes only became worth doing once the
+    # trigger side could actually collapse them; sending 3 PUTs at once against
+    # the OLD trigger would still have cost 3 independent recomputes, serialised
+    # behind processing's advisory lock, in whatever order the change stream
+    # happened to deliver them.
     failures = 0
-    for user_id, profile in PROFILES.items():
-        payload = {"user_id": user_id, **COMMON, **profile}
-        try:
-            response = requests.put(
-                f"{BACKEND_URL}/users/{user_id}/profile", json=payload, timeout=30
-            )
-            response.raise_for_status()
-        except requests.RequestException as exc:
-            print(f"FAILED {user_id}: {exc}")
-            failures += 1
-            continue
-        n_kw = sum(len(v) for v in profile["keywords"].values())
-        print(f"seeded {user_id}: {len(profile['territories'])} territories, "
-              f"{n_kw} keywords")
+    with ThreadPoolExecutor(max_workers=len(PROFILES)) as pool:
+        futures = {
+            pool.submit(_put_profile, uid, profile): (uid, profile)
+            for uid, profile in PROFILES.items()
+        }
+        for future in as_completed(futures):
+            user_id, profile = futures[future]
+            _, exc = future.result()
+            if exc is not None:
+                print(f"FAILED {user_id}: {exc}")
+                failures += 1
+                continue
+            n_kw = sum(len(v) for v in profile["keywords"].values())
+            print(f"seeded {user_id}: {len(profile['territories'])} territories, "
+                  f"{n_kw} keywords")
     return failures
 
 
