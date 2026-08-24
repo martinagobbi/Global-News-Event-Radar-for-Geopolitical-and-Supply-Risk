@@ -68,7 +68,7 @@ case "${1:-}" in
   export)
     mkdir -p "$SEED_DIR"
     for t in "${TABLES[@]}"; do
-      echo "exporting $t ..."
+      echo "Exporting $t ..."
       # FINAL collapses the ReplacingMergeTree duplicates, so the snapshot holds
       # one row per key and needs no deduplication when restored.
       docker exec "$CH_CONTAINER" clickhouse-client \
@@ -77,7 +77,7 @@ case "${1:-}" in
       printf '  %-16s %8s rows  %s\n' "$t" "$rows" \
         "$(du -h "$SEED_DIR/$t.parquet" | cut -f1)"
     done
-    echo "snapshot written to $SEED_DIR"
+    echo "Snapshot written to $SEED_DIR"
     ;;
 
   restore)
@@ -85,10 +85,10 @@ case "${1:-}" in
     # ON CLUSTER the first time it reaches ClickHouse. On a fresh clone that
     # happens seconds after the pipeline starts, so wait rather than failing with
     # "Unknown table expression" if this is run the moment the containers are up.
-    printf 'waiting for the silver schema (created by the validation layer) '
+    printf 'Waiting for the silver schema (created by the validation layer) '
     for attempt in $(seq 1 60); do
       if ch --query "EXISTS TABLE ${TABLES[0]}" 2>/dev/null | grep -q '^1$'; then
-        printf ' ready after %ds\n' "$(( (attempt - 1) * 5 ))"
+        printf ' Ready after %ds\n' "$(( (attempt - 1) * 5 ))"
         break
       fi
       # A dot per attempt: this wait can last minutes on a cold start, and silence
@@ -98,7 +98,7 @@ case "${1:-}" in
     done
     printf '\n'
     if ! ch --query "EXISTS TABLE ${TABLES[0]}" 2>/dev/null | grep -q '^1$'; then
-      echo "ERROR: ${TABLES[0]} still does not exist after 5 minutes." >&2
+      echo "ERROR: ${TABLES[0]} Still does not exist after 5 minutes." >&2
       echo "       Is the pipeline running? The VALIDATION layer owns this schema" >&2
       echo "       and creates it at startup; the stores alone will not." >&2
       echo "         docker compose --env-file .env.testing up -d --build" >&2
@@ -110,8 +110,8 @@ case "${1:-}" in
 
     for t in "${TABLES[@]}"; do
       f="$SEED_DIR/$t.parquet"
-      [ -s "$f" ] || { echo "missing or empty: $f — skipped"; continue; }
-      echo "restoring $t ..."
+      [ -s "$f" ] || { echo "Missing or empty: $f — skipped"; continue; }
+      echo "Restoring $t ..."
       # The Distributed table routes each row to its shard, exactly as a live
       # write would, so the sharding stays consistent with the cluster layout.
       # insert_deduplicate=0 is REQUIRED, not an optimisation. ReplicatedMergeTree
@@ -160,7 +160,7 @@ case "${1:-}" in
         # indistinguishable from a hang, and the error text is what says whether
         # this is a startup race (retry will fix it) or a schema mismatch (it
         # will not, and waiting out the full budget is pointless).
-        printf '  attempt %d failed, retrying in %ds: %s\n' \
+        printf '  Attempt %d failed, retrying in %ds: %s\n' \
                "$attempt" "$RESTORE_RETRY_EVERY" "$err"
         sleep "$RESTORE_RETRY_EVERY"
       done
@@ -177,7 +177,7 @@ case "${1:-}" in
       # there. Re-run `SELECT count() FROM gdelt_events FINAL` to confirm.
       printf '  %-16s now %s rows\n' "$t" "$rows"
     done
-    echo "silver restored — the processing watermark trigger will build the gold"
+    echo "Silver restored — the processing watermark trigger will build the gold"
     ;;
 
   recreate)
@@ -192,7 +192,7 @@ case "${1:-}" in
     #
     # Safe, because silver is reproducible: the committed seed restores in seconds
     # and the live pipeline re-polls anything newer from GDELT.
-    echo "dropping the silver tables (both local and Distributed, ON CLUSTER) ..."
+    echo "Dropping the silver tables (both local and Distributed, ON CLUSTER) ..."
     for t in gdelt_events gdelt_mentions; do
       ch --query "DROP TABLE IF EXISTS ${t} ON CLUSTER gnews_cluster SYNC" >/dev/null
       ch --query "DROP TABLE IF EXISTS ${t}_local ON CLUSTER gnews_cluster SYNC" >/dev/null
@@ -233,9 +233,9 @@ case "${1:-}" in
     [ "$cutoff" = "seed" ] && cutoff="$SEED_LAST_SLICE"
     case "$cutoff" in
       ??????????????) ;;
-      *) echo "usage: $0 trim {seed|<YYYYMMDDHHMMSS>}   (e.g. 20260727171500)" >&2; exit 1 ;;
+      *) echo "Usage: $0 trim {seed|<YYYYMMDDHHMMSS>}   (e.g. 20260727171500)" >&2; exit 1 ;;
     esac
-    echo "removing rows published after $cutoff ..."
+    echo "Removing rows published after $cutoff ..."
     # mutations_sync=2 waits for every replica, so the counts printed below are final.
     ch --query "ALTER TABLE gdelt_events_local ON CLUSTER gnews_cluster
                 DELETE WHERE DATEADDED > '$cutoff' SETTINGS mutations_sync = 2" >/dev/null
@@ -245,12 +245,12 @@ case "${1:-}" in
       rows=$(ch --query "SELECT count() FROM $t FINAL")
       printf '  %-16s %8s rows remain\n' "$t" "$rows"
     done
-    echo "events  now span: $(ch --query "SELECT concat(min(DATEADDED),' .. ',max(DATEADDED)) FROM gdelt_events FINAL")"
-    echo "mentions now span: $(ch --query "SELECT concat(min(MentionTimeDate),' .. ',max(MentionTimeDate)) FROM gdelt_mentions FINAL")"
+    echo "Events  now span: $(ch --query "SELECT concat(min(DATEADDED),' .. ',max(DATEADDED)) FROM gdelt_events FINAL")"
+    echo "Mentions now span: $(ch --query "SELECT concat(min(MentionTimeDate),' .. ',max(MentionTimeDate)) FROM gdelt_mentions FINAL")"
     ;;
 
   *)
-    echo "usage: $0 {export|restore|recreate|wipe|trim {seed|<YYYYMMDDHHMMSS>}}" >&2
+    echo "Usage: $0 {export|restore|recreate|wipe|trim {seed|<YYYYMMDDHHMMSS>}}" >&2
     exit 1
     ;;
 esac

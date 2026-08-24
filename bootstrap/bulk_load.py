@@ -63,6 +63,10 @@ warnings.filterwarnings("ignore", category=UnknownTimezoneWarning)
 # to give me the info I will actually save. At that point, a different
 # "swallow this message" line will have to be added here.
 
+# Below, extra steps are being taken to make absolutely sure that bulk load
+# applies the cleaning made by the validation layer.
+from gdelt import EVENT_ID
+from validator import (drop_rows_missing, clean_dateadded, clean_goldstein, clean_confidence)
 
 import pandas as pd
 
@@ -192,6 +196,9 @@ def main() -> None:
         try:
             events = read_zip(files["events"], GDELT_COLUMNS)
             mentions = read_zip(files["mentions"], MENTIONS_COLUMNS)
+            mentions, _ = drop_rows_missing(mentions, EVENT_ID, "mentions")
+            mentions, _ = drop_rows_missing(mentions, "MentionIdentifier", "mentions")
+            mentions, _ = clean_confidence(mentions)
         except Exception as exc:                      # noqa: BLE001
             log.warning("slice %s unreadable (%s) — skipped", slice_id, exc)
             continue
@@ -199,6 +206,9 @@ def main() -> None:
         # bronze -> silver: supply-chain relevance (same filter as 2-parsing).
         # Applied while the frame still carries parsing's column names.
         kept = events[events.apply(lambda r: passes_filter(r.to_dict()), axis=1)].copy()
+        kept, _ = drop_rows_missing(kept, EVENT_ID, "events")
+        kept, _ = clean_dateadded(kept)
+        kept, _ = clean_goldstein(kept)
         if kept.empty:
             continue
 
@@ -211,9 +221,8 @@ def main() -> None:
         mentions.columns = MENTION_COLUMNS[:len(mentions.columns)]
 
         # validation's referential-integrity rule
-        valid_ids = set(pd.to_numeric(kept["GLOBALEVENTID"], errors="coerce")
-                          .fillna(0).astype("int64").tolist())
-        m_ids = pd.to_numeric(mentions["GLOBALEVENTID"], errors="coerce").fillna(0).astype("int64")
+        valid_ids = set(kept[EVENT_ID].astype(str).str.strip().tolist())
+        m_ids = mentions[EVENT_ID].astype(str).str.strip()
         mentions = mentions[m_ids.isin(valid_ids)].copy()
 
         # the three enrichment columns must exist — the table has 19 columns
