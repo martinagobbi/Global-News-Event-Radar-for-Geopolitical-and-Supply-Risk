@@ -9,7 +9,7 @@ from datetime import datetime
 def _render_event_table(events: list[dict]) -> None:
     rows = [
         {
-            "Event": event["card_title"],
+            "Event": f'\"{event["card_title"]}\"',
             "Country": event["country"],
             "Date": datetime.strptime(str(event["event_date"])[:10], "%Y-%m-%d").date(),
             "Tag you applied": event.get("user_tag") or "You did not apply a tag",

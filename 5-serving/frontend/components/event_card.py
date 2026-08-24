@@ -209,7 +209,7 @@ def render_event_card(event: dict, context: str = "main") -> None:
         date_to_show = str(event["event_date"]).removesuffix(" 00:00:00")
 
         if cameo_label:
-            st.write(f'Event type that makes this of interest: "{cameo_label}"')
+            st.write(f'GDELT-detected event type that might make this of interest: "{cameo_label}"')
 
         st.write(f"Event date: {date_to_show}")
 
@@ -232,7 +232,7 @@ def render_event_card(event: dict, context: str = "main") -> None:
                     f"{i + 1}. {_link_label(a)}": a
                     for i, a in enumerate(articles)
                 }
-                with st.expander(f"All {articles_display} articles (they are more than {PREVIEW_ARTICLES})"):
+                with st.expander(f"All {articles_display} articles (showing this because they are more than {PREVIEW_ARTICLES})"):
                     selected_label = st.selectbox(
                         "Choose an article to open",
                         options=list(article_labels.keys()),
