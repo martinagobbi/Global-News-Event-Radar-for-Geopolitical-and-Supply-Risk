@@ -18,6 +18,21 @@
 # ═════════════════════════════════════════════════════════════════════════════
 services:
 
+# ── Why every published store port is bound to 127.0.0.1 ─────────────────────
+# `- "9000:9000"` binds to 0.0.0.0 — EVERY interface — so the store is reachable
+# from any machine on the same network, not just this one. Measured 2026-08-20:
+# ClickHouse and MongoDB accepted unauthenticated reads AND writes from outside
+# their containers, and PostgreSQL accepted the repo's published radar:radar.
+#
+# These ports exist only for host-side tooling (a psql session, clickhouse-client,
+# Compass). Loopback keeps all of that working and removes the LAN entirely.
+# Override per port with e.g. MONGO1_PUBLISH_BIND=0.0.0.0 if you deliberately
+# need remote access; the default is the safe one.
+#
+# INTENDED MODE does not need this: docker-stack.stores.yml publishes NOTHING —
+# the stores are reachable only over the overlay network. Its exposure is a
+# different problem (an unencrypted overlay), addressed separately.
+
   # ── Coordination: 3-node ClickHouse Keeper ensemble (quorum) ──────────────
   #
   # ── Why every service here also mounts a tmpfs ───────────────────────────────
@@ -89,7 +104,7 @@ services:
     # entry node (set CLICKHOUSE_HOST=<this-host> on the pipeline). Same-host use
     # ignores it and resolves `clickhouse-s1r1` over the Docker network instead.
     ports:
-      - "${CLICKHOUSE_PUBLISH:-9000}:9000"
+      - "${CLICKHOUSE_PUBLISH_BIND:-127.0.0.1}:${CLICKHOUSE_PUBLISH:-9000}:9000"
     networks: [pipeline_network]
 
   clickhouse-s1r2:
@@ -189,7 +204,7 @@ services:
     tmpfs:
       - /data/configdb
     ports:
-      - "${MONGO1_PUBLISH:-27017}:27017"
+      - "${MONGO1_PUBLISH_BIND:-127.0.0.1}:${MONGO1_PUBLISH:-27017}:27017"
     networks: [pipeline_network]
 
   mongo2:
@@ -203,7 +218,7 @@ services:
     tmpfs:
       - /data/configdb
     ports:
-      - "${MONGO2_PUBLISH:-27018}:27017"
+      - "${MONGO2_PUBLISH_BIND:-127.0.0.1}:${MONGO2_PUBLISH:-27018}:27017"
     networks: [pipeline_network]
 
   mongo3:
@@ -217,7 +232,7 @@ services:
     tmpfs:
       - /data/configdb
     ports:
-      - "${MONGO3_PUBLISH:-27019}:27017"
+      - "${MONGO3_PUBLISH_BIND:-127.0.0.1}:${MONGO3_PUBLISH:-27019}:27017"
     networks: [pipeline_network]
 
   # One-shot, idempotent replica-set initiation. rs.status() succeeds once the
@@ -307,7 +322,7 @@ services:
       - postgres_data:/var/lib/postgresql/data
       - ./postgres-init:/docker-entrypoint-initdb.d:ro
     ports:
-      - "${POSTGRES_PUBLISH:-5432}:5432"
+      - "${POSTGRES_PUBLISH_BIND:-127.0.0.1}:${POSTGRES_PUBLISH:-5432}:5432"
     networks: [pipeline_network]
 
 volumes:
