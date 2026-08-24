@@ -52,23 +52,44 @@
 --
 --   De-duplication anywhere in the pipeline must therefore compare the PAIR:
 --   two rows may collapse only if they share a GLOBALEVENTID as well as a URL.
+-- ── Types deliberately mirror the silver schema, and are never STRICTER ──────
+-- Gold is derived from silver, so a value silver accepted must not be rejected
+-- here: that would turn a stored row into a failed publish, and the whole
+-- recompute with it. Two earlier mismatches did exactly that in principle:
+--
+--   SMALLINT vs Int32   SMALLINT is 16-bit (-32768..32767); silver's counters are
+--                       Nullable(Int32). `age_days` is the live risk — it is
+--                       datediff(today, event_date), so an event dated far in the
+--                       past or a corrupt `Day` overflows it. Verified: inserting
+--                       99999 raises `ERROR: smallint out of range`. Now INTEGER.
+--   VARCHAR(n) vs String  every silver text column is an unbounded String, so any
+--                       length cap here is a stricter rule than the source. In
+--                       particular VARCHAR(50) on global_event_id constrained an
+--                       identifier this pipeline promises never to interpret.
+--                       Now TEXT, which in PostgreSQL costs nothing extra:
+--                       VARCHAR(n) and TEXT share one storage representation.
+--
+-- NOT NULL is confined to the three IDENTITY columns, matching silver exactly —
+-- there, GLOBALEVENTID and MentionIdentifier are the only non-Nullable columns,
+-- and validation DROPS any row missing either. Everything else is nullable
+-- because "not provided" is now a value the pipeline carries end to end.
 CREATE TABLE articles (
   doc_id              BYTEA            NOT NULL,     -- SHA-256 of document_identifier
-  document_identifier VARCHAR(2000)    NOT NULL,     -- the article URL (data, not a key)
-  mention_identifier  VARCHAR(2000),                 -- headline (enriched title, or URL)
-  global_event_id     VARCHAR(50)      NOT NULL,
-  in_raw_text         SMALLINT,
-  confidence          SMALLINT,
+  document_identifier TEXT             NOT NULL,     -- the article URL (data, not a key)
+  mention_identifier  TEXT,                          -- headline (enriched title, or URL)
+  global_event_id     TEXT             NOT NULL,
+  in_raw_text         INTEGER,
+  confidence          INTEGER,
   mention_doc_tone    DOUBLE PRECISION,
-  country             VARCHAR(200),
-  risk_category       VARCHAR(500),
+  country             TEXT,
+  risk_category       TEXT,
   goldstein           DOUBLE PRECISION,
-  cameo_code          VARCHAR(10),
-  cameo_label         VARCHAR(200),
+  cameo_code          TEXT,
+  cameo_label         TEXT,
   -- The publisher the article came from (GDELT's MentionSourceName, e.g.
   -- "bbc.co.uk"). Shown on the card next to each link. Replaced the former
   -- `actor` column (Actor1Name), which no serving query ever selected.
-  mention_source_name VARCHAR(500),
+  mention_source_name TEXT,
   latitude            DOUBLE PRECISION,
   longitude           DOUBLE PRECISION,
   -- The article's own timestamp (silver's MentionTimeDate). event_date below is
@@ -77,7 +98,7 @@ CREATE TABLE articles (
   mention_time        TIMESTAMP,
   date_added          TIMESTAMP,
   event_date          TIMESTAMP,
-  age_days            SMALLINT,
+  age_days            INTEGER,
   CONSTRAINT pk_articles PRIMARY KEY (doc_id, global_event_id)
 );
 
@@ -90,9 +111,9 @@ CREATE INDEX ix_articles_event ON articles (global_event_id);
 -- (article, event) PAIR, and one article can reach them through several events.
 -- Keying on (user_id, doc_id) would silently keep only one of them.
 CREATE TABLE user_articles (
-  user_id         VARCHAR(200) NOT NULL,
-  doc_id          BYTEA        NOT NULL,
-  global_event_id VARCHAR(50)  NOT NULL,
+  user_id         TEXT  NOT NULL,
+  doc_id          BYTEA NOT NULL,
+  global_event_id TEXT  NOT NULL,
   CONSTRAINT pk_user_articles PRIMARY KEY (user_id, doc_id, global_event_id)
 );
 

@@ -112,6 +112,39 @@ _ADDED_STATUS_COLUMNS = [
     ("silver_watermark", "VARCHAR(14)"),
 ]
 
+
+# ── Type WIDENING for databases created before gold was aligned to silver ────
+# postgres-init/01_schema.sql declares these types, but it runs ONLY at first
+# database initialisation, so an existing volume keeps whatever it was created
+# with — and the old types were STRICTER than silver:
+#
+#   SMALLINT   16-bit, against silver's Nullable(Int32). `age_days` is the live
+#              risk: datediff(today, event_date) overflows it for an event dated
+#              far enough in the past. Measured: 99999 -> "smallint out of range".
+#   VARCHAR(n) a length cap, against silver's unbounded String. VARCHAR(50) on
+#              global_event_id in particular constrained an identifier this
+#              pipeline promises never to interpret.
+#
+# Every conversion here WIDENS, so it cannot fail on existing data and needs no
+# USING clause. Re-running is free: PostgreSQL makes ALTER ... TYPE a no-op when
+# the column already has the target type. TEXT and VARCHAR share one storage
+# representation, so the text conversions do not even rewrite the table.
+_WIDENED_COLUMNS = [
+    ("articles", "document_identifier", "TEXT"),
+    ("articles", "mention_identifier",  "TEXT"),
+    ("articles", "global_event_id",     "TEXT"),
+    ("articles", "country",             "TEXT"),
+    ("articles", "risk_category",       "TEXT"),
+    ("articles", "cameo_code",          "TEXT"),
+    ("articles", "cameo_label",         "TEXT"),
+    ("articles", "mention_source_name", "TEXT"),
+    ("articles", "in_raw_text",         "INTEGER"),
+    ("articles", "confidence",          "INTEGER"),
+    ("articles", "age_days",            "INTEGER"),
+    ("user_articles", "user_id",         "TEXT"),
+    ("user_articles", "global_event_id", "TEXT"),
+]
+
 _schema_checked = False
 
 # Distinguishes "leave the stored watermark alone" from "set it to NULL". Public
@@ -143,6 +176,17 @@ def ensure_schema() -> None:
                 cur.execute(
                     f"ALTER TABLE pipeline_status "
                     f"ADD COLUMN IF NOT EXISTS {column} {ddl_type}")
+            # Widen before anything else touches these tables: a publish that
+            # arrives with a null or an oversized value must not meet the old,
+            # narrower type.
+            for table, column, ddl_type in _WIDENED_COLUMNS:
+                try:
+                    cur.execute(
+                        f"ALTER TABLE {table} ALTER COLUMN {column} TYPE {ddl_type}")
+                except Exception as exc:      # noqa: BLE001 — column may not exist yet
+                    logger.debug("widen %s.%s -> %s skipped: %s",
+                                 table, column, ddl_type, exc)
+                    conn.rollback()
             _migrate_to_pair_key(cur)
             conn.commit()
         _schema_checked = True

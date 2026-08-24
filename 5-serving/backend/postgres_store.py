@@ -26,32 +26,35 @@ URL is still carried as ordinary data, and the user_articles -> articles join ru
 on doc_id:
 -------------------------------------------------------
 TABLE articles (
-    doc_id               BYTEA,
-    document_identifier  VARCHAR(2000),
-    mention_identifier   VARCHAR(2000),
-    global_event_id      VARCHAR(50),
-    in_raw_text          SMALLINT,
-    confidence           SMALLINT,
+    doc_id               BYTEA           NOT NULL,
+    document_identifier  TEXT            NOT NULL,   -- the article URL
+    mention_identifier   TEXT,                       -- headline
+    global_event_id      TEXT            NOT NULL,
+    in_raw_text          INTEGER,
+    confidence           INTEGER,
     mention_doc_tone     DOUBLE PRECISION,
-    country              VARCHAR(200),
-    risk_category        VARCHAR(500),
+    country              TEXT,
+    risk_category        TEXT,
     goldstein            DOUBLE PRECISION,
-    cameo_code           VARCHAR(10),
-    cameo_label          VARCHAR(200),
-    mention_source_name  VARCHAR(500),
+    cameo_code           TEXT,
+    cameo_label          TEXT,
+    mention_source_name  TEXT,
     latitude             DOUBLE PRECISION,
     longitude            DOUBLE PRECISION,
     event_date           TIMESTAMP,
-    age_days             SMALLINT,
+    age_days             INTEGER,
+-- Types mirror silver and are never stricter; NOT NULL is confined to the three
+-- IDENTITY columns, matching silver's GLOBALEVENTID + MentionIdentifier. Every
+-- other column is nullable because "not provided" is carried end to end.
     mention_time         TIMESTAMP, -- the ARTICLE's own timestamp; event_date is
                                     -- per-EVENT and so identical across a card
     PRIMARY KEY (doc_id, global_event_id)   -- one row per (article, event) pair
 )
 
 TABLE user_articles (
-    user_id              VARCHAR(200),
+    user_id              TEXT,
     doc_id               BYTEA,
-    global_event_id      VARCHAR(50),
+    global_event_id      TEXT,
     PRIMARY KEY (user_id, doc_id, global_event_id)
 )
 

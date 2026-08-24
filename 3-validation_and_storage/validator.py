@@ -66,7 +66,7 @@ def _event_id_series(df, path=None):
     change in GDELT's id format.
 
     Blank ids are excluded from the returned set rather than compared as "": a
-    row with no id is removed upstream by _drop_rows_missing(), so nothing should
+    row with no id is removed upstream by drop_rows_missing(), so nothing should
     reach here, and an empty string must never match another empty string as if
     the two rows were about the same event.
     """
@@ -94,7 +94,7 @@ def _event_id_series(df, path=None):
 # carry that messiness forward honestly rather than to refuse the whole batch.
 # PermanentError is reserved for files whose SHAPE is wrong: a column-count
 # mismatch or an unclassifiable name, where nothing can be trusted at all.
-def _drop_rows_missing(df, column: str, kind: str, path=None):
+def drop_rows_missing(df, column: str, kind: str, path=None):
     """Remove rows whose `column` is empty. Returns (df, n_dropped)."""
     if df is None or column not in df.columns:
         return df, 0
@@ -291,9 +291,9 @@ def validate_pair(paths, storage) -> dict:
     # survivors have attributes nulled. Doing it the other way round would spend
     # work nulling fields on rows about to be discarded, and would make the
     # logged counts misleading (an attribute nulled on a row that then vanished).
-    events_df, ev_no_id = _drop_rows_missing(events_df, EVENT_ID, "events", events_path)
-    mentions_df, mn_no_id = _drop_rows_missing(mentions_df, EVENT_ID, "mentions", mentions_path)
-    mentions_df, mn_no_url = _drop_rows_missing(
+    events_df, ev_no_id = drop_rows_missing(events_df, EVENT_ID, "events", events_path)
+    mentions_df, mn_no_id = drop_rows_missing(mentions_df, EVENT_ID, "mentions", mentions_path)
+    mentions_df, mn_no_url = drop_rows_missing(
         mentions_df, "MentionIdentifier", "mentions", mentions_path)
 
     events_df, _ = clean_dateadded(events_df, events_path)
