@@ -46,26 +46,47 @@ _INSERT_QUORUM = int(os.getenv("CLICKHOUSE_INSERT_QUORUM", "2"))
 
 # ── Column + skip-index bodies (shared by the LOCAL tables) ───────────────────
 # Sorting key is set per-table in the ENGINE clause below, not here.
+# ── Nullability: identity is NOT NULL, everything else is Nullable ───────────
+# Two columns per table stay non-null because they are the row's IDENTITY, and
+# validation now DROPS any row missing one rather than storing a placeholder:
+#     events   GLOBALEVENTID
+#     mentions GLOBALEVENTID, MentionIdentifier
+# They are also the sorting/sharding keys, and ClickHouse cannot use a Nullable
+# column in a sorting key at all — so this is both a design choice and a
+# constraint.
+#
+# GLOBALEVENTID is String, not UInt64. It is an opaque identifier, never
+# arithmetic, and typing it as an integer bakes in an assumption about GDELT's id
+# format that nothing else in the pipeline needs. Measured cost of the change:
+# +41% on that column (385 KiB -> 542 KiB on 107k rows), because a near-sequential
+# UInt64 delta-compresses better than its decimal text. That is the price of not
+# breaking the day an id contains a letter.
+#
+# EVERY other column is Nullable, so "not provided" is representable and distinct
+# from 0 or "". Note this is NOT a storage win — measured on the same 107k rows
+# the typed/nullable variants were mostly LARGER (NumArticles +157%, lat +27%),
+# because Nullable adds a per-row null mask and short repetitive strings compress
+# extremely well. The win is semantic: avg() skips NULL but is skewed by 0.
 _EVENTS_BODY = """(
-    GLOBALEVENTID          UInt64,
-    Day                    String,
-    Actor1Name             String,
-    Actor1CountryCode      String,
-    Actor2Name             String,
-    Actor2CountryCode      String,
-    EventCode              String,
-    EventRootCode          String,
-    GoldsteinScale         String,
-    NumArticles            String,
-    AvgTone                String,
-    Actor1Geo_CountryCode  String,
-    Actor2Geo_CountryCode  String,
-    ActionGeo_FullName     String,
-    ActionGeo_CountryCode  String,
-    ActionGeo_Lat          String,
-    ActionGeo_Long         String,
-    DATEADDED              UInt64,
-    SOURCEURL              String,
+    GLOBALEVENTID          String,
+    Day                    Nullable(String),
+    Actor1Name             Nullable(String),
+    Actor1CountryCode      Nullable(String),
+    Actor2Name             Nullable(String),
+    Actor2CountryCode      Nullable(String),
+    EventCode              Nullable(String),
+    EventRootCode          Nullable(String),
+    GoldsteinScale         Nullable(Float64),
+    NumArticles            Nullable(Int32),
+    AvgTone                Nullable(Float64),
+    Actor1Geo_CountryCode  Nullable(String),
+    Actor2Geo_CountryCode  Nullable(String),
+    ActionGeo_FullName     Nullable(String),
+    ActionGeo_CountryCode  Nullable(String),
+    ActionGeo_Lat          Nullable(Float64),
+    ActionGeo_Long         Nullable(Float64),
+    DATEADDED              Nullable(String),
+    SOURCEURL              Nullable(String),
     INDEX idx_sourceurl lower(SOURCEURL) TYPE ngrambf_v1(4, 4096, 3, 0) GRANULARITY 4,
     INDEX idx_action_cc  ActionGeo_CountryCode TYPE set(0) GRANULARITY 4,
     INDEX idx_actor1_cc  Actor1CountryCode     TYPE set(0) GRANULARITY 4,
@@ -73,18 +94,18 @@ _EVENTS_BODY = """(
 )"""
 
 _MENTIONS_BODY = """(
-    GLOBALEVENTID              UInt64,
-    MentionTimeDate            String,
-    MentionSourceName          String,
+    GLOBALEVENTID              String,
+    MentionTimeDate            Nullable(String),
+    MentionSourceName          Nullable(String),
     MentionIdentifier          String,
-    SentenceID                 String,
-    InRawText                  String,
-    Confidence                 String,
-    MentionDocLen              String,
-    MentionDocTone             String,
-    article_title              String,
-    article_keywords           String,
-    enriched                   UInt8,
+    SentenceID                 Nullable(String),
+    InRawText                  Nullable(Int32),
+    Confidence                 Nullable(Int32),
+    MentionDocLen              Nullable(Int32),
+    MentionDocTone             Nullable(Float64),
+    article_title              Nullable(String),
+    article_keywords           Nullable(String),
+    enriched                   Nullable(UInt8),
     INDEX idx_mentionid lower(MentionIdentifier) TYPE ngrambf_v1(4, 4096, 3, 0) GRANULARITY 4
 )"""
 
@@ -94,6 +115,49 @@ _INSERT_EVENTS_SQL = (
 _INSERT_MENTIONS_SQL = (
     "INSERT INTO gdelt_mentions (" + ", ".join(MENTION_COLUMNS) + ") VALUES"
 )
+
+
+# ── Value coercion for the insert ────────────────────────────────────────────
+# `_to_uint` used to map anything unparseable to 0, for GLOBALEVENTID and
+# DATEADDED. Both uses are now gone, and deliberately:
+#
+#   GLOBALEVENTID is a String and is never coerced anywhere in the pipeline.
+#   DATEADDED is cleaned in validation (clean_dateadded), which nulls what it
+#   cannot parse — so nothing unparseable reaches here to be silently zeroed.
+#
+# That 0 was the quiet failure behind a frozen watermark: max(DATEADDED) ignores
+# NULL but is perfectly happy to return a row of zeros as data.
+def _text(value):
+    """String, or None for a missing value. Never '' — that is a known-empty."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    if text == "" or text.lower() in ("nan", "none", "null"):
+        return None
+    return text
+
+
+def _key_text(value) -> str:
+    """A NOT NULL identity column: always a string, never None."""
+    return "" if value is None else str(value).strip()
+
+
+def _num(value, cast):
+    """Numeric, or None. `cast` is int or float."""
+    text = _text(value)
+    if text is None:
+        return None
+    try:
+        return cast(float(text))
+    except (TypeError, ValueError):
+        return None
+
+
+_EVENT_NUMERIC = {"GoldsteinScale": float, "AvgTone": float,
+                  "ActionGeo_Lat": float, "ActionGeo_Long": float,
+                  "NumArticles": int}
+_MENTION_NUMERIC = {"InRawText": int, "Confidence": int,
+                    "MentionDocLen": int, "MentionDocTone": float}
 
 
 def _to_uint(value) -> int:
@@ -219,8 +283,9 @@ class Storage:
             return 0
         rows = [
             tuple(
-                _to_uint(r[col]) if col in ("GLOBALEVENTID", "DATEADDED")
-                else str(r[col])
+                _key_text(r[col]) if col == "GLOBALEVENTID"
+                else _num(r[col], _EVENT_NUMERIC[col]) if col in _EVENT_NUMERIC
+                else _text(r[col])
                 for col in EVENT_COLUMNS
             )
             for r in df.to_dict("records")
@@ -235,9 +300,10 @@ class Storage:
             return 0
         rows = [
             tuple(
-                _to_uint(r[col]) if col == "GLOBALEVENTID"
+                _key_text(r[col]) if col in ("GLOBALEVENTID", "MentionIdentifier")
                 else _to_bool_uint(r[col]) if col == "enriched"
-                else str(r[col])
+                else _num(r[col], _MENTION_NUMERIC[col]) if col in _MENTION_NUMERIC
+                else _text(r[col])
                 for col in MENTION_COLUMNS
             )
             for r in df.to_dict("records")

@@ -55,175 +55,197 @@ def _split_pair(paths):
 
 def _event_id_series(df, path=None):
     """
-    Validates that GLOBALEVENTID contains only integers, then safely casts to int64.
-    Raises ValueError if bad data is found, triggering dead-lettering.
+    GLOBALEVENTID as a clean STRING Series. Never coerced, never type-enforced.
+
+    This is the join key for referential integrity, and it is deliberately text
+    all the way through the pipeline. It was previously `pd.to_numeric(...)`,
+    which is wrong twice over: it silently mapped every non-numeric id to 0 (or,
+    in the tripwire version, rejected the whole slice), and it assumes GDELT will
+    never introduce a letter. Comparing ids as strings costs nothing here — the
+    lookup is set membership, not arithmetic — and cannot be invalidated by a
+    change in GDELT's id format.
+
+    Blank ids are excluded from the returned set rather than compared as "": a
+    row with no id is removed upstream by _drop_rows_missing(), so nothing should
+    reach here, and an empty string must never match another empty string as if
+    the two rows were about the same event.
     """
     import pandas as pd
-    
     if df is None or EVENT_ID not in df.columns:
-        return pd.Series(dtype="int64")
-
-    # 1. Hard Validation (Tripwire)
+        return pd.Series(dtype="object")
     values = df[EVENT_ID].astype(str).str.strip()
-    present = values[values != ""]
-    bad = present[~present.str.isdigit()]
-    
-    if not bad.empty:
-        name = getattr(path, "name", path) or "<file>"
-        raise ValueError(
-            f"GLOBALEVENTID must be a valid integer: "
-            f"{name} has {len(bad)} invalid value(s) "
-            f"(e.g. {sorted(set(bad))[:_MAX_REPORTED]}). "
-            f"Refusing to store this slice."
-        )
-
-    # 2. Safe Extraction
-    return pd.to_numeric(df[EVENT_ID], errors="coerce").dropna().astype("int64")
+    return values[values != ""]
 
 
-# ── Confidence range check ───────────────────────────────────────────────────
-# GDELT documents Confidence as a percentage, so 0–100 is the whole of its
-# domain. ClickHouse cannot enforce that: the column is String, like 76 of the
-# 80 columns across both silver tables (only GLOBALEVENTID, DATEADDED and
-# `enriched` carry real types). Anything outside the range would be stored
-# without complaint.
+# ── Row-level cleaning ───────────────────────────────────────────────────────
+# Two different responses to bad data, and which one applies is a property of the
+# COLUMN, not of how bad the value is:
 #
-# Measured on the committed 30-day seed — 111,430 mentions — the field is
-# entirely well behaved: zero empties, every value a plain integer, range 10–100,
-# and only ten distinct values, all multiples of ten. So this check is not
-# fixing an observed fault; it is a tripwire for a future change in the feed.
+#   REMOVE THE ROW  — the value is the row's identity. Without it the row cannot
+#                     be joined, addressed or de-duplicated, so there is nothing
+#                     to keep. GLOBALEVENTID (both tables) and MentionIdentifier
+#                     (the article URL) are the only two.
+#   NULL THE FIELD  — the value is an attribute. The row is still a real event or
+#                     article; one measurement is simply unknown, and "unknown"
+#                     is a state the schema can now represent.
 #
-# ── The two judgement calls, and why they went the way they did ──────────────
-# EMPTY IS ALLOWED. GDELT genuinely leaves fields blank — in the same mention row
-# MentionDocTranslationInfo and Extras are both empty — so an absent Confidence
-# is "not provided", not "wrong". Rejecting it would throw away good slices the
-# first time GDELT omits the field.
+# Neither is a PermanentError. A slice with odd values is not a malformed slice —
+# it is a normal slice describing a messy world, and the pipeline's job is to
+# carry that messiness forward honestly rather than to refuse the whole batch.
+# PermanentError is reserved for files whose SHAPE is wrong: a column-count
+# mismatch or an unclassifiable name, where nothing can be trusted at all.
+def _drop_rows_missing(df, column: str, kind: str, path=None):
+    """Remove rows whose `column` is empty. Returns (df, n_dropped)."""
+    if df is None or column not in df.columns:
+        return df, 0
+    present = df[column].astype(str).str.strip() != ""
+    n_dropped = int((~present).sum())
+    if n_dropped:
+        logger.warning("%s: dropped %d row(s) with no %s — a row without it "
+                       "cannot be identified", getattr(path, "name", kind),
+                       n_dropped, column)
+    return df[present].copy(), n_dropped
+
+
+def _null_out(df, column: str, is_valid, path=None, why: str = ""):
+    """
+    Replace every value in `column` that fails `is_valid` with None.
+
+    Uses None rather than "" so the value arrives at ClickHouse as a genuine
+    NULL. The distinction matters: "" is a known-empty string, NULL is "not
+    provided", and only the latter is excluded from aggregates like avg().
+    """
+    if df is None or column not in df.columns:
+        return df, 0
+    original = df[column]
+    cleaned = original.map(lambda v: v if is_valid(v) else None)
+    n_nulled = int(original.notna().sum() - cleaned.notna().sum())
+    if n_nulled:
+        logger.info("%s: nulled %d %s value(s)%s",
+                    getattr(path, "name", "<file>"), n_nulled, column,
+                    f" ({why})" if why else "")
+    df = df.copy()
+    df[column] = cleaned
+    return df, n_nulled
+
+
+# ── Attribute cleaning: null, never reject ───────────────────────────────────
+# Both functions below used to raise PermanentError and dead-letter the whole
+# slice. They no longer do, and the reason is worth stating: an out-of-range
+# Confidence or an unparseable DATEADDED describes ONE field of ONE row. Setting
+# it aside meant discarding ~1,400 good mentions over a single bad value, and it
+# also fired three full enrichment passes first, because a deterministic input
+# error was being routed through a retry budget meant for transient faults.
 #
-# ANYTHING ELSE INVALID REJECTS THE WHOLE SLICE, by raising. The pair then goes
-# through the normal path: three attempts, then dead-lettered with both files
-# preserved for inspection. This is stricter than the referential-integrity rule
-# a few lines below, which drops individual mentions whose event is missing —
-# deliberately so. A missing event is an ordinary, expected consequence of slice
-# boundaries; a Confidence of 3000 means the feed no longer matches what this
-# code believes about it, and the sane response is to stop and be looked at
-# rather than to quietly discard rows.
+# PermanentError is now reserved for a file whose SHAPE is wrong — wrong column
+# count, or an unclassifiable name — where no row can be trusted.
 CONFIDENCE_MIN = 0
 CONFIDENCE_MAX = 100
-_MAX_REPORTED = 5          # keep the error message readable
 
 
-def check_confidence(mentions_df, path=None) -> None:
-    """
-    Raise unless every non-empty Confidence parses as a number in 0–100.
-
-    Empty strings pass (see above). Values are compared numerically, not by
-    pattern, so a decimal such as "85.5" is accepted when in range: the rule
-    asked for is a range check on a percentage, not an integer-format check.
-    """
-    if mentions_df is None or "Confidence" not in mentions_df.columns:
-        return
-
-    values = mentions_df["Confidence"].astype(str).str.strip()
-    present = values[values != ""]
-    if present.empty:
-        return
-
-    numeric = pd.to_numeric(present, errors="coerce")
-    non_numeric = present[numeric.isna()]
-    out_of_range = present[numeric.notna()
-                           & ((numeric < CONFIDENCE_MIN) | (numeric > CONFIDENCE_MAX))]
-
-    if non_numeric.empty and out_of_range.empty:
-        return
-
-    name = getattr(path, "name", path) or "<mentions>"
-    parts = []
-    if not out_of_range.empty:
-        parts.append(f"{len(out_of_range)} outside {CONFIDENCE_MIN}–{CONFIDENCE_MAX} "
-                     f"(e.g. {sorted(set(out_of_range))[:_MAX_REPORTED]})")
-    if not non_numeric.empty:
-        parts.append(f"{len(non_numeric)} non-numeric "
-                     f"(e.g. {sorted(set(non_numeric))[:_MAX_REPORTED]})")
-    raise PermanentError(
-        f"Confidence is a percentage and must be {CONFIDENCE_MIN}–{CONFIDENCE_MAX}: "
-        f"{name} has " + "; ".join(parts) +
-        f", out of {len(present)} non-empty values. Refusing to store this slice."
-    )
+def _valid_confidence(value) -> bool:
+    """True only for a number within 0-100. Empty, None and junk are all False."""
+    if value is None:
+        return False
+    text = str(value).strip()
+    if text == "" or text.lower() in ("nan", "none", "null"):
+        return False
+    try:
+        return CONFIDENCE_MIN <= float(text) <= CONFIDENCE_MAX
+    except (TypeError, ValueError):
+        return False
 
 
-# ── DATEADDED validity check ─────────────────────────────────────────────────
-# Same contract as check_confidence, for the same reason and with the same
-# consequences: empty passes, anything else invalid rejects the WHOLE slice by
-# raising, and the pair then retries three times before being dead-lettered.
+def clean_confidence(mentions_df, path=None):
+    """Null out every Confidence that is not a number in 0-100."""
+    return _null_out(mentions_df, "Confidence", _valid_confidence, path,
+                     why="not a percentage in 0-100")
+
+
+# ── DATEADDED ────────────────────────────────────────────────────────────────
+# A GDELT slice id is YYYYMMDDHHMMSS, but the DATE is the part that carries
+# meaning: it places the event in time and drives `age_days` and retention.
+# A truncated id that still names a real day is therefore ACCEPTED and padded to
+# midnight, while anything without a full year-month-day is nulled.
 #
-# This one matters more than Confidence, because DATEADDED is the watermark.
-# `max(DATEADDED)` is what the processing layer polls to decide that silver has
-# grown, so a corrupt value does not merely store a wrong number — it decides
-# whether the gold layer is rebuilt at all.
-#
-# It also closes a genuinely silent failure. The column is UInt64 in ClickHouse,
-# but nothing invalid ever reaches ClickHouse to be rejected: storage._to_uint()
-# converts anything unparseable to 0 first. Measured:
-#     _to_uint('https://example.com/story') -> 0
-#     _to_uint('85.5')                      -> 0
-# A slice whose columns had shifted would therefore be STORED, every row with
-# DATEADDED = 0. Zero is below every real slice id, so max(DATEADDED) would not
-# move, the watermark would not advance, and gold would quietly stop updating
-# while silver kept growing — the exact failure signature that is hardest to
-# diagnose from the dashboard.
-#
-# Validity is "14 digits that parse as a real timestamp", which is what a GDELT
-# slice id is (YYYYMMDDHHMMSS, e.g. 20260816133000). Length alone is too weak —
-# it would accept 99999999999999 — and a bare range test cannot express "month
-# 13 does not exist".
-DATEADDED_FORMAT = "%Y%m%d%H%M%S"
-DATEADDED_WIDTH  = 14      # a GDELT slice id is always exactly this wide
+# Accepted:  20260823101500 (full)   20260823 (date only)
+#            2026082310     (+hour)  202608231015 (+minute)
+# Nulled:    202608 (no day)  2026 (no month/day)  "" / None / junk
+#            20261323101500 (month 13 — parses as a number, is not a date)
+DATEADDED_FULL = "%Y%m%d%H%M%S"
+_DATEADDED_FORMS = [                 # (width, format) — longest first
+    (14, "%Y%m%d%H%M%S"),
+    (12, "%Y%m%d%H%M"),
+    (10, "%Y%m%d%H"),
+    (8,  "%Y%m%d"),
+]
 
 
-def check_dateadded(events_df, path=None) -> None:
+def _normalise_dateadded(value):
     """
-    Raise unless every non-empty DATEADDED is a valid YYYYMMDDHHMMSS timestamp.
+    Return a full 14-digit slice id, or None if the date part is not usable.
 
-    Empty passes, matching check_confidence: an absent value is "not provided",
-    and rejecting it would discard good slices the first time GDELT omits it.
+    Shorter forms are zero-padded to midnight, which is why the pad is applied
+    AFTER strptime confirms the prefix is a real date: padding first would turn
+    '202613' into '20261300000000' and hide an impossible month behind a
+    well-formed string.
+    """
+    if value is None:
+        return None
+    text = str(value).strip()
+    if text == "" or text.lower() in ("nan", "none", "null") or not text.isdigit():
+        return None
+    for width, fmt in _DATEADDED_FORMS:
+        if len(text) == width:
+            try:
+                datetime.strptime(text, fmt)
+            except (TypeError, ValueError):
+                return None
+            return text.ljust(14, "0")
+    return None                       # any other width is not a slice id
+
+
+def clean_dateadded(events_df, path=None):
+    """
+    Null out unusable DATEADDED values and pad the usable-but-short ones.
+
+    Note this is the WATERMARK column: `max(DATEADDED)` decides whether gold is
+    rebuilt. A null here is safe — it is simply not a maximum — whereas the old
+    `_to_uint()` fallback wrote 0, which is a value, sorts below every real slice
+    and silently froze the watermark. Nulling is what makes that unreachable.
     """
     if events_df is None or "DATEADDED" not in events_df.columns:
-        return
+        return events_df, 0
+    original = events_df["DATEADDED"]
+    cleaned = original.map(_normalise_dateadded)
+    n_nulled = int(original.notna().sum() - cleaned.notna().sum())
+    if n_nulled:
+        logger.warning("%s: nulled %d DATEADDED value(s) with no usable date",
+                       getattr(path, "name", "<events>"), n_nulled)
+    events_df = events_df.copy()
+    events_df["DATEADDED"] = cleaned
+    return events_df, n_nulled
 
-    values = events_df["DATEADDED"].astype(str).str.strip()
-    present = values[values != ""]
-    if present.empty:
-        return
 
-    # BOTH tests are needed, and strptime alone is not enough. `%Y` matches
-    # greedily rather than exactly four digits, so a truncated id parses happily:
-    # strptime("202608161330", "%Y%m%d%H%M%S") succeeds, silently reading a
-    # 12-digit value as a date. The explicit width test is what rejects a
-    # truncated or padded id; strptime is what rejects an impossible one such as
-    # month 13. Verified: 12 digits passed strptime and is caught by the length
-    # check; 20261316133000 passes the length check and is caught by strptime.
-    bad = []
-    for value in present.unique():
-        if len(value) != DATEADDED_WIDTH or not value.isdigit():
-            bad.append(value)
-            continue
-        try:
-            datetime.strptime(value, DATEADDED_FORMAT)
-        except (ValueError, TypeError):
-            bad.append(value)
+def _valid_number(value) -> bool:
+    """True for anything parseable as a float. Used for GoldsteinScale."""
+    if value is None:
+        return False
+    text = str(value).strip()
+    if text == "" or text.lower() in ("nan", "none", "null"):
+        return False
+    try:
+        float(text)
+        return True
+    except (TypeError, ValueError):
+        return False
 
-    if not bad:
-        return
 
-    n_bad = int(present.isin(bad).sum())
-    name = getattr(path, "name", path) or "<events>"
-    raise PermanentError(
-        f"DATEADDED must be a 14-digit GDELT slice timestamp (YYYYMMDDHHMMSS): "
-        f"{name} has {n_bad} invalid value(s) across {len(bad)} distinct form(s) "
-        f"(e.g. {sorted(bad)[:_MAX_REPORTED]}), out of {len(present)} non-empty. "
-        f"Refusing to store this slice — DATEADDED is the watermark, so a wrong "
-        f"value here decides whether gold is rebuilt at all."
-    )
+def clean_goldstein(events_df, path=None):
+    """Null out a missing or unparseable Goldstein score."""
+    return _null_out(events_df, "GoldsteinScale", _valid_number, path,
+                     why="missing or unparseable")
+
 
 
 def validate_pair(paths, storage) -> dict:
@@ -260,12 +282,25 @@ def validate_pair(paths, storage) -> dict:
     events_df = load_table(events_path) if events_path is not None else None
     mentions_df = load_table(mentions_path) if mentions_path is not None else None
 
-    # Content check BEFORE the first append. Position matters: append_events()
-    # runs below, ahead of the whole mentions block, so a check placed with the
-    # mentions would let the events half of a rejected slice reach silver and
-    # leave a partial write behind. Raising here means nothing was stored.
-    check_confidence(mentions_df, mentions_path)
-    check_dateadded(events_df, events_path)
+    # ── Clean BEFORE the first append ───────────────────────────────────────
+    # Position still matters, though for a weaker reason than before. These no
+    # longer raise, so there is no partial-write hazard to avoid; but they must
+    # run ahead of append_events() so what reaches silver is the cleaned frame.
+    #
+    # Order within the block is deliberate: rows are DROPPED first, then the
+    # survivors have attributes nulled. Doing it the other way round would spend
+    # work nulling fields on rows about to be discarded, and would make the
+    # logged counts misleading (an attribute nulled on a row that then vanished).
+    events_df, ev_no_id = _drop_rows_missing(events_df, EVENT_ID, "events", events_path)
+    mentions_df, mn_no_id = _drop_rows_missing(mentions_df, EVENT_ID, "mentions", mentions_path)
+    mentions_df, mn_no_url = _drop_rows_missing(
+        mentions_df, "MentionIdentifier", "mentions", mentions_path)
+
+    events_df, _ = clean_dateadded(events_df, events_path)
+    events_df, _ = clean_goldstein(events_df, events_path)
+    mentions_df, _ = clean_confidence(mentions_df, mentions_path)
+
+    rows_dropped = ev_no_id + mn_no_id + mn_no_url
 
     n_events = dropped = n_mentions = 0
     mentions_clean = None

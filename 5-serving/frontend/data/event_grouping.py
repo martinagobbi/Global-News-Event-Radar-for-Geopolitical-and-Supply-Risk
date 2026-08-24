@@ -21,17 +21,50 @@ def _date_value(value: Any) -> tuple[int, Any]:
             return (0, date.min)
 
 
-def _number(value: Any) -> int:
+# ── Null-tolerant keys ───────────────────────────────────────────────────────
+# Every measure below is nullable, so each key is a PAIR: (has_value, value).
+# Tuples compare left to right, so the flag decides first and sends "we do not
+# know" to the bottom whatever the value is. Two missing values compare equal and
+# fall through to the next tie-breaker.
+#
+# NOTE the sorts here pass reverse=True, so a HIGHER key sorts first. Present is
+# therefore flagged 1 and missing 0 — the opposite of the ascending convention in
+# the backend's postgres_store, and the reason the two files do not share these.
+def _confidence_key(value: Any) -> tuple[int, float]:
+    """Higher confidence first; missing last."""
     try:
-        return int(str(value).strip())
+        if value is None:
+            return (0, 0.0)
+        return (1, float(str(value).strip()))
     except (TypeError, ValueError):
-        return -1
+        return (0, 0.0)
 
-def _float_value(value: Any) -> float:
+
+def _goldstein_key(value: Any) -> tuple[int, float]:
+    """
+    More NEGATIVE Goldstein first — a worse event outranks a milder one — with
+    missing last. Negated here rather than at the call site so the (flag, value)
+    pair stays monotonic under reverse=True.
+    """
     try:
-        return float(str(value).strip())
+        if value is None:
+            return (0, 0.0)
+        return (1, -float(str(value).strip()))
     except (TypeError, ValueError):
-        return 0.0
+        return (0, 0.0)
+
+
+def _event_id_key(value: Any) -> tuple[int, str]:
+    """
+    The final tie-breaker, compared as a STRING.
+
+    GLOBALEVENTID is a string everywhere in this pipeline and is never coerced to
+    a number. The previous `int(...)` conversion mapped every non-numeric id to
+    -1, which silently collapsed all of them into one tie — and would do so for
+    every id at once the day GDELT introduces a letter.
+    """
+    text = "" if value is None else str(value).strip()
+    return (1, text) if text else (0, "")
 
 def _mention_set(event: dict) -> set[str]:
     return {
@@ -43,26 +76,30 @@ def _mention_set(event: dict) -> set[str]:
 
 def _leader_key(event: dict) -> tuple[Any, ...]:
     articles = event.get("articles", [])
-    max_confidence = _number(event.get("max_confidence"))
-    if max_confidence < 0:
-        max_confidence = max(
-            (_number(article.get("confidence")) for article in articles),
-            default=-1,
+    confidence = _confidence_key(event.get("max_confidence"))
+    if confidence[0] == 0:                       # not provided on the card itself
+        # Fall back to the best confidence among the card's articles. max() over
+        # the (flag, value) pairs picks a present value over any missing one for
+        # free, because (1, x) > (0, 0.0) for every x.
+        confidence = max(
+            (_confidence_key(a.get("confidence")) for a in articles),
+            default=(0, 0.0),
         )
     return (
-        max_confidence, # The leader is the one with the highest `confidence`
-        _date_value(event.get("event_date")), # If there's a tie, choose by recency of event
-        _date_value(event.get("date_added")), # Etc.
-        _number(event.get("global_event_id")), # Etc.
+        confidence,                              # highest confidence leads
+        _date_value(event.get("event_date")),    # tie -> most recent event date
+        _date_value(event.get("date_added")),    # tie -> most recently added
+        _event_id_key(event.get("global_event_id")),   # final tie-break, as text
     )
 
 
 def _merge_group(group: list[dict]) -> dict:
     leader = max(group, key=_leader_key)
-    leader_id = str(leader["global_event_id"])
+    leader_id = str(leader.get("global_event_id") or "")
     other_ids = sorted(
-        (str(event["global_event_id"]) for event in group if event is not leader),
-        key=_number,
+        (str(event.get("global_event_id") or "")
+         for event in group if event is not leader),
+        key=_event_id_key,               # STRING order — never coerced to int
         reverse=True,
     )
     merged = dict(leader)
@@ -81,10 +118,10 @@ def group_events(events: list[dict]) -> list[dict]:
     return sorted(
         cards,
         key=lambda event: (
-            _date_value(event.get("oldest_article_time")),
-            _date_value(event.get("event_date")),
-            -_float_value(event.get("goldstein")), # Stronger NEGATIVE Goldstein score takes priority
-            _number(event.get("global_event_id")),
+            _date_value(event.get("oldest_article_time")),   # coverage STARTED most recently (15-min-sharp precision)
+            _date_value(event.get("event_date")),            # tie -> most recent event date (day-sharp precision)
+            _goldstein_key(event.get("goldstein")),          # tie -> most NEGATIVE first
+            _event_id_key(event.get("global_event_id")),     # final tie-break, as text
         ),
         reverse=True,
     )

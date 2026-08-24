@@ -195,10 +195,57 @@ def _dedupe_by_title(articles: list[dict]) -> list[dict]:
     return out
 
 
+# ── Null-tolerant sort keys ──────────────────────────────────────────────────
+# Every measure a card is ranked by is now nullable, so each key is a PAIR:
+# (has_value, value). Python compares tuples left to right, so the flag decides
+# first and pushes missing values to one end regardless of what the value is.
+#
+# The flag is 0 for missing on an ASCENDING sort and 1 for missing on a
+# DESCENDING one, which in both cases puts "we do not know" LAST. Two rows that
+# are both missing compare equal on that measure and fall through to the next
+# tie-breaker, which is exactly the requested behaviour: a null confidence sends
+# a row to the bottom of confidence, and ties there are broken by tone as before.
+#
+# The final tie-breaker is the URL, which is the article's identity — a row
+# without one is dropped rather than ranked, because it cannot be addressed,
+# de-duplicated, or opened.
+def _desc_num(value):
+    """Key for a DESCENDING numeric sort. Missing sorts last."""
+    try:
+        if value is None:
+            return (1, 0.0)
+        return (0, -float(value))
+    except (TypeError, ValueError):
+        return (1, 0.0)
+
+
+def _asc_abs(value):
+    """Key for an ASCENDING sort on absolute magnitude. Missing sorts last."""
+    try:
+        if value is None:
+            return (1, 0.0)
+        return (0, abs(float(value)))
+    except (TypeError, ValueError):
+        return (1, 0.0)
+
+
 def _sort_and_cap(articles: list[dict], limit: int = 20) -> list[dict]:
-    """Confidence DESC, abs(MentionDocTone) ASC, GLOBALEVENTID ASC, capped at limit."""
-    articles.sort(key=lambda a: (-a["confidence"], abs(a["mention_doc_tone"]), abs(a["global_event_id"])))
-    return _dedupe_by_title(articles)[:limit]
+    """
+    Confidence DESC, abs(MentionDocTone) ASC, URL ASC, capped at limit.
+
+    Rows without a URL are DROPPED first: it is the last tie-breaker and the
+    article's identity, so a row missing it cannot be ordered deterministically
+    and could not be opened from the card anyway.
+
+    The URL is compared as a STRING. Confidence and tone are read through the
+    null-tolerant helpers above rather than by direct subscript, which also
+    raised `KeyError` whenever either column was absent.
+    """
+    ranked = [a for a in articles if str(a.get("url") or "").strip()]
+    ranked.sort(key=lambda a: (_desc_num(a.get("confidence")),
+                               _asc_abs(a.get("mention_doc_tone")),
+                               str(a.get("url"))))
+    return _dedupe_by_title(ranked)[:limit]
 
 
 def _oldest_article_time(articles: list[dict]):

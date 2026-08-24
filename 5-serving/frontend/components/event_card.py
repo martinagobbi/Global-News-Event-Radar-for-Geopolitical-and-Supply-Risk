@@ -5,6 +5,45 @@ import streamlit as st
 from components.tag_buttons import render_tag_buttons
 from data.user_store import get_current_user, remove_event_tag, set_event_tag
 
+# ── Nullable measures on a card ──────────────────────────────────────────────
+# Confidence score, Goldstein score and tone are Nullable end to end now:
+# validation nulls a value it cannot trust rather than discarding the row
+# or inventing a 0. A card must therefore be able to say "not available" —
+# an f-string would print the bare word "None", which reads like
+# a real measurement.
+_NO_TONE = "[No tone score available]"
+_NO_CONFIDENCE = "[No confidence score available]"
+_NO_GOLDSTEIN = "[No Goldstein score available]"
+
+
+def _tone_text(value) -> str:
+    """The tone as shown on a card, or an explicit not-available marker."""
+    if value is None:
+        return _NO_TONE
+    text = str(value).strip()
+    if text == "" or text.lower() in ("none", "nan", "null"):
+        return _NO_TONE
+    return text
+
+
+def _confidence_text(value) -> str:
+    """Confidence as `NN%`, or an explicit not-available marker."""
+    if value is None:
+        return _NO_CONFIDENCE
+    text = str(value).strip()
+    if text == "" or text.lower() in ("none", "nan", "null"):
+        return _NO_CONFIDENCE
+    return f"{text}%"
+
+def _goldstein_text(value) -> str:
+    """Goldstein score, or an explicit not-available marker."""
+    if value is None:
+        return _NO_GOLDSTEIN
+    text = str(value).strip()
+    if text == "" or text.lower() in ("none", "nan", "null"):
+        return _NO_GOLDSTEIN
+    return text
+
 PREVIEW_ARTICLES = 3
 
 
@@ -165,7 +204,7 @@ def render_event_card(event: dict, context: str = "main") -> None:
 
         meta = st.columns(2)
         meta[0].metric("Number of articles", articles_display)
-        meta[1].metric("Goldstein score", event["goldstein"])
+        meta[1].metric("Goldstein score", _goldstein_text(event.get("goldstein")))
 
         date_to_show = str(event["event_date"]).removesuffix(" 00:00:00")
 
@@ -183,8 +222,8 @@ def render_event_card(event: dict, context: str = "main") -> None:
                     st.caption("---------------------------------------------------------")
                 st.markdown(f"- [{_link_label(a)}]({a['url']})")
                 st.caption(
-                    f"Confidence: {a['confidence']}%       |"
-                    f"       Tone: {a['mention_doc_tone']}"
+                    f"Confidence: {_confidence_text(a.get('confidence'))}       |"
+                    f"       Tone: {_tone_text(a.get('mention_doc_tone'))}"
                 )
                 st.caption("---------------------------------------------------------")
 
@@ -200,10 +239,10 @@ def render_event_card(event: dict, context: str = "main") -> None:
                         key=f"article_selector_{event['global_event_id']}",
                     )
                     selected = article_labels[selected_label]
-                    st.link_button("Open selected article", selected["url"])
+                    st.link_button("Open this article", selected["url"])
                     st.caption(
-                        f"Confidence: {a['confidence']}%       |"
-                        f"       Tone: {a['mention_doc_tone']}"
+                        f"Confidence: {_confidence_text(selected.get('confidence'))}       |"
+                        f"       Tone: {_tone_text(selected.get('mention_doc_tone'))}"
                     )
         else:
             st.info("No related articles available for this event.")
