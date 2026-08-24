@@ -86,7 +86,7 @@ MAX_PAIR_ATTEMPTS = int(os.getenv("MAX_PAIR_ATTEMPTS", "3"))
 # stores take tens of seconds to recover from, plus margin. Deterministic
 # failures never reach this budget — they raise PermanentError and are set aside
 # on the first attempt.
-TRANSIENT_MAX_WAIT = int(os.getenv("TRANSIENT_MAX_WAIT", "600"))   # 10 minutes
+TRANSIENT_MAX_WAIT = int(os.getenv("TRANSIENT_MAX_WAIT", "250"))
 
 
 def _load_attempts() -> dict:

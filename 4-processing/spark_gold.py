@@ -746,9 +746,27 @@ def publish(processed_uids: list[str], incremental: bool = False) -> None:
         # omitting the column would blank it on every publish. recompute_user()
         # publishes without going through main.recompute_all(), which is the
         # caller that knows the real value, so there would be no one to restore it.
-        cur.execute("SELECT silver_watermark FROM pipeline_status LIMIT 1")
+        cur.execute("SELECT silver_watermark, timestamp_of_last_update "
+                    "FROM pipeline_status LIMIT 1")
         row = cur.fetchone()
         watermark = row[0] if row else None
+        previous_ts = row[1] if row else None
+
+        # An ERROR publish must NOT advance the clock. The dashboard renders this
+        # column as "not updated since ...", so stamping now() on a run that just
+        # reported a stalled pipeline makes the failure read as though it had
+        # only started this instant — the timestamp chases the present forever
+        # and never marks when data was last actually good.
+        #
+        # main.recompute_all() already passes postgres_writer.KEEP for this, but
+        # it writes AFTER this function, and KEEP preserves whatever is in the
+        # row — which is whatever this INSERT just put there. So the guard has to
+        # exist here too, or the one downstream is preserving a value this line
+        # already spoiled. recompute_user() publishes through here without going
+        # via recompute_all() at all, and has no other protection.
+        ts = (previous_ts if state == "ERROR" and previous_ts is not None
+              else datetime.now(timezone.utc).replace(tzinfo=None))
+
         cur.execute("DELETE FROM pipeline_status")
         cur.execute(
             "INSERT INTO pipeline_status "
@@ -758,9 +776,7 @@ def publish(processed_uids: list[str], incremental: bool = False) -> None:
             # TIMESTAMP (without time zone) column is converted using the
             # session's TimeZone and the offset then dropped, so the stored
             # instant would depend on server configuration.
-            {"s": state,
-             "t": datetime.now(timezone.utc).replace(tzinfo=None),
-             "w": watermark},
+            {"s": state, "t": ts, "w": watermark},
         )
         logger.info("pipeline_status set to %s (watermark %s)",
                     state, watermark or "unknown")

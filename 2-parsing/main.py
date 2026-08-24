@@ -47,7 +47,7 @@ mode a watermark exists to prevent:
       few seconds forever, and because slices are handled oldest-first, EVERY
       later slice is blocked behind it.
     * orphan sweep — a slice whose events and mentions files never both arrive can
-      never be published, so after SLICE_ORPHAN_MAX_AGE it is dead-lettered too
+      never be published, so after RAW_SLICE_ORPHAN_MAX_AGE it is dead-lettered too
       rather than accumulating on disk indefinitely.
     * bounded back-pressure — publishing waits for validation to drain
       `latest_files`, but if that has not happened within BACKPRESSURE_MAX_WAIT
@@ -67,8 +67,9 @@ Environment variables
     STATE_DIR                watermark location            (default /data/state)
     DEAD_LETTER_DIR          abandoned slices              (default /data/dead_letter)
     MAX_SLICE_ATTEMPTS       tries before dead-lettering   (default 3)
-    SLICE_ORPHAN_MAX_AGE     age at which a half-pair is abandoned (default 3600)
-    BACKPRESSURE_MAX_WAIT    wait before reporting a stalled consumer (default 1800)
+    RAW_SLICE_ORPHAN_MAX_AGE     age at which raw data is abandoned (default 1800)
+    PARSED_SLICE_ORPHAN_MAX_AGE  age at which parsed data left for validation is removed (default 720)
+    BACKPRESSURE_MAX_WAIT    wait before reporting a stalled consumer (default 600)
 """
 
 import csv
@@ -107,9 +108,10 @@ MAX_SLICE_ATTEMPTS    = int(os.getenv("MAX_SLICE_ATTEMPTS", "3"))   # log line o
 # See 3-validation_and_storage/main.py for the reasoning: a deterministic failure
 # is set aside at once (PermanentError), and a transient one is given a budget in
 # SECONDS, because a count cannot express "wait out a restart".
-TRANSIENT_MAX_WAIT    = int(os.getenv("TRANSIENT_MAX_WAIT", "600"))
-SLICE_ORPHAN_MAX_AGE  = int(os.getenv("SLICE_ORPHAN_MAX_AGE", str(60 * 60)))
-BACKPRESSURE_MAX_WAIT = int(os.getenv("BACKPRESSURE_MAX_WAIT", str(30 * 60)))
+TRANSIENT_MAX_WAIT    = int(os.getenv("TRANSIENT_MAX_WAIT", "250"))
+RAW_SLICE_ORPHAN_MAX_AGE  = int(os.getenv("RAW_SLICE_ORPHAN_MAX_AGE", str(30 * 60)))
+PARSED_SLICE_ORPHAN_MAX_AGE = int(os.getenv("PARSED_SLICE_ORPHAN_MAX_AGE", str(12 * 60)))
+BACKPRESSURE_MAX_WAIT = int(os.getenv("BACKPRESSURE_MAX_WAIT", str(10 * 60)))
 
 # slice_id -> monotonic time of its first TRANSIENT failure. In memory, unlike
 # state["attempts"], because a restart should hand a slice a fresh budget rather
@@ -259,13 +261,13 @@ def _ready_slices() -> list[tuple[str, Path | None, Path | None]]:
     return ready
  
  
-def _sweep_orphans() -> None:
+def _sweep_raw_orphans() -> None:
     """
     Dead-letter files that are sitting here unconsumed for far too long.
 
     This is now a backstop, not the handler for partial slices: singletons are
     published by _ready_slices(), so a lone file is normally consumed within one
-    scan. Anything still present after SLICE_ORPHAN_MAX_AGE is therefore stuck for
+    scan. Anything still present after RAW_SLICE_ORPHAN_MAX_AGE is therefore stuck for
     some other reason — an unreadable file that keeps failing, or a leftover from
     an interrupted run — and is set aside so it cannot accumulate on disk.
 
@@ -283,10 +285,45 @@ def _sweep_orphans() -> None:
         if sl is None:
             continue
         try:
+            age = now - p.stat().st_ctime
+        except OSError:
+            continue
+        if age > RAW_SLICE_ORPHAN_MAX_AGE:
+            _dead_letter(sl, [p], f"unconsumed for {age / 60:.0f} min")
+
+def _sweep_parsed_orphans() -> None:
+    """
+    Dead-letter files that were left for validation to find but never were.
+
+    If unremoved, the files can block the pipeline entirely.
+
+    ── Manifests are swept too ─────────────────────────────────────────────────
+    _slice_of() reads GDELT data filenames and returns None for a .slice.json,
+    so sweeping on it alone would carry the data files out and leave the manifest
+    behind. That is not a tidier version of the same jam, it is a worse one:
+    validation's list_files() finds the manifest, finds the files it names
+    missing, and returns nothing — every scan, forever, because the manifest it
+    is tripping over is the one file the sweep would never collect. The
+    directory then stays non-empty, so publishing stays blocked, which is the
+    exact deadlock this sweep exists to break.
+    """
+    if not LATEST_FILES_DIR.exists():
+        return
+
+    now = time.time()
+    for p in LATEST_FILES_DIR.iterdir():
+        if not p.is_file() or p.name.startswith("."):
+            continue
+        sl = _slice_of(p)
+        if sl is None and p.name.endswith(MANIFEST_SUFFIX):
+            sl = p.name[: -len(MANIFEST_SUFFIX)]
+        if sl is None:
+            continue
+        try:
             age = now - p.stat().st_mtime
         except OSError:
             continue
-        if age > SLICE_ORPHAN_MAX_AGE:
+        if age > PARSED_SLICE_ORPHAN_MAX_AGE:
             _dead_letter(sl, [p], f"unconsumed for {age / 60:.0f} min")
 
 
@@ -434,7 +471,8 @@ def main() -> None:
     reported_block = False
 
     while True:
-        _sweep_orphans()
+        _sweep_raw_orphans()
+        _sweep_parsed_orphans()
         published = False
         pairs = _ready_slices()                     # oldest slice first
 

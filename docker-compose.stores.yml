@@ -19,6 +19,23 @@
 services:
 
   # ── Coordination: 3-node ClickHouse Keeper ensemble (quorum) ──────────────
+  #
+  # ── Why every service here also mounts a tmpfs ───────────────────────────────
+  # An image's VOLUME instruction is a standing order: if compose does not mount
+  # that path, Docker invents an ANONYMOUS volume for it — a new one per created
+  # container, named with 64 hex characters, kept by `docker compose down` (only
+  # `down -v` drops it). Those accumulate silently and forever.
+  #
+  # clickhouse-keeper declares BOTH /var/lib/clickhouse-keeper and
+  # /var/lib/clickhouse. Only the first holds anything: keeper_config.xml points
+  # log_storage_path and snapshot_storage_path there, and the second is left as
+  # an empty skeleton (verified: zero files under it, all 7 state files under the
+  # first). A tmpfs satisfies the VOLUME instruction so no anonymous volume is
+  # created, and nothing is lost because there is nothing there to lose.
+  #
+  # The same reasoning covers mongo's /data/configdb below. The rule for this
+  # file: if an image declares a VOLUME, this file must mount SOMETHING at it —
+  # a named volume when the data matters, a tmpfs when it does not.
   clickhouse-keeper-1:
     image: clickhouse/clickhouse-keeper:24.3
     container_name: pipeline_ch_keeper_1
@@ -26,6 +43,8 @@ services:
     volumes:
       - ./clickhouse/${CH_KEEPER1_CONFIG:-keeper-1.local.xml}:/etc/clickhouse-keeper/keeper_config.xml:ro
       - keeper_1_data:/var/lib/clickhouse-keeper
+    tmpfs:
+      - /var/lib/clickhouse
     networks: [pipeline_network]
 
   clickhouse-keeper-2:
@@ -36,6 +55,8 @@ services:
     volumes:
       - ./clickhouse/keeper-2.xml:/etc/clickhouse-keeper/keeper_config.xml:ro
       - keeper_2_data:/var/lib/clickhouse-keeper
+    tmpfs:
+      - /var/lib/clickhouse
     networks: [pipeline_network]
 
   clickhouse-keeper-3:
@@ -46,6 +67,8 @@ services:
     volumes:
       - ./clickhouse/keeper-3.xml:/etc/clickhouse-keeper/keeper_config.xml:ro
       - keeper_3_data:/var/lib/clickhouse-keeper
+    tmpfs:
+      - /var/lib/clickhouse
     networks: [pipeline_network]
 
   # ── Silver store: 2 shards × 3 replicas (6 ClickHouse nodes) ──────────────
@@ -160,6 +183,11 @@ services:
     command: ["--replSet", "rs0", "--bind_ip_all"]
     volumes:
       - mongo1_data:/data/db
+    # mongo:7 declares /data/configdb as well as /data/db. It holds config-server
+    # state, which a plain replica-set member never writes (verified: empty), but
+    # the VOLUME instruction stands regardless — see the keeper note above.
+    tmpfs:
+      - /data/configdb
     ports:
       - "${MONGO1_PUBLISH:-27017}:27017"
     networks: [pipeline_network]
@@ -172,6 +200,8 @@ services:
     command: ["--replSet", "rs0", "--bind_ip_all"]
     volumes:
       - mongo2_data:/data/db
+    tmpfs:
+      - /data/configdb
     ports:
       - "${MONGO2_PUBLISH:-27018}:27017"
     networks: [pipeline_network]
@@ -184,6 +214,8 @@ services:
     command: ["--replSet", "rs0", "--bind_ip_all"]
     volumes:
       - mongo3_data:/data/db
+    tmpfs:
+      - /data/configdb
     ports:
       - "${MONGO3_PUBLISH:-27019}:27017"
     networks: [pipeline_network]
@@ -205,6 +237,13 @@ services:
     container_name: pipeline_mongo_init
     depends_on: [mongo1]
     restart: "no"
+    # This one never runs a server — it only shells out to mongosh — so BOTH of
+    # mongo:7's declared volumes are dead weight here. Left unmounted it was the
+    # worst offender in the file: two fresh anonymous volumes on every single
+    # `up`, because a one-shot container is re-created every time.
+    tmpfs:
+      - /data/db
+      - /data/configdb
     networks: [pipeline_network]
     environment:
       MONGO_MEMBERS: ${MONGO_MEMBERS:-1}

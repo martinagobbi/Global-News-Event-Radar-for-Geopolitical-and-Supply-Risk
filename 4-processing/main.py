@@ -251,8 +251,9 @@ def recompute_all() -> dict:
         # user_articles, so nothing can newly have become an orphan.
         n_orphans = 0 if since else _sweep_orphans()
         state = read_pipeline_status().get("state", "OK")
+        ts = postgres_writer.KEEP if state == "ERROR" else datetime.now(timezone.utc)
         postgres_writer.write_pipeline_status(
-            state, datetime.now(timezone.utc), watermark=watermark)
+            state, ts, watermark=watermark)
     return {"articles": result.get("articles", 0), "orphans_removed": n_orphans,
             "users": result.get("users", 0), "pipeline_status": state}
 

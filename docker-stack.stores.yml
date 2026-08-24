@@ -98,6 +98,18 @@ services:
   # Co-located with ClickHouse s1r1/s1r2/s1r3. A different storage system on the
   # same machine is fine — what must never share a machine is two nodes of the
   # SAME system, and these three are on three different ones.
+  #
+  # ── tmpfs below, same reasoning as docker-compose.stores.yml ────────────────
+  # clickhouse-keeper:24.3 declares TWO volumes: /var/lib/clickhouse-keeper
+  # (mapped above — Raft log + snapshots really live there) and /var/lib/clickhouse
+  # (unmapped — an empty skeleton this image never writes to). Left unmounted,
+  # Swarm invents a fresh anonymous volume for it on every task, same as plain
+  # Compose does. A tmpfs satisfies the image's VOLUME instruction without
+  # creating one. This does NOT compete with the 512M memory limit below: a tmpfs
+  # costs nothing until written to, and real writes are charged against the same
+  # cgroup limit the container already has — not a separate reservation, and not
+  # bounded by the (host-RAM-derived, therefore irrelevant) size tmpfs reports by
+  # default. Since nothing is ever written here, the effect is exactly zero.
   clickhouse-keeper-1:
     hostname: clickhouse-keeper-1
     image: clickhouse/clickhouse-keeper:24.3
@@ -105,6 +117,7 @@ services:
       - source: ch_keeper_1
         target: /etc/clickhouse-keeper/keeper_config.xml
     volumes: [keeper_1_data:/var/lib/clickhouse-keeper]
+    tmpfs: [/var/lib/clickhouse]
     networks: [pipeline_network]
     deploy:
       <<: *ch-deploy
@@ -121,6 +134,7 @@ services:
       - source: ch_keeper_2
         target: /etc/clickhouse-keeper/keeper_config.xml
     volumes: [keeper_2_data:/var/lib/clickhouse-keeper]
+    tmpfs: [/var/lib/clickhouse]
     networks: [pipeline_network]
     deploy:
       <<: *ch-deploy
@@ -137,6 +151,7 @@ services:
       - source: ch_keeper_3
         target: /etc/clickhouse-keeper/keeper_config.xml
     volumes: [keeper_3_data:/var/lib/clickhouse-keeper]
+    tmpfs: [/var/lib/clickhouse]
     networks: [pipeline_network]
     deploy:
       <<: *ch-deploy
@@ -287,11 +302,16 @@ services:
   # One member per machine, on store4/5/6. All three advertise plain service
   # names now (MONGO_MEMBER_* in .env.intended), because the overlay resolves
   # them everywhere — the old arrangement had to advertise host:port pairs.
+  #
+  # mongo:7 also declares /data/configdb (config-server state; a plain replica
+  # member never writes there — verified empty). tmpfs, same reasoning as
+  # clickhouse-keeper above, so Swarm does not invent an anonymous volume for it.
   mongo1:
     hostname: mongo1
     image: mongo:7
     command: ["--replSet", "rs0", "--bind_ip_all"]
     volumes: [mongo1_data:/data/db]
+    tmpfs: [/data/configdb]
     networks: [pipeline_network]
     deploy:
       <<: *ch-deploy
@@ -306,6 +326,7 @@ services:
     image: mongo:7
     command: ["--replSet", "rs0", "--bind_ip_all"]
     volumes: [mongo2_data:/data/db]
+    tmpfs: [/data/configdb]
     networks: [pipeline_network]
     deploy:
       <<: *ch-deploy
@@ -320,6 +341,7 @@ services:
     image: mongo:7
     command: ["--replSet", "rs0", "--bind_ip_all"]
     volumes: [mongo3_data:/data/db]
+    tmpfs: [/data/configdb]
     networks: [pipeline_network]
     deploy:
       <<: *ch-deploy
@@ -336,6 +358,12 @@ services:
   mongo-init:
     image: mongo:7
     networks: [pipeline_network]
+    # This one never runs mongod — it only shells out to mongosh — so BOTH of
+    # mongo:7's declared volumes (/data/db, /data/configdb) are dead weight.
+    # Unmounted, this was the worst offender: a fresh service task is created on
+    # every `docker stack deploy` re-run, so it leaked two anonymous volumes
+    # each time.
+    tmpfs: [/data/db, /data/configdb]
     environment:
       MONGO_MEMBERS: ${MONGO_MEMBERS:-3}
       MONGO_MEMBER_0: ${MONGO_MEMBER_0:-mongo1:27017}

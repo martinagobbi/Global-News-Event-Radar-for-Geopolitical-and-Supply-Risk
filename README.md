@@ -11,11 +11,14 @@ Two modes are in place: testing mode and intended mode. **Only testing mode can 
 ### Startup
 
 ```bash
+# Steps 1 through 5 below can be run as one line, separated with "&&"'s like so:
+docker compose --env-file .env.testing -f docker-compose.stores.yml up -d && docker compose --env-file .env.testing up -d --build && ./bootstrap/silver_snapshot.sh restore && docker compose -f 5-serving/docker-compose.serving.yml up --build
+
 # 1. Stores
 docker compose --env-file .env.testing -f docker-compose.stores.yml up -d
 
 # 2. Pipeline (Ingestion; Parsing; Validation and Storage; Processing; Serving Backend)
-# It may mention "orphans", and that's fine: those are intended-mode versions of what you will be opening. They need to stay in place in case intended mode is every run, but intended mode is too heavy to work on one machine.
+# Especially if running the code in this README multiple times, this may mention "orphans", and that's fine: those are idempotently-created intended-mode versions of what you will be opening. They need to stay in place in case intended mode is every run, but intended mode is too heavy to work on one machine.
 # NOTE: This step now includes an automated one-shot "seeder" container. It will wait for the backend to be ready and automatically create the three test profiles idempotently. 
 docker compose --env-file .env.testing up -d --build
 
@@ -31,37 +34,61 @@ docker compose -f 5-serving/docker-compose.serving.yml up --build
 # 5. You may then view the radar's UI via this link:
 # http://localhost:8501
 
-# 6. You may then log in with one of these test profiles:
-# |For login: Username       |For login: Password |FYI: Supply chain                   |FYI: Territories       |
-# |--------------------------|--------------------|------------------------------------|-----------------------|
-# | radar_electronics        | chips2026          | Semiconductors and electronics     | Asia-Pacific          |
-# | radar_pharma             | vials2026          | Pharmaceuticals and biologics      | Europe                |
-# | radar_agrifood           | grain2026          | Agri-food commodities              | Americas and Africa   |
+# 6. You may then log in with one of these test profiles, each of which has different supply-chain-related preferences.
+# |For login: Username       |For login: Password |FYI: Territories       |
+# |--------------------------|--------------------|-----------------------|
+# | radar_electronics        | chips2026          | Asia-Pacific          |
+# | radar_pharma             | vials2026          | Europe                |
+# | radar_agrifood           | grain2026          | Americas and Africa   |
 ```
 
 Here in testing mode, backend machines and frontend machines are the same one machine, but these steps are still kept separate to keep the production-level design (to also have distribution across machines, see intended mode below).
 
-ONLY IF NEEDED: Rebuilding the 30-day test seed:
+### ONLY IF NEEDED: Rebuilding the 30-day test seed
+
 ``` bash
-# REQUIRES ingestion, parsing, and validation to be on first. (So, first perform steps 1 and 2 of Startup)
+# REQUIRES ingestion, parsing, and validation to be on first. (So, first perform at least steps 1 and 2 of Startup)
+
+# Steps 1 through 6 below as one line:
+docker compose --env-file .env.testing stop ingestion parsing validation && ./bootstrap/silver_snapshot.sh wipe && ./bootstrap/silver_snapshot.sh trim 20260727171500 && ./bootstrap/silver_snapshot.sh export && docker compose --env-file .env.testing start ingestion parsing validation
+
+# 1.
 docker compose --env-file .env.testing stop ingestion parsing validation  # stop live writes
+
+# 2.
 ./bootstrap/silver_snapshot.sh wipe
-ENRICH=1 docker compose --env-file .env.testing -f docker-compose.bootstrap.yml run --rm bootstrap # WARNING: enrichment makes it take hours to download the full 30 days --- you might want to wrap this command: `caffeinate -is -c 'ENRICH=1 docker compose --env-file .env.testing -f docker-compose.bootstrap.yml run --rm bootstrap'`.
+
+# 3.
+ENRICH=1 docker compose --env-file .env.testing -f docker-compose.bootstrap.yml run --rm bootstrap # WARNING: enrichment makes it take hours to download the full 30 days --- you might want to wrap this command: `caffeinate -is env ENRICH=1 docker compose --env-file .env.testing -f docker-compose.bootstrap.yml run --rm bootstrap`.
+
+# 4.
 ./bootstrap/silver_snapshot.sh trim 20260727171500   # the last slice in the release
+
+# 5.
 ./bootstrap/silver_snapshot.sh export
-# Once the seed is created, you can run Startup steps 3 onwards.
+
+# 6.
+docker compose --env-file .env.testing start ingestion parsing validation  # re-start live writes
+
+# 7.
+# To ensure everything is operational again, you may continue from point 3 of Startup (not of this list of points!) onwards.
 ```
 
 ### Shutdown
 
-OPTIONAL: Reset silver so the next startup can restore the seed cleanly
+**OPTIONAL**: Reset silver so the next startup can restore the seed cleanly
 ``` bash
+# All steps below as one line:
+docker compose --env-file .env.testing stop ingestion parsing validation && ./bootstrap/silver_snapshot.sh wipe && docker exec pipeline_processing python3 -c "import main; main.recompute_all()"
+
 docker compose --env-file .env.testing stop ingestion parsing validation        # Stops live data from being ingested
+
 ./bootstrap/silver_snapshot.sh wipe                                             # Removes all silver data and prevents repeated restores accumulating physical duplicates
+
 docker exec pipeline_processing python3 -c "import main; main.recompute_all()"  # Recomputes gold from the now-empty silver layer (can take a few minutes, but this is indeed not an action the system would normally perform under any circumstance)
 ```
 
-NOT OPTIONAL: shutdown procedure (that does not destroy the volumes, so user preferences and data for users stay intact)
+**NOT OPTIONAL**: shutdown procedure (that does not destroy the volumes, so user preferences and data for users stay intact)
 ``` bash
 docker compose -f 5-serving/docker-compose.serving.yml down && docker compose --env-file .env.testing down && docker compose --env-file .env.testing -f docker-compose.stores.yml down
 ```

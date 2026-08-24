@@ -419,19 +419,17 @@ def read_silver_watermark() -> str | None:
         return None
 
 
-def write_pipeline_status(status: str, ts: datetime | None = None,
+def write_pipeline_status(status: str, ts: datetime | None | object = None,
                           watermark: str | None | object = KEEP) -> None:
     """
     Replace pipeline_status with a single (status, timestamp, watermark) row.
-
-    `watermark` defaults to the KEEP sentinel, meaning "carry the stored value
-    forward". That is not the same as None, and the distinction matters: this
-    table holds one row and is rewritten rather than updated, so a plain None
-    default would silently erase the watermark on every status write made by a
-    caller that does not happen to know it — which is most of them.
     """
     with _connect() as conn:
         cur = conn.cursor()
+        if ts is KEEP:
+            cur.execute("SELECT timestamp_of_last_update FROM pipeline_status LIMIT 1")
+            row = cur.fetchone()
+            ts = row[0] if row else datetime.now(timezone.utc)
         if watermark is KEEP:
             cur.execute("SELECT silver_watermark FROM pipeline_status LIMIT 1")
             row = cur.fetchone()
