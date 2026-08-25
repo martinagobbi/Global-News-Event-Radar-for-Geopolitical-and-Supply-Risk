@@ -13,9 +13,17 @@
 # and builds the gold itself, exactly as it does for live data.
 #
 # Useful settings:
-#   LIMIT_SLICES=200   load only the newest N slices (0 = all)
-#   ENRICH=1           also scrape article titles/keywords (hours, not minutes)
-#   SOURCE_DIR         change the folder that is scanned (inside the container)
+#   LIMIT_SLICES=200            load only the newest N slices (0 = all)
+#   ENRICH=1                    also scrape article titles/keywords (hours, not minutes)
+#   SOURCE_DIR                  change the folder that is scanned (inside the container)
+#   SPARK_MASTER=local[*]       default; distributes across cores on THIS machine.
+#                                See bulk_load.py's module docstring before pointing
+#                                this at spark://spark-master:7077 — it will fail
+#                                today against the generic spark-worker image.
+#   SPARK_BULK_LOAD_PARTITIONS  how many slices run at once (default 4) — the
+#                                real parallelism knob for this script; unrelated
+#                                to SPARK_WORKERS/SPARK_WORKER_CORES, which govern
+#                                the resident silver -> gold job, not this one.
 #
 # Timings are appended to dev_tool_for_time_gauging/bulk_load_report.csv.
 # ═════════════════════════════════════════════════════════════════════════════
@@ -40,6 +48,8 @@ services:
       ENRICH_TIMEOUT_SECONDS: ${ENRICH_TIMEOUT_SECONDS:-600}
       LIMIT_SLICES: ${LIMIT_SLICES:-0}
       BATCH_SLICES: ${BATCH_SLICES:-50}
+      SPARK_MASTER: ${SPARK_MASTER:-local[*]}
+      SPARK_BULK_LOAD_PARTITIONS: ${SPARK_BULK_LOAD_PARTITIONS:-4}
       CLICKHOUSE_HOST: ${CLICKHOUSE_HOST:-clickhouse-s1r1}
       CLICKHOUSE_PORT: ${CLICKHOUSE_PORT:-9000}
       CLICKHOUSE_CLUSTER: gnews_cluster
