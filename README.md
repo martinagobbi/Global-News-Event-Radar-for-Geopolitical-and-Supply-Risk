@@ -46,9 +46,9 @@ docker compose -f 5-serving/docker-compose.serving.yml up --build
 
 Here in testing mode, backend machines and frontend machines are the same one machine, but these steps are still kept separate to keep the production-level design (to also have distribution across machines, see intended mode below).
 
-### ONLY IF NEEDED: Rebuilding the 30-day test seed
+### ONLY FOR THIS PIPELINE'S DEVELOPERS, NOT NEEDED FOR TESTING: Rebuilding the 30-day test seed
 
-This loads some example data for testing mode.
+This loads some example data for testing mode. It is already going to be seeded by default, so that Startup can use the seed.
 
 ``` bash
 # REQUIRES ingestion, parsing, and validation to be on first. (So, first perform at least steps 1 and 2 of Startup)

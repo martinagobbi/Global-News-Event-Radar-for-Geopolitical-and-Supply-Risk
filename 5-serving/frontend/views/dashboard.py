@@ -32,6 +32,15 @@ import time
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
+@st.cache_resource
+def get_app_start_time():
+    """
+    Records the time the app first started running. 
+    Because it's cached as a resource, this only executes once for the 
+    lifetime of the Streamlit server / Docker container.
+    """
+    return time.time()
+
 STATUS_POLL_SECONDS  = 30
 DATA_REFRESH_SECONDS = 900   # 15 minutes — aligned with ingestion cadence
 
@@ -77,7 +86,7 @@ if status_code == "503-POSTGRES":
     )
 elif status_code == "503-MONGO":
     st.warning(
-        "🟠 **503 — Profile service unavailable.** "
+        f"🟠 **503 — Please wait {STATUS_POLL_SECONDS} seconds for the profile service to become available.** "
         + system_status.get(
             "message",
             "The backend could not reach the MongoDB database after multiple attempts.",
@@ -85,22 +94,24 @@ elif status_code == "503-MONGO":
         + " Events may still be visible, but your tags and saved preferences "
         "might not load or save correctly until this is resolved."
     )
-elif system_status.get("status") == "ERROR":
-    last_update_raw = system_status.get("timestamp_of_last_update")
-    if last_update_raw:
-        try:
-            last_update_dt = datetime.fromisoformat(str(last_update_raw).replace("Z", "+00:00")).astimezone(tz)
-            last_update_str = f"{last_update_dt:%Y-%m-%d %H:%M} {last_update_dt:%Z}"
-        except ValueError:
-            last_update_str = str(last_update_raw)
-    else:
-        last_update_str = "an unknown time"
 
-    st.error(
-        "The system has been having technical difficulties since "
-        f"{last_update_str}."
-        " (This does not necessarily mean that newly-ingested data will not appear on this dashboard.)"
-    )
+# The part below was for debugging purposes. It is now unreliable, and too generic at any rate. Commenting out.
+#elif system_status.get("status") == "ERROR":
+#    last_update_raw = system_status.get("timestamp_of_last_update")
+#    if last_update_raw:
+#        try:
+#            last_update_dt = datetime.fromisoformat(str(last_update_raw).replace("Z", "+00:00")).astimezone(tz)
+#            last_update_str = f"{last_update_dt:%Y-%m-%d %H:%M} {last_update_dt:%Z}"
+#        except ValueError:
+#            last_update_str = str(last_update_raw)
+#    else:
+#        last_update_str = "an unknown time"
+#
+#    st.error(
+#        "The system has been having technical difficulties since "
+#        f"{last_update_str}."
+#        " (This does not necessarily mean that newly-ingested data will not appear on this dashboard.)"
+#    )
 
 # ── Preferences just changed: the pool is being rebuilt ────────────────────
 if recompute_pending(live_gold_version):
@@ -120,7 +131,8 @@ with header_right:
 
 # ── Silver watermark ───────────────────────────────────────────────────────
 _SLICE = 15 * 60
-_SEED_LAST_SLICE = "20260727171500"
+_SEED_FIRST_SLICE = "20260627171500"
+_SEED_LAST_SLICE  = "20260727171500"
 _watermark = system_status.get("silver_watermark")
 if _watermark:
     try:
@@ -130,25 +142,64 @@ if _watermark:
         _expected = _now.replace(minute=(_now.minute // 15) * 15,
                                  second=0, microsecond=0)
         _lag = max(0, int((_expected - _wm_dt).total_seconds() // _SLICE))
-        _light = "🟢" if _lag <= 1 else ("🟡" if _lag == 2 else "🔴")
-        _behind = ("up to date" if _lag == 0 else
-                   f"{_lag} slice{'s' if _lag > 1 else ''} behind")
 
-        _wm_local = _wm_dt.astimezone(tz)
-        _expected_local = _expected.astimezone(tz)
-        _tz_name = _wm_local.strftime("%Z")
+        if _SEED_FIRST_SLICE <= _watermark <= _SEED_LAST_SLICE:
+            # Calculate elapsed time in minutes since the container/app started
+            elapsed_minutes = (time.time() - get_app_start_time()) / 60
 
-        st.caption(
-            f"{_light} Newest data held: **{_wm_local:%Y-%m-%d %H:%M} {_tz_name}** "
-            f"({_behind}). Latest GDELT slice now: {_expected_local:%Y-%m-%d %H:%M} {_tz_name}. {((_lag >= 8) and (_watermark <= _SEED_LAST_SLICE))*'**THIS IS THE SHIPPED SEED FOR TESTING** — live ingestion has not delivered a slice yet. Live data arrives every ~15 minutes (the rate at which GDELT publishes them) starting when this pipeline starts, and this line moves to today when it does.'}"
-        )
-        if (_lag >= 8) and (_watermark > _SEED_LAST_SLICE):
+            if elapsed_minutes > 30:
+                st.caption(
+                    "🔴 **Test seed data**. "
+                    "This is the shipped data for testing. Live ingestion "
+                    "has not delivered a slice yet. Live data arrives every "
+                    "~15 minutes (the rate at which GDELT publishes this data) "
+                    "starting when this pipeline starts, and this line moves to "
+                    "today when it does."
+                )
+            elif elapsed_minutes > 15:
+                st.caption(
+                    "🟡 **Test seed data**. "
+                    "This is the shipped data for testing. Live ingestion "
+                    "has not delivered a slice yet. Live data arrives every "
+                    "~15 minutes (the rate at which our source GDELT publishes this data) "
+                    "starting when this pipeline starts, and this line moves to "
+                    "today when it does."
+                )
+            else:
+                st.caption(
+                    "🟢 **Test seed data**. "
+                    "This is the shipped data for testing. Live ingestion "
+                    "has not delivered a slice yet. Live data arrives every "
+                    "~15 minutes (the rate at which GDELT publishes this data) "
+                    "starting when this pipeline starts, and this line moves to "
+                    "today when it does."
+                )
+        else:
+            _light = "🟢" if _lag <= 1 else ("🟡" if _lag == 2 else "🔴")
+            _behind = ((_lag == 0)*"up to date" +
+                       (_lag == 1)*"latest slice scheduled to be displayable in a few minutes" +
+                       (_lag > 1)*f"{_lag} slices behind")
+
+            _wm_local = _wm_dt.astimezone(tz)
+            _expected_local = _expected.astimezone(tz)
+            _tz_name = _wm_local.strftime("%Z")
+
             st.caption(
-                f"Live data reached {_wm_local:%Y-%m-%d %H:%M} {_tz_name} and then "
-                "stopped. Ingestion, parsing, validation and processing are "
-                "all worth checking — a machine that slept, or a processing "
-                "layer that cannot publish, both look like this."
+                f"{_light} Newest data held: **{_wm_local:%Y-%m-%d %H:%M} {_tz_name}** ({_behind})."
             )
+            st.caption(
+                " You should see the timestamp above being updated every 15 minutes: the rate at which"
+                " GDELT (our source) publishes the latest news."
+                #" GDELT publishes new data every quarter of an hour (:00, :15, :30, :45)."
+                #f" Latest GDELT slice now: {_expected_local:%Y-%m-%d %H:%M} {_tz_name}."
+            )
+            if _lag >= 8:
+                st.caption(
+                    f"Live data reached {_wm_local:%Y-%m-%d %H:%M} {_tz_name} and then "
+                    "stopped. Ingestion, parsing, validation and processing are "
+                    "all worth checking — a machine that slept, or a processing "
+                    "layer that cannot publish, both look like this."
+                )
     except ValueError:
         st.caption(f"Silver watermark: `{_watermark}` (unrecognised format)")
 else:
