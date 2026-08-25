@@ -18,17 +18,19 @@ def _render_event_table(events: list[dict]) -> None:
         for event in events
     ]
 
-    st.dataframe(
-        rows,
-        hide_index=True,
-        use_container_width=True,
-        column_config={
-            "Top source": st.column_config.LinkColumn(
-                "Top source",
-                display_text="Open",
-            ),
-        },
-    )
+    # This collapses ONLY the table, leaving the cards below it fully visible
+    with st.expander("View event table", expanded=False):
+        st.dataframe(
+            rows,
+            hide_index=True,
+            use_container_width=True,
+            column_config={
+                "Top source": st.column_config.LinkColumn(
+                    "Top source",
+                    display_text="Open",
+                ),
+            },
+        )
 
 
 def render_briefing(

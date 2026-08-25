@@ -240,10 +240,12 @@ summary      = st.session_state.get("cached_summary", [])
 
 # ── Map ────────────────────────────────────────────────────────────────────
 st.subheader("Heatmap")
-render_heatmap(
-    summary,
-    profile.get("territories", []),
-)
+
+with st.expander("View heatmap", expanded=False):
+    render_heatmap(
+        summary,
+        profile.get("territories", []),
+    )
 
 legend_col, status_col = st.columns(2)
 
@@ -287,7 +289,6 @@ if not events:
     else:
         render_no_matches_notice()
 
-# The older_events parameter is now removed
 render_briefing(events, selected_countries=profile.get("territories", []))
 
 # ── Polling loop ───────────────────────────────────────────────────────────
