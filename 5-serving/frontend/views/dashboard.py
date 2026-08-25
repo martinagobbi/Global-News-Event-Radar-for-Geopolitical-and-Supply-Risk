@@ -97,8 +97,9 @@ elif system_status.get("status") == "ERROR":
         last_update_str = "an unknown time"
 
     st.error(
-        "Due to technical difficulties, this dashboard has not been updated with the latest events since "
+        "The system has been having technical difficulties since "
         f"{last_update_str}."
+        " (This does not necessarily mean that newly-ingested data will not appear on this dashboard.)"
     )
 
 # ── Preferences just changed: the pool is being rebuilt ────────────────────

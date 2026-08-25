@@ -18,8 +18,10 @@
 #   SOURCE_DIR                  change the folder that is scanned (inside the container)
 #   SPARK_MASTER=local[*]       default; distributes across cores on THIS machine.
 #                                See bulk_load.py's module docstring before pointing
-#                                this at spark://spark-master:7077 — it will fail
-#                                today against the generic spark-worker image.
+#                                this at spark://spark-master:7077 — this bootstrapping
+#                                is intended only to show some data in testing mode,
+#                                hence the one-machine configuration is almost intrinsic
+#                                to it.
 #   SPARK_BULK_LOAD_PARTITIONS  how many slices run at once (default 4) — the
 #                                real parallelism knob for this script; unrelated
 #                                to SPARK_WORKERS/SPARK_WORKER_CORES, which govern
@@ -57,8 +59,7 @@ services:
     volumes:
       # RELEASE_SOURCE is the folder of ZIPs. The default reads them straight from
       # the working tree, which is right on Linux. On macOS, see the note below:
-      # set it to a named volume instead, or the loader spends longer listing the
-      # files than loading them.
+      # set it to a named volume instead, or the loader will spend a very long time listing the files.
       - ${RELEASE_SOURCE:-./data/release}:/source:ro
       - ./dev_tool_for_time_gauging:/report      # where the timing report lands
     networks:

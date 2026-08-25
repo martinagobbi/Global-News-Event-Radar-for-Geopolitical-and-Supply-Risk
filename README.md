@@ -11,6 +11,9 @@ Two modes are in place: testing mode and intended mode. **Only testing mode can 
 ### Startup
 
 ```bash
+# REQUIRES to have Docker up and running.
+# Preferrably, you may set "Settings -> Resources -> Advanced -> Resource Allocation -> Memory limit" to at least 6GB
+
 # Steps 1 through 5 below can be run as one line, separated with "&&"'s like so:
 docker compose --env-file .env.testing -f docker-compose.stores.yml up -d && docker compose --env-file .env.testing up -d --build && ./bootstrap/silver_snapshot.sh restore && docker compose -f 5-serving/docker-compose.serving.yml up --build
 
@@ -45,6 +48,8 @@ Here in testing mode, backend machines and frontend machines are the same one ma
 
 ### ONLY IF NEEDED: Rebuilding the 30-day test seed
 
+This loads some example data for testing mode.
+
 ``` bash
 # REQUIRES ingestion, parsing, and validation to be on first. (So, first perform at least steps 1 and 2 of Startup)
 
@@ -66,10 +71,13 @@ caffeinate -is bash -c "docker compose --env-file .env.testing stop ingestion pa
 # All steps below as one line:
 docker compose --env-file .env.testing stop ingestion parsing validation && ./bootstrap/silver_snapshot.sh wipe && docker exec pipeline_processing python3 -c "import main; main.recompute_all()"
 
+# 1.
 docker compose --env-file .env.testing stop ingestion parsing validation        # Stops live data from being ingested
 
+# 2.
 ./bootstrap/silver_snapshot.sh wipe                                             # Removes all silver data and prevents repeated restores accumulating physical duplicates
 
+# 3.
 docker exec pipeline_processing python3 -c "import main; main.recompute_all()"  # Recomputes gold from the now-empty silver layer (can take a few minutes, but this is indeed not an action the system would normally perform under any circumstance)
 ```
 
