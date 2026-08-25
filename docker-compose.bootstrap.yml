@@ -6,7 +6,7 @@
 #
 #     docker compose -f docker-compose.bootstrap.yml run --rm bootstrap
 #
-# It reads every *.export.CSV.zip / *.mentions.CSV.zip found under ./data/raw
+# It reads every *.export.CSV.zip / *.mentions.CSV.zip found under ./data/release
 # (searched recursively), applies the same filters the live pipeline applies, and
 # writes silver through the validation layer's own Storage class. It does NOT
 # write gold: the processing layer's watermark trigger notices silver has grown

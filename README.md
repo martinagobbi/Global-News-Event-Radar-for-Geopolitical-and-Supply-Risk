@@ -50,7 +50,10 @@ Here in testing mode, backend machines and frontend machines are the same one ma
 
 # 1.
 # WARNING: this command can take a while, because it downloads at a much greater pace than the pipeline normally would (30 days of data rather than 15 minutes of it!). It might keep your computer awake for a long time unless you stop the process or close the computer.
-caffeinate -is bash -c "docker compose --env-file .env.testing stop ingestion parsing validation && ./bootstrap/silver_snapshot.sh wipe && env ENRICH=1 RELEASE_SOURCE=gdelt_release docker compose --env-file .env.testing -f docker-compose.bootstrap.yml run --rm bootstrap && ./bootstrap/silver_snapshot.sh trim 20260727171500 && ./bootstrap/silver_snapshot.sh export && docker compose --env-file .env.testing start ingestion parsing validation"
+caffeinate -is bash -c "docker compose --env-file .env.testing stop ingestion parsing validation && ./bootstrap/silver_snapshot.sh wipe && env ENRICH=1 docker compose --env-file .env.testing -f docker-compose.bootstrap.yml run --rm --build bootstrap && ./bootstrap/silver_snapshot.sh trim 20260727171500 && ./bootstrap/silver_snapshot.sh export && docker compose --env-file .env.testing start ingestion parsing validation"
+# If available in the present `data` Docker volume, can add `RELEASE_SOURCE=gdelt_release` right after `ENRICH=1`
+# (strongly recommended on macOS: a bind mount of ./data/release takes >25 min
+#  just to LIST the 5,762 ZIPs, versus 0.04 s from the named volume.)
 
 # 2.
 # To ensure everything is operational again, you may continue from point 3 of Startup (not of this list of points!) onwards.

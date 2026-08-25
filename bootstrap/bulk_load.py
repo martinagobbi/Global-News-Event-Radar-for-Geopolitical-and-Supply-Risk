@@ -292,6 +292,10 @@ def _process_one_slice(ev_path: Path, mn_path: Path):
     # same order).
     kept = kept[PARSED_EVENT_COLUMNS].copy()
     kept.columns = EVENT_COLUMNS
+    # NOTE: DATEADDED stays as STRING here, matching the live pipeline's validator.py.
+    # The storage layer's _dateadded() function handles string -> int conversion.
+    # Do NOT convert to Int64; Spark's pickle/unpickle of nullable types causes
+    # serialization issues across processes.
     mentions = mentions.copy()
     mentions = mentions[PARSED_MENTION_COLUMNS].copy()
     mentions.columns = MENTION_COLUMNS[:len(mentions.columns)]

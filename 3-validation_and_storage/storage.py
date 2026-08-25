@@ -172,6 +172,36 @@ def _text(value):
     return text
 
 
+def _dateadded(value) -> int:
+    """
+    Convert DATEADDED to int. clean_dateadded() has already validated and filtered
+    out bad rows, ensuring DATEADDED is a valid 14-digit string. Handle both string
+    and numeric input (Int64 from pandas, or string from legacy code).
+    
+    THIS MUST NOT RETURN NONE OR RAISE EXCEPTION. By this point, clean_dateadded()
+    has already dropped every row with an invalid date. If a row reaches here with
+    a bad DATEADDED, it is a pipeline bug, and we should fail loudly so it gets fixed.
+    """
+    if value is None:
+        # This should never happen — clean_dateadded() drops rows with None.
+        # If it does, the bug is upstream.
+        raise ValueError("DATEADDED is None (should have been filtered by clean_dateadded)")
+    # If already numeric (int or float type), just convert and return
+    if isinstance(value, (int, float)):
+        logger.debug(f"_dateadded: numeric input {repr(value)} ({type(value).__name__}) -> {int(value)}")
+        return int(value)
+    # Otherwise it's a string. Strip whitespace and convert.
+    text = str(value).strip()
+    logger.debug(f"_dateadded: string input {repr(value)} ({type(value).__name__}) -> text={repr(text)} -> {int(text)}")
+    try:
+        return int(text)
+    except ValueError:
+        # This should not happen — clean_dateadded() validates all dates.
+        # If it does, the bug is in clean_dateadded().
+        logger.error(f"_dateadded: FAILED to parse {repr(value)} ({type(value).__name__})")
+        raise ValueError(f"clean_dateadded() allowed an unparseable DATEADDED: {repr(value)}")
+
+
 def _key_text(value) -> str:
     """A NOT NULL identity column: always a string, never None."""
     return "" if value is None else str(value).strip()
@@ -332,7 +362,7 @@ class Storage:
         rows = [
             tuple(
                 _key_text(r[col]) if col == "GLOBALEVENTID"
-                else int(r[col]) if col == "DATEADDED"
+                else _dateadded(r[col]) if col == "DATEADDED"
                 else _num(r[col], _EVENT_NUMERIC[col]) if col in _EVENT_NUMERIC
                 else _text(r[col])
                 for col in EVENT_COLUMNS

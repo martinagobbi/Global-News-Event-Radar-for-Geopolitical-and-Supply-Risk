@@ -7,5 +7,4 @@
 # drifted to 3.0.5, an inconsistency that was silent until measured.
 requests==2.34.2
 pandas==2.3.3
-numpy==2.4.6
 tqdm==4.70.0

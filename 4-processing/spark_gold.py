@@ -275,53 +275,111 @@ def _build_session() -> SparkSession:
     )
 
 
+# The helper column read_partitioned() adds solely so Spark has something legal
+# to split on. Dropped from the DataFrame before it is returned, so nothing
+# downstream ever sees it.
+_BUCKET_COL = "_bucket"
+
+
 def read_partitioned(spark, table: str, where: str | None = None):
     """
     Parallel JDBC read of a whole ClickHouse table — NO LIMIT.
 
-    Spark splits [min, max] of GLOBALEVENTID into `numPartitions` ranges and runs
-    one query per range, concurrently, on different executors. The bounds come
-    from ClickHouse itself so the ranges match the real key distribution.
-    """
-    bounds = (
-        spark.read.format("jdbc")
-        .option("url", CH_URL)
-        .option("query", f"SELECT min(GLOBALEVENTID) lo, max(GLOBALEVENTID) hi FROM {table}")
-        .option("driver", "com.clickhouse.jdbc.ClickHouseDriver")
-        .load()
-        .collect()[0]
-    )
-    lo, hi = bounds["lo"], bounds["hi"]
-    if lo is None or hi is None:
-        logger.warning("%s is empty", table)
-        return None
+    Spark splits [0, READ_PARTITIONS) of a HASH BUCKET into `numPartitions`
+    ranges and runs one query per range, concurrently, on different executors.
 
+    Why a hash bucket rather than a real column — all three alternatives are
+    genuinely unavailable, which is worth recording because each looks fine
+    until tried (all verified against the live store, 2026-08-25):
+
+      * GLOBALEVENTID is a String (deliberately — see storage.py's header), and
+        Spark rejects it outright:
+            Partition column type should be numeric, date, or timestamp,
+            but string found.
+        It worked only while that column was still UInt64.
+      * DATEADDED is numeric, but exists ONLY on gdelt_events. Using it made
+        every mentions read fail with
+            Code: 47. Unknown expression or function identifier 'DATEADDED'
+            in scope SELECT min(DATEADDED) ... FROM gdelt_mentions
+        which is what broke recompute_all() outright.
+      * MentionTimeDate, the mentions-side equivalent, is Nullable(String), so
+        it is rejected for the same reason as GLOBALEVENTID.
+
+    And even on gdelt_events, where DATEADDED at least ran, a YYYYMMDDHHMMSS
+    integer is a terrible range key: the numeric span is mostly unreachable
+    (no month 13-99, no day 32-99, no hour 24-99), so equal numeric slices are
+    wildly unequal row counts. Measured on 21k seed rows over 8 partitions:
+
+        DATEADDED range :  5339, 0, 0, 0, 0, 0, 5890, 10208   <- 5 empty
+        hash bucket     :  2714, 2647, 2683, 2667, 2620, 2741, 2685, 2718
+
+    cityHash64(GLOBALEVENTID) avoids all of it: GLOBALEVENTID is the one column
+    both tables are guaranteed to have (it is the identity column and the
+    sharding key), and hashing makes the distribution uniform by construction
+    rather than by luck of what the data happens to look like. It is also the
+    SAME expression ClickHouse sharded on, so a bucket never straddles shards.
+    """
     # `where` narrows the read for an INCREMENTAL recompute. It is pushed into
     # the ClickHouse query rather than applied in Spark, so the rows never cross
     # the JDBC boundary at all — which is the entire point: the cost of a
     # recompute is dominated by how many candidates reach the per-user
     # predicates, and this is where that number is decided.
     #
-    # The partition bounds stay the FULL min/max of GLOBALEVENTID even when
-    # filtering. That is deliberate: the bounds only decide how Spark splits the
-    # id range into concurrent queries, and a filtered read simply leaves most of
-    # those partitions empty. Narrowing them would mean a second round trip to
-    # ClickHouse for no benefit.
-    source = f"{table} FINAL" if not where else \
-             f"(SELECT * FROM {table} FINAL WHERE {where}) AS t"
-    logger.info("reading %s over %d partitions (ids %s..%s)%s",
-                table, READ_PARTITIONS, lo, hi,
+    # The bucket bounds stay [0, READ_PARTITIONS) even when filtering, because
+    # they describe the hash space rather than the data: a filtered read simply
+    # leaves each partition holding fewer rows, never an empty range. This also
+    # removes the min/max round trip the old range-based version needed before
+    # it could read anything.
+    # Emptiness is checked EXPLICITLY, with a count, and returns None so
+    # recompute() can short-circuit to status EMPTY. That path is reached on
+    # purpose — the README's optional shutdown wipes silver and then recomputes
+    # gold from nothing — so it has to actually work.
+    #
+    # It is a count and not the old `min(...) is None` test because that test was
+    # silently dead: ClickHouse returns the type's DEFAULT, not NULL, for an
+    # aggregate over an empty set of a NON-nullable column, so `min(DATEADDED)`
+    # on an empty gdelt_events is 0 and `lo is None` was never once true.
+    # Verified 2026-08-25: `SELECT min(DATEADDED), isNull(min(DATEADDED)) FROM
+    # gdelt_events WHERE 1=0` returns `0, 0`. A wiped silver therefore fell
+    # straight through into the full join instead of short-circuiting.
+    #
+    # No FINAL here, deliberately: FINAL only collapses duplicate rows, so a raw
+    # count is zero exactly when the deduplicated count is zero, and skipping it
+    # keeps this a cheap key-only scan rather than a merge.
+    count_sql = f"SELECT count() AS n FROM {table}"
+    if where:
+        count_sql += f" WHERE {where}"
+    n_rows = (
+        spark.read.format("jdbc")
+        .option("url", CH_URL)
+        .option("query", count_sql)
+        .option("driver", "com.clickhouse.jdbc.ClickHouseDriver")
+        .load()
+        .collect()[0]["n"]
+    )
+    if not n_rows:
+        logger.warning("%s is empty%s", table,
+                       f" for WHERE {where}" if where else "")
+        return None
+
+    inner = (f"SELECT *, modulo(cityHash64(GLOBALEVENTID), {READ_PARTITIONS}) "
+             f"AS {_BUCKET_COL} FROM {table} FINAL")
+    if where:
+        inner += f" WHERE {where}"
+    logger.info("reading %s over %d hash partitions (%s rows)%s",
+                table, READ_PARTITIONS, n_rows,
                 f"  WHERE {where}" if where else "")
     return (
         spark.read.format("jdbc")
         .option("url", CH_URL)
-        .option("dbtable", source)                 # FINAL collapses re-ingested duplicates
+        .option("dbtable", f"({inner}) AS t")      # FINAL collapses re-ingested duplicates
         .option("driver", "com.clickhouse.jdbc.ClickHouseDriver")
-        .option("partitionColumn", "GLOBALEVENTID")
-        .option("lowerBound", str(lo))
-        .option("upperBound", str(hi))
+        .option("partitionColumn", _BUCKET_COL)
+        .option("lowerBound", "0")
+        .option("upperBound", str(READ_PARTITIONS))
         .option("numPartitions", READ_PARTITIONS)
         .load()
+        .drop(_BUCKET_COL)
     )
 
 
@@ -859,8 +917,10 @@ def recompute(only_user: str | None = None, since: str | None = None) -> dict:
 
     spark = _spark()
     events = read_partitioned(spark, "gdelt_events")
-    # Quoted because DATEADDED / MentionTimeDate are Strings in ClickHouse; the
-    # ids are fixed width, so a lexicographic '>' is also chronological.
+    # Quoted because MentionTimeDate is a String in ClickHouse; the ids are fixed
+    # width, so a lexicographic '>' is also chronological. (DATEADDED, which this
+    # comment used to cover as well, is now UInt64 — see storage.py's header —
+    # but it is not used here, so nothing in this predicate changes.)
     mentions = read_partitioned(
         spark, "gdelt_mentions",
         where=f"MentionTimeDate > '{since}'" if since else None)
