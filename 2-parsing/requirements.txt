@@ -1,1 +1,9 @@
-pandas>=2.0.0
+# Pinned exactly (was ~=2.0.0, which still allows 2.x -> the constraint that
+# looked safe stopped mattering the moment pip resolved pandas 3.0). Confirmed
+# via `pip freeze` in the built image. NOTE this is pandas 3.0, not the 2.x line
+# 1-ingestion is pinned to — a real, pre-existing cross-service version
+# mismatch, not something this pin creates. Unifying every service onto ONE
+# pandas major version is a bigger, deliberate migration (verifying
+# 1-ingestion's own pandas usage under 3.x) that has not been done; this pin
+# only stops THIS service's version from drifting further on its own.
+pandas==3.0.5

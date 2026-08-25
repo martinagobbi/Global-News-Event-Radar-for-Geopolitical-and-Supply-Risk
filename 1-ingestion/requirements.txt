@@ -1,4 +1,11 @@
-requests~=2.34
-pandas~=2.2
-numpy~=2.2
-tqdm~=4.67
+# Pinned exactly, not floored, so a rebuild reproduces the same environment
+# rather than silently picking up whatever pip resolves that day. Versions below
+# are what this image ACTUALLY resolves to today (2026-08-25) — confirmed via
+# `pip freeze` inside the built image, not guessed. See dev_notes.md's pandas
+# section for why this matters: this is the ONE service that was already on the
+# 2.x line (via ~=2.2) while every other pandas-using service had already
+# drifted to 3.0.5, an inconsistency that was silent until measured.
+requests==2.34.2
+pandas==2.3.3
+numpy==2.4.6
+tqdm==4.70.0

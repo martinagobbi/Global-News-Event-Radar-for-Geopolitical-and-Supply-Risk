@@ -1,6 +1,11 @@
-fastapi>=0.110.0
-uvicorn[standard]>=0.29.0
-clickhouse-driver>=0.2.9
-pandas>=2.0.0
-pymongo>=4.6.0
-psycopg[binary]>=3.2.0
+# Pinned exactly — see 3-validation_and_storage/requirements.txt for why an
+# uncommitted ~=X tightening on this file would have downgraded a currently
+# running, already-tested environment on the next rebuild rather than fixed
+# anything. Versions below are what THIS image actually resolves to today
+# (2026-08-25), confirmed via `pip freeze`, not guessed.
+fastapi==0.141.1
+uvicorn[standard]==0.52.3
+clickhouse-driver==0.2.11
+pandas==3.0.5
+pymongo==4.17.0
+psycopg[binary]==3.3.4

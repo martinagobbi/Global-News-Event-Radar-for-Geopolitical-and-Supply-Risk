@@ -1,9 +1,24 @@
-fastapi>=0.111.0
-uvicorn[standard]>=0.30.0
-pymongo>=4.7.0
-psycopg[binary]>=3.2.0
-requests>=2.32.5
-certifi>=2026.7.22
-charset-normalizer>=3.5.1
-idna>=3.19
-urllib3>=2.6.3
+# Pinned exactly for the four packages this service actually imports and runs
+# on right now — see 3-validation_and_storage/requirements.txt for why an
+# uncommitted ~=X tightening here would have downgraded a running environment
+# on the next rebuild. Versions below are what THIS image actually resolves to
+# today (2026-08-25), confirmed via `pip freeze`.
+fastapi==0.141.1
+uvicorn[standard]==0.52.3
+pymongo==4.17.0
+psycopg[binary]==3.3.4
+# requests / certifi / charset-normalizer / idna / urllib3 are NOT pinned to a
+# measured version below, and that is a gap, not an oversight: the currently
+# RUNNING container has none of them installed (confirmed: `import requests`
+# raises ModuleNotFoundError in it right now), and no .py file in this service
+# imports `requests` either. These five lines were added to this file at some
+# point after that container was last built, and have never actually been
+# exercised. Pin them for real the next time this service is rebuilt — freeze
+# what THAT resolves to — rather than guessing numbers for packages nothing
+# here has run yet. If nothing ends up needing `requests` directly, these five
+# lines are very possibly dead and worth removing instead.
+requests==2.32.5
+certifi==2026.7.22
+charset-normalizer==3.5.1
+idna==3.19
+urllib3==2.6.3

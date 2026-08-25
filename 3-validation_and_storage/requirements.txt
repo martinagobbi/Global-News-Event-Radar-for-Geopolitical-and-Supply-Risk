@@ -1,5 +1,14 @@
-pandas>=2.0.0
-clickhouse-driver>=0.2.9
-newspaper3k>=0.2.8
-lxml_html_clean>=0.1.0
-nltk>=3.8
+# Pinned exactly. This file had already been edited (uncommitted) from >=X to
+# ~=X, presumably as an earlier attempt at exactly this problem — but ~=2.0.0
+# means "2.0.*", and the container actually running right now has resolved
+# pandas 3.0.5. A rebuild against the ~= version on disk would have silently
+# DOWNGRADED it three minor releases without anyone asking for that. Exact `==`
+# pins avoid both failure modes: no drifting up on a fresh build, and no
+# surprise downgrade from a well-meaning tightened floor that nothing has
+# rebuilt against yet. Versions below are what THIS image actually resolves to
+# today (2026-08-25), confirmed via `pip freeze`, not guessed.
+pandas==3.0.5
+clickhouse-driver==0.2.11
+newspaper3k==0.2.8
+lxml_html_clean==0.4.5
+nltk==3.10.3
