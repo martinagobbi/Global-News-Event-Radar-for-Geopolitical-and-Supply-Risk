@@ -17,9 +17,13 @@ its mentions land on the SAME node (local joins), and duplicate copies of an
 event from successive 15-min batches land on the same node (so the per-node
 ReplacingMergeTree(DATEADDED) dedup actually sees and collapses them).
 
-Original GDELT column names are preserved. GLOBALEVENTID and DATEADDED are
-typed UInt64 (the latter is the ReplacingMergeTree version: largest = newest =
-kept); everything else is String for ingest robustness.
+Original GDELT column names are preserved. GLOBALEVENTID is String (an opaque
+id, never arithmetic); DATEADDED is UInt64 — not by choice but because it is
+the ReplacingMergeTree version column (largest = newest = kept), and that
+position requires a plain non-nullable integer or Date/DateTime type,
+regardless of what would otherwise be the natural type for the column (see
+_EVENTS_BODY). Everything else is Nullable(String) or a Nullable numeric type,
+for ingest robustness.
 
 The validation layer is the SOLE owner of this store: it creates the tables
 (ON CLUSTER) and runs the events dedup. The processing layer only reads.
@@ -85,9 +89,29 @@ _EVENTS_BODY = """(
     ActionGeo_CountryCode  Nullable(String),
     ActionGeo_Lat          Nullable(Float64),
     ActionGeo_Long         Nullable(Float64),
-    DATEADDED              Nullable(String),
+    -- Not Nullable, and not String despite every other column here being one:
+    -- this is the ReplacingMergeTree version column for gdelt_events_local
+    -- (see ENGINE clause below), and that position rejects both a Nullable
+    -- wrapper and a non-integer/date underlying type outright:
+    --   Code: 169. The column DATEADDED cannot be used as a version column
+    --   for storage ReplacingMergeTree because it is of type Nullable(String)
+    --   (must be of an integer type or of type Date/DateTime/DateTime64).
+    --   (BAD_TYPE_OF_FIELD)
+    -- Safe because validator.clean_dateadded() now DROPS any row with no
+    -- usable date (instead of nulling the field, which is what it did before
+    -- this column had to become non-nullable) — see that function's docstring
+    -- for why dropping preserves the same watermark-safety property nulling
+    -- had, without writing a 0 sentinel that would sort below every real row.
+    DATEADDED              UInt64,
     SOURCEURL              Nullable(String),
-    INDEX idx_sourceurl lower(SOURCEURL) TYPE ngrambf_v1(4, 4096, 3, 0) GRANULARITY 4,
+    -- coalesce(), same reason as the PARTITION BY fix above: SOURCEURL is
+    -- Nullable(String), and ngrambf_v1 (unlike the set(0) indexes below)
+    -- refuses a Nullable expression outright:
+    --   Code: 80. Ngram and token bloom filter indexes can only be used with
+    --   column types `String`, `FixedString`, ... (INCORRECT_QUERY)
+    -- idx_mentionid below does not need this: MentionIdentifier is one of the
+    -- two NOT NULL identity columns (see the header comment), never Nullable.
+    INDEX idx_sourceurl lower(coalesce(SOURCEURL, '')) TYPE ngrambf_v1(4, 4096, 3, 0) GRANULARITY 4,
     INDEX idx_action_cc  ActionGeo_CountryCode TYPE set(0) GRANULARITY 4,
     INDEX idx_actor1_cc  Actor1CountryCode     TYPE set(0) GRANULARITY 4,
     INDEX idx_actor2_cc  Actor2CountryCode     TYPE set(0) GRANULARITY 4
@@ -105,7 +129,16 @@ _MENTIONS_BODY = """(
     MentionDocTone             Nullable(Float64),
     article_title              Nullable(String),
     article_keywords           Nullable(String),
-    enriched                   Nullable(UInt8),
+    -- Not Nullable: this is the ReplacingMergeTree version column for
+    -- gdelt_mentions_local (see ENGINE clause below), and ClickHouse rejects a
+    -- Nullable version column outright, independent of the underlying type:
+    --   Code: 169. The column enriched cannot be used as a version column for
+    --   storage ReplacingMergeTree because it is of type Nullable(UInt8) (must
+    --   be of an integer type or of type Date/DateTime/DateTime64).
+    --   (BAD_TYPE_OF_FIELD)
+    -- Safe because _to_bool_uint() below always returns a real 0 or 1, never
+    -- None — there is no unmapped value this column needs to represent.
+    enriched                   UInt8,
     INDEX idx_mentionid lower(MentionIdentifier) TYPE ngrambf_v1(4, 4096, 3, 0) GRANULARITY 4
 )"""
 
@@ -118,15 +151,17 @@ _INSERT_MENTIONS_SQL = (
 
 
 # ── Value coercion for the insert ────────────────────────────────────────────
-# `_to_uint` used to map anything unparseable to 0, for GLOBALEVENTID and
-# DATEADDED. Both uses are now gone, and deliberately:
-#
-#   GLOBALEVENTID is a String and is never coerced anywhere in the pipeline.
-#   DATEADDED is cleaned in validation (clean_dateadded), which nulls what it
-#   cannot parse — so nothing unparseable reaches here to be silently zeroed.
-#
-# That 0 was the quiet failure behind a frozen watermark: max(DATEADDED) ignores
-# NULL but is perfectly happy to return a row of zeros as data.
+# GLOBALEVENTID is a String and is never coerced. DATEADDED is an int() cast
+# below, not a coercion with a failure fallback: validator.clean_dateadded()
+# already dropped every row it could not parse into a clean 14-digit string,
+# so by the time a row reaches here DATEADDED is guaranteed present and
+# well-formed — int() either succeeds or the row genuinely should not be
+# here, in which case it is correct for this to raise rather than silently
+# write a placeholder. (An earlier version of this file used a `_to_uint()`
+# helper that mapped anything unparseable to 0 for both GLOBALEVENTID and
+# DATEADDED — that 0 was the quiet failure behind a frozen watermark:
+# max(DATEADDED) ignores NULL but is perfectly happy to return a row of zeros
+# as data. That helper is gone; do not reintroduce a numeric fallback here.)
 def _text(value):
     """String, or None for a missing value. Never '' — that is a known-empty."""
     if value is None:
@@ -158,14 +193,6 @@ _EVENT_NUMERIC = {"GoldsteinScale": float, "AvgTone": float,
                   "NumArticles": int}
 _MENTION_NUMERIC = {"InRawText": int, "Confidence": int,
                     "MentionDocLen": int, "MentionDocTone": float}
-
-
-def _to_uint(value) -> int:
-    """Parse a GLOBALEVENTID / DATEADDED string into an int, 0 on failure."""
-    try:
-        return int(str(value).strip())
-    except (TypeError, ValueError):
-        return 0
 
 
 def _to_bool_uint(value) -> int:
@@ -231,8 +258,26 @@ class Storage:
             f"{_EVENTS_BODY} "
             f"ENGINE = ReplicatedReplacingMergeTree("
             f"'/clickhouse/tables/{{shard}}/gdelt_events_local', '{{replica}}', DATEADDED) "
-            f"PARTITION BY substring(Day, 1, 6) "
-            f"ORDER BY (GLOBALEVENTID, ActionGeo_CountryCode) "
+            # coalesce(), not allow_nullable_key. Day is Nullable(String) — see
+            # _EVENTS_BODY — and substring() of a Nullable value is itself
+            # Nullable, which ClickHouse refuses as a partition key by default:
+            #   Code: 44. Partition key contains nullable columns, but merge
+            #   tree setting `allow_nullable_key` is disabled.
+            # Verified 2026-08-25: this was never caught before now because the
+            # live table predated Day becoming Nullable — CREATE TABLE IF NOT
+            # EXISTS silently kept the old definition, so this statement had
+            # never actually executed until a `recreate` finally dropped that
+            # old table. allow_nullable_key=1 would also satisfy ClickHouse, but
+            # nullable partition/sort keys have real documented rough edges
+            # (NULL handling in comparisons and merges); coalescing to a
+            # sentinel keeps the safer default on and gives every row with no
+            # usable Day a single, well-defined partition instead.
+            f"PARTITION BY substring(coalesce(Day, '000000'), 1, 6) "
+            # coalesce(), same reason as the PARTITION BY fix above:
+            # ActionGeo_CountryCode is Nullable(String), and a sorting key
+            # can't contain a Nullable column any more than a partition key
+            # can (same Code 44 as Day, same fix).
+            f"ORDER BY (GLOBALEVENTID, coalesce(ActionGeo_CountryCode, '')) "
             f"SETTINGS index_granularity = 8192"
         )
         client.execute(
@@ -250,7 +295,10 @@ class Storage:
             f"{_MENTIONS_BODY} "
             f"ENGINE = ReplicatedReplacingMergeTree("
             f"'/clickhouse/tables/{{shard}}/gdelt_mentions_local', '{{replica}}', enriched) "
-            f"PARTITION BY substring(MentionTimeDate, 1, 6) "
+            # Same reason and same fix as gdelt_events_local above:
+            # MentionTimeDate is Nullable(String), so it needs coalescing before
+            # it can be a partition key.
+            f"PARTITION BY substring(coalesce(MentionTimeDate, '000000'), 1, 6) "
             f"ORDER BY (GLOBALEVENTID, MentionIdentifier) "
             f"SETTINGS index_granularity = 8192"
         )
@@ -284,6 +332,7 @@ class Storage:
         rows = [
             tuple(
                 _key_text(r[col]) if col == "GLOBALEVENTID"
+                else int(r[col]) if col == "DATEADDED"
                 else _num(r[col], _EVENT_NUMERIC[col]) if col in _EVENT_NUMERIC
                 else _text(r[col])
                 for col in EVENT_COLUMNS

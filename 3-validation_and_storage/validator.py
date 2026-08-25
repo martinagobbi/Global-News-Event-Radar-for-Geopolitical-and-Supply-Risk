@@ -207,24 +207,33 @@ def _normalise_dateadded(value):
 
 def clean_dateadded(events_df, path=None):
     """
-    Null out unusable DATEADDED values and pad the usable-but-short ones.
+    Drop rows whose DATEADDED has no usable date, and pad the usable-but-short
+    ones.
 
-    Note this is the WATERMARK column: `max(DATEADDED)` decides whether gold is
-    rebuilt. A null here is safe — it is simply not a maximum — whereas the old
-    `_to_uint()` fallback wrote 0, which is a value, sorts below every real slice
-    and silently froze the watermark. Nulling is what makes that unreachable.
+    Note this is the WATERMARK column and the ReplacingMergeTree version column
+    (see storage._EVENTS_BODY): `max(DATEADDED)` decides whether gold is
+    rebuilt, and ClickHouse requires the version column itself to be a plain,
+    non-nullable integer — it will not accept a Nullable(String) here at all,
+    let alone a numeric sentinel. Dropping the row (rather than nulling the
+    field, as this used to do, or writing a `_to_uint()`-style 0 fallback)
+    keeps the same safety property those approaches were after: a row with no
+    usable date never reaches storage, so it can never sort below a real slice
+    and freeze the watermark low. It just does so by excluding the row instead
+    of excluding the value — DATEADDED is, structurally, as much an identity
+    column as GLOBALEVENTID now (see drop_rows_missing above).
     """
     if events_df is None or "DATEADDED" not in events_df.columns:
         return events_df, 0
-    original = events_df["DATEADDED"]
-    cleaned = original.map(_normalise_dateadded)
-    n_nulled = int(original.notna().sum() - cleaned.notna().sum())
-    if n_nulled:
-        logger.warning("%s: nulled %d DATEADDED value(s) with no usable date",
-                       getattr(path, "name", "<events>"), n_nulled)
-    events_df = events_df.copy()
-    events_df["DATEADDED"] = cleaned
-    return events_df, n_nulled
+    cleaned = events_df["DATEADDED"].map(_normalise_dateadded)
+    keep_mask = cleaned.notna()
+    n_dropped = int((~keep_mask).sum())
+    if n_dropped:
+        logger.warning("%s: dropped %d row(s) with no usable DATEADDED — it "
+                       "cannot version a ReplacingMergeTree row",
+                       getattr(path, "name", "<events>"), n_dropped)
+    events_df = events_df[keep_mask].copy()
+    events_df["DATEADDED"] = cleaned[keep_mask]
+    return events_df, n_dropped
 
 
 def _valid_number(value) -> bool:
@@ -295,12 +304,12 @@ def validate_pair(paths, storage) -> dict:
     mentions_df, mn_no_id = drop_rows_missing(mentions_df, EVENT_ID, "mentions", mentions_path)
     mentions_df, mn_no_url = drop_rows_missing(
         mentions_df, "MentionIdentifier", "mentions", mentions_path)
+    events_df, ev_no_date = clean_dateadded(events_df, events_path)
 
-    events_df, _ = clean_dateadded(events_df, events_path)
     events_df, _ = clean_goldstein(events_df, events_path)
     mentions_df, _ = clean_confidence(mentions_df, mentions_path)
 
-    rows_dropped = ev_no_id + mn_no_id + mn_no_url
+    rows_dropped = ev_no_id + mn_no_id + mn_no_url + ev_no_date
 
     n_events = dropped = n_mentions = 0
     mentions_clean = None

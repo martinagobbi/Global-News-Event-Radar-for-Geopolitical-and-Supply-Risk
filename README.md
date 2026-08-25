@@ -48,28 +48,11 @@ Here in testing mode, backend machines and frontend machines are the same one ma
 ``` bash
 # REQUIRES ingestion, parsing, and validation to be on first. (So, first perform at least steps 1 and 2 of Startup)
 
-# Steps 1 through 6 below as one line:
-# WARNING: might keep your computer awake for hours unless you stop the process or close the computer.
-caffeinate -is bash -c "docker compose --env-file .env.testing stop ingestion parsing validation && ./bootstrap/silver_snapshot.sh wipe && env ENRICH=1 docker compose --env-file .env.testing -f docker-compose.bootstrap.yml run --rm bootstrap && ./bootstrap/silver_snapshot.sh trim 20260727171500 && ./bootstrap/silver_snapshot.sh export && docker compose --env-file .env.testing start ingestion parsing validation"
 # 1.
-docker compose --env-file .env.testing stop ingestion parsing validation  # stop live writes
+# WARNING: this command can take a while, because it downloads at a much greater pace than the pipeline normally would (30 days of data rather than 15 minutes of it!). It might keep your computer awake for a long time unless you stop the process or close the computer.
+caffeinate -is bash -c "docker compose --env-file .env.testing stop ingestion parsing validation && ./bootstrap/silver_snapshot.sh wipe && env ENRICH=1 RELEASE_SOURCE=gdelt_release docker compose --env-file .env.testing -f docker-compose.bootstrap.yml run --rm bootstrap && ./bootstrap/silver_snapshot.sh trim 20260727171500 && ./bootstrap/silver_snapshot.sh export && docker compose --env-file .env.testing start ingestion parsing validation"
 
 # 2.
-./bootstrap/silver_snapshot.sh wipe
-
-# 3.
-ENRICH=1 docker compose --env-file .env.testing -f docker-compose.bootstrap.yml run --rm bootstrap # WARNING: enrichment makes it take hours to download the full 30 days --- you might want to wrap this command: `caffeinate -is env ENRICH=1 docker compose --env-file .env.testing -f docker-compose.bootstrap.yml run --rm bootstrap`.
-
-# 4.
-./bootstrap/silver_snapshot.sh trim 20260727171500   # the last slice in the release
-
-# 5.
-./bootstrap/silver_snapshot.sh export
-
-# 6.
-docker compose --env-file .env.testing start ingestion parsing validation  # re-start live writes
-
-# 7.
 # To ensure everything is operational again, you may continue from point 3 of Startup (not of this list of points!) onwards.
 ```
 
