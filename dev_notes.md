@@ -821,7 +821,7 @@ The production topology consists of seven dedicated infrastructure machines for 
 
 ## Machine Topology
 
-| Machine | ClickHouse | Keeper | MongoDB | PostgreSQL+Patroni | etcd | Swarm Role | Assigned Workloads |
+| Machine | ClickHouse | Keeper | MongoDB | PostgreSQL+Patroni | etcd | Docker Swarm Role | Assigned Workloads |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 | **store1** | s1r1 | keeper-1 | — | leader | etcd-1 | **manager** | Stores Tier (Shard 1, Replica 1) |
 | **store2** | s1r2 | keeper-2 | — | replica | etcd-2 | **manager** | Stores Tier (Shard 1, Replica 2) |
@@ -829,7 +829,7 @@ The production topology consists of seven dedicated infrastructure machines for 
 | **store4** | s2r1 | — | mongo1 | — | — | worker | Stores Tier (Shard 2, Replica 1) |
 | **store5** | s2r2 | — | mongo2 | — | — | worker | Stores Tier (Shard 2, Replica 2) |
 | **store6** | s2r3 | — | mongo3 | — | — | worker | Stores Tier (Shard 2, Replica 3) |
-| **pipeline1** | — | — | — | — | — | worker (`role=pipeline`) | Ingestion through Processing, Backend ×3, `spark-master`, `spark-worker` |
+| **pipeline1** | — | — | — | — | — | worker (`role=pipeline`) | Ingestion through Serving Backend, `spark-master`, `spark-worker` |
 
 > **Note on Swarm Roles:** The **Swarm role** column (`manager` vs. `worker`) refers strictly to Docker Swarm cluster orchestration privileges. It is completely independent of Apache Spark worker services.
 
