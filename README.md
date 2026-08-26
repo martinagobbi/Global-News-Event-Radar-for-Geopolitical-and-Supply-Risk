@@ -10,7 +10,7 @@ Two modes are in place: single-machine mode and intended mode. **Only single-mac
 
 In single-machine mode, the pipeline, the stores, and the serving frontend are all on the same machines. But each was still given its own Docker stack for easier scalability and for better emulation of real-world pipelines.
 
-### Startup
+### Single-machine mode startup
 
 ```bash
 # REQUIRES to have Docker up and running.
@@ -105,7 +105,7 @@ In intended mode, machines have the following jobs. This was designed holding re
 
 The logic is that ClickHouse's shard 1 lives on store1–3 and shard 2 on store4–6, so a shard survives losing two machines. store1–3 carry four separate quorums between them — Keeper, etcd, the Swarm managers and Patroni's PostgreSQL trio — each of which tolerates losing one of its three. Three Swarm managers, not one: Swarm coordinates through Raft exactly as Keeper does, so a single manager would be a single point of failure for orchestration, and nothing could be rescheduled while it was down.
 
-### Startup
+### Intended-mode startup
 
 As explained above, **intended mode cannot be run on one machine and should be ignored**. Intended mode's current set up is only a boilerplate to make single-machine mode scalable to multiple machines in theory, and re-uses a lot of the same code. Nonetheless, instructions to start it up are provided here.
 
