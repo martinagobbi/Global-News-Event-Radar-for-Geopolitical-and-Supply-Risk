@@ -301,7 +301,7 @@ services:
           }"
 
   # ── PostgreSQL: the gold sink the serving backend reads ───────────────────
-  # A SINGLE node here, which is all testing mode needs and mirrors what Oracle
+  # A SINGLE node here, which is all single-machine mode needs and mirrors what Oracle
   # provided. Intended mode runs three of these under Patroni instead — see
   # docker-stack.stores.yml — which is the reason the gold layer moved off
   # Oracle at all: Oracle Free supports neither RAC nor Data Guard, so it could
@@ -363,7 +363,7 @@ volumes:
   # when they differ, so the same volume serves both topologies. Sharing these is
   # a feature: user profiles and tags survive a mode switch.
   #
-  # postgres_data is used by testing mode only. Intended mode's PostgreSQL runs
+  # postgres_data is used by single-machine mode only. Intended mode's PostgreSQL runs
   # under Patroni in the Swarm stack with its own per-node volumes, because a
   # Patroni data directory records the cluster identity and cannot be shared with
   # a standalone server — the same reasoning that gives ClickHouse and Keeper

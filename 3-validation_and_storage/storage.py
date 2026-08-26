@@ -255,7 +255,7 @@ class Storage:
                 # losing the one named here would otherwise stop ingestion
                 # outright even though the shard's other two replicas hold every
                 # row — the data survives the failure but the connection does
-                # not. Empty in testing mode, which has a single node.
+                # not. Empty in single-machine mode, which has a single node.
                 alt_hosts=os.getenv("CLICKHOUSE_ALT_HOSTS", "") or None,
                 # Socket timeout sits just above the server-side cap below.
                 send_receive_timeout=_OP_TIMEOUT + 10,

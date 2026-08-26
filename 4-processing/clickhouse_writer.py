@@ -116,7 +116,7 @@ class ClickHouseWriter:
                 # machines, so losing the one named here would otherwise stop the
                 # pipeline even though the shard's other two replicas hold every
                 # row — the data survives the failure but the connection does not.
-                # Empty in testing mode, where there is only one node to address.
+                # Empty in single-machine mode, where there is only one node to address.
                 alt_hosts=os.getenv("CLICKHOUSE_ALT_HOSTS", "") or None,
                 settings={"use_numpy": False},
             )

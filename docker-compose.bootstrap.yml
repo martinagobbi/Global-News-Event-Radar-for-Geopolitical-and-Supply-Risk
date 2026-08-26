@@ -19,7 +19,7 @@
 #   SPARK_MASTER=local[*]       default; distributes across cores on THIS machine.
 #                                See bulk_load.py's module docstring before pointing
 #                                this at spark://spark-master:7077 — this bootstrapping
-#                                is intended only to show some data in testing mode,
+#                                is intended only to show some data in single-machine mode,
 #                                hence the one-machine configuration is almost intrinsic
 #                                to it.
 #   SPARK_BULK_LOAD_PARTITIONS  how many slices run at once (default 4) — the

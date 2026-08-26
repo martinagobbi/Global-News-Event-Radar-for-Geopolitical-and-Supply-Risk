@@ -108,7 +108,7 @@ services:
       # configuration change here.
       POSTGRES_DSN: ${POSTGRES_DSN:-postgresql://radar:radar@pipeline_postgres:5432/radar}
       # WHERE the silver -> gold Spark job runs. `local[*]` keeps it inside this
-      # container, which is what testing mode wants: one code path, no cluster.
+      # container, which is what single-machine mode wants: one code path, no cluster.
       # .env.intended overrides it to spark://spark-master:7077.
       SPARK_MASTER: ${SPARK_MASTER:-local[*]}
       # How the silver -> gold job is parallelised. All four are read by
@@ -187,7 +187,7 @@ networks:
   # `pipeline_network` or CREATES one.
   #
   #   true  (default, .env.testing and .env.intended) — the network already
-  #         exists and the pipeline attaches to it. In testing mode the stores
+  #         exists and the pipeline attaches to it. In single-machine mode the stores
   #         compose project created it as a local bridge; in intended mode it is
   #         the attachable OVERLAY created once by hand
   #         (`docker network create -d overlay --attachable pipeline_network`),

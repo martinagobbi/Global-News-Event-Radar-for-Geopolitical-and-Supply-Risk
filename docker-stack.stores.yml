@@ -477,7 +477,7 @@ services:
   # same shape as CLICKHOUSE_ALT_HOSTS and the three-member MONGO_URI.
   #
   # bootstrap.post_init runs the gold schema ONCE, when Patroni initialises the
-  # cluster — the equivalent of the image entrypoint hook that testing mode uses,
+  # cluster — the equivalent of the image entrypoint hook that single-machine mode uses,
   # which Patroni bypasses because it runs initdb itself.
   postgres-1: &patroni-node
     image: ghcr.io/zalando/spilo-16:3.2-p3
@@ -573,7 +573,7 @@ configs:
 # ── Volumes ──────────────────────────────────────────────────────────────────
 # Local to the machine each service is pinned to, which is why the pinning is
 # not optional. Names are NOT mode-scoped here: this stack has no testing-mode
-# counterpart to collide with, since testing mode uses docker-compose.stores.yml
+# counterpart to collide with, since single-machine mode uses docker-compose.stores.yml
 # and its own radar-testing_* volumes.
 volumes:
   keeper_1_data: {}

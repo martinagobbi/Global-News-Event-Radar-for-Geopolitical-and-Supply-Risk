@@ -2,7 +2,7 @@
 # ═══════════════════════════════════════════════════════════════════════════
 # Patroni bootstrap hook — creates the gold role, database and schema, once.
 #
-# Testing mode gets the schema from the postgres image's own
+# Single-machine mode gets the schema from the postgres image's own
 # /docker-entrypoint-initdb.d hook. Patroni does NOT use that hook: it runs
 # initdb itself when it bootstraps the cluster, so the image's entrypoint
 # scripts never execute. `bootstrap.post_init` is Patroni's equivalent, and it
@@ -48,7 +48,7 @@ psql "$CONNSTR" -v ON_ERROR_STOP=1 -tAc \
 
 echo "post_init: applying the gold schema"
 # Applied AS the radar role, so the three tables are owned by the account the
-# pipeline and serving layer connect as, exactly as in testing mode.
+# pipeline and serving layer connect as, exactly as in single-machine mode.
 psql "${CONNSTR} dbname=${DB}" -v ON_ERROR_STOP=1 \
      -c "SET ROLE ${OWNER}" -f /bootstrap/01_schema.sql
 

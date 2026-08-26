@@ -4,17 +4,17 @@ This app gives users a customised and informative briefing of news of events tha
 
 This repository is "production-level" meaning that it deliberately avoids using one Docker app that puts together the data pipeline, the LTS systems, and the frontend into one Docker app to run `docker compose` on. Rather, these aspects are entirely separate, each with its own set of Docker containers making one Docker app to call `docker compose` on. Like in a production-level design, the only point of contact between the pipeline (which involves ingestion, parsing, validation, processing, and the backend of the storage) and the LTS systems is `pipeline_network` (a DNS with no published ports). Also like in a production-level design, the Docker app for the frontend of the service is even more separate from the other two Docker apps, with its only point of contact being a URL to the backend (`BACKEND_URL`): this way, multiple such frontend Docker apps can be run connected to the same backend. Starting up every part of the radar together is thus deliberately and necessarily a multi-step process that avoids using one Docker app for everything, even if Docker apps can already have multiple containers.
 
-Two modes are in place: testing mode and intended mode. **Only testing mode can be run on one machine, so only testing mode can be used when running the whole radar to observe and evaluate how the radar operates.** In contrast, intended mode is boilerplate to make testing mode's data distributed across machines: intended mode was curated at every relevant step of the creation of testing mode, but to test intended mode, significant hardware is required, without which Docker Swarm will refuse to start intended mode. In a nutshell, testing mode is the only mode that can run on one machine, and intended mode is a curated but untested draft of the setup to make the same pipeline run on multiple machines.
+Two modes are in place: single-machine mode and intended mode. **Only single-machine mode should be used by any examiner. Even though no problems were observed with intended mode either, intended mode should be ignored simply because it requires multiple machines.** In contrast, intended mode is boilerplate to make single-machine mode's data distributed across machines: intended mode was curated at every relevant step of the creation of single-machine mode, but to test intended mode, significant hardware is required, without which Docker Swarm will refuse to start intended mode. In a nutshell, single-machine mode is the only mode that can run on one machine, and intended mode is a curated but untested draft of the setup to make the same pipeline run on multiple machines.
 
-## Testing mode
+## Single-machine mode
 
-In testing mode, the pipeline, the stores, and the serving frontend are all on the same machines. But each was still given its own Docker stack for easier scalability and for better emulation of real-world pipelines.
+In single-machine mode, the pipeline, the stores, and the serving frontend are all on the same machines. But each was still given its own Docker stack for easier scalability and for better emulation of real-world pipelines.
 
 ### Startup
 
 ```bash
 # REQUIRES to have Docker up and running.
-# Preferrably, you may set "Settings -> Resources -> Advanced -> Resource Allocation -> Memory limit" to at least 6GB
+# Preferrably, you may set "Settings -> Resources -> Advanced -> Resource Allocation -> Memory limit" to at least 6 GB
 
 # Steps 1 through 5 below can be run as one line, separated with "&&"'s like so:
 docker compose --env-file .env.testing -f docker-compose.stores.yml up -d && docker compose --env-file .env.testing up -d --build && ./bootstrap/silver_snapshot.sh restore && docker compose -f 5-serving/docker-compose.serving.yml up --build
@@ -28,7 +28,7 @@ docker compose --env-file .env.testing -f docker-compose.stores.yml up -d
 docker compose --env-file .env.testing up -d --build
 
 # 3. OPTIONAL BUT NECESSARY FOR PROPER TESTING: Silver data from articles spanning 27/06/2026 at 17:15 to 27/07/2026 at 17:15.
-# This "seeded" data was chosen to make the testing-mode radar not empty at startup: the radar gets updated with the latest news every 15 minutes, and automatically drops news older than 365 days every midnight. Even seeding over a year of data will leave a gap in testing mode: all the per-15-minutes slices between the latest seeded/stored data and the data from the moment a tester starts up the testing-mode radar with these instructions.
+# This "seeded" data was chosen to make the testing-mode radar not empty at startup: the radar gets updated with the latest news every 15 minutes, and automatically drops news older than 365 days every midnight. Even seeding over a year of data will leave a gap in single-machine mode: all the per-15-minutes slices between the latest seeded/stored data and the data from the moment a tester starts up the testing-mode radar with these instructions.
 ./bootstrap/silver_snapshot.sh restore
 
 # 4. Service frontend.
@@ -46,11 +46,11 @@ docker compose -f 5-serving/docker-compose.serving.yml up --build
 # | radar_agrifood           | grain2026          | Americas and Africa   |
 ```
 
-Here in testing mode, backend machines and frontend machines are the same one machine, but these steps are still kept separate to keep the production-level design (to also have distribution across machines, see intended mode below).
+Here in single-machine mode, backend machines and frontend machines are the same one machine, but these steps are still kept separate to keep the production-level design (to also have distribution across machines, see intended mode below).
 
 ### ONLY FOR THIS PIPELINE'S DEVELOPERS, NOT NEEDED FOR TESTING: Rebuilding the 30-day test seed
 
-This loads some example data for testing mode. It is already going to be seeded by default, so that Startup can use the seed.
+This loads some example data for single-machine mode. It is already going to be seeded by default, so that Startup can use the seed.
 
 ``` bash
 # REQUIRES ingestion, parsing, and validation to be on first. (So, first perform at least steps 1 and 2 of Startup)
@@ -67,7 +67,7 @@ caffeinate -is bash -c "docker compose --env-file .env.testing stop ingestion pa
 
 ### Shutdown
 
-For convenience, we include for testing mode also shutdown instructions.
+For convenience, we include for single-machine mode also shutdown instructions.
 
 **OPTIONAL**: Reset silver so the next startup can restore the seed cleanly
 ``` bash
@@ -107,7 +107,7 @@ The logic is that ClickHouse's shard 1 lives on store1–3 and shard 2 on store4
 
 ### Startup
 
-As explained above, **intended mode cannot be run on one machine and should be ignored**. Intended mode's current set up is only a boilerplate to make testing mode scalable to multiple machines in theory, and re-uses a lot of the same code. Nonetheless, instructions to start it up are provided here.
+As explained above, **intended mode cannot be run on one machine and should be ignored**. Intended mode's current set up is only a boilerplate to make single-machine mode scalable to multiple machines in theory, and re-uses a lot of the same code. Nonetheless, instructions to start it up are provided here.
 
 ```bash
 # 1. (On store1): Form the Docker Swarm

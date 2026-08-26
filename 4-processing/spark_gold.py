@@ -155,7 +155,7 @@ def _spark() -> SparkSession:
 
         local[*]                  testing — Spark runs inside this container, on
                                   every available core. No master or worker
-                                  containers exist, so testing mode stays a small
+                                  containers exist, so single-machine mode stays a small
                                   stack while running exactly the same code.
         spark://spark-master:7077 intended — the work is distributed across the
                                   worker containers.

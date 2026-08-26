@@ -50,7 +50,7 @@ test users.
   per-user tags (`radar.tags`) and the territory table
   (`radar.reference`).
 - **PostgreSQL** — the gold sink the serving backend reads. One node in
-  testing mode; three under Patroni in intended mode.
+  single-machine mode; three under Patroni in intended mode.
 
 ------------------------------------------------------------------------
 
@@ -65,7 +65,7 @@ Resources → Memory limit**.
 | **Testing** | 4 | **≈ 3.4 GB** with the stores, processing and backend running | **at least 6 GB** |
 | **Intended**, one machine per store node | 3–4 per store machine | ≈ 1.5 GB per store machine; ≈ 2.5 GB on the pipeline machine | **4 GB per store machine, 6 GB for the pipeline machine** |
 
-**Spark is why testing mode needs more than it used to.** The processing
+**Spark is why single-machine mode needs more than it used to.** The processing
 container is built on the Spark image and runs the silver → gold job
 in-process (`SPARK_MASTER=local[*]`), so it holds a JVM: **1.77 GB on
 its own**, against roughly 200 MB when that job was plain pandas. The
@@ -80,7 +80,7 @@ apart in the first place.
 
 ### Memory allowance, layer by layer {#memory-allowance-layer-by-layer}
 
-Every container in testing mode, ingestion through serving frontend.
+Every container in single-machine mode, ingestion through serving frontend.
 "Allowance" is the ceiling the component is *permitted*; "measured" is
 steady-state usage on the 30-day seed plus live slices, taken 2026-08-16
 on a 6.77 GiB Docker VM.
@@ -133,7 +133,7 @@ resident in the processing container.
 >
 > A 2 GB Spark worker landing on a store machine sits beside a
 > ClickHouse node already permitted 4 GB on an 8 GB box. That is the
-> same squeeze that killed the driver JVM in testing mode, just
+> same squeeze that killed the driver JVM in single-machine mode, just
 > relocated — and there it would be ClickHouse competing rather than the
 > pipeline. Either give the Spark services a placement constraint of
 > their own, label a machine for them, or size the store machines with
@@ -154,7 +154,7 @@ Below these thresholds the ClickHouse nodes are terminated under memory
 pressure and restart in a loop, which appears as queries timing out or
 returning nothing rather than as an obvious error.
 
-Testing mode exists precisely because the thirteen-container topology
+Single-machine mode exists precisely because the thirteen-container topology
 does not fit comfortably on a machine with 8 GB of physical RAM: the six
 ClickHouse servers alone occupy roughly 4.6 GB.
 
@@ -166,7 +166,7 @@ Two drawings of the same pipeline. Nothing in the application code
 differs between them — only how many nodes each store has, and how many
 machines they sit on.
 
-### Testing mode — 10 containers, 1 machine
+### Single-machine mode — 10 containers, 1 machine
 
 ```         
 ┌─ YOUR MACHINE — docker compose --env-file .env.testing ──────────────────────────────┐
@@ -249,7 +249,7 @@ machines they sit on.
 ```         
 ┌─ DOCKER SWARM · overlay network `pipeline_network` ──────────────────────────────────────┐
 │ Service names resolve on EVERY machine, which is why clickhouse/cluster.xml,             │
-│ the ON CLUSTER DDL and every store address are byte-identical to testing mode.           │
+│ the ON CLUSTER DDL and every store address are byte-identical to single-machine mode.           │
 │ No store port is published anywhere. Managers = store1+2+3 (Raft, tolerates 1).          │
 └──────────────────────────────────────────────────────────────────────────────────────────┘
 
@@ -466,7 +466,7 @@ between them**: the mode is chosen entirely by the arguments passed to
 | Frontend | same machine | one instance per user machine |
 
 The modes are selected by which **files** are deployed, not by editing
-anything: testing mode uses `docker compose` with
+anything: single-machine mode uses `docker compose` with
 `docker-compose.stores.yml` and `.env.testing`; intended mode uses
 `docker stack deploy` with `docker-stack.stores.yml`,
 `docker-stack.pipeline.yml` and `.env.intended`. The env file selects
@@ -797,7 +797,7 @@ tables existed within 20 seconds of `up -d`.
 
 ### B. Intended — one node of each store per machine
 
-Testing mode puts every store container on one machine, so its
+Single-machine mode puts every store container on one machine, so its
 redundancy is real only against *container* loss: that machine dying
 takes every ClickHouse replica, every MongoDB member and the gold layer
 with it. Intended mode places **one node of each storage system on a
@@ -1175,7 +1175,7 @@ docker swarm leave --force
 | `seed_test_users.py` | anywhere that can reach `:8000` |
 | frontend | each user machine |
 
-### Returning to testing mode
+### Returning to single-machine mode
 
 Remove the two Swarm stacks, then start the plain-Compose stack. Nothing
 is deleted, in either direction:
@@ -1190,10 +1190,10 @@ Leaving the swarm itself (`docker swarm leave --force`) is only
 necessary if the machines are being repurposed; an idle swarm costs
 nothing.
 
-Testing mode reattaches to its **own** ClickHouse and Keeper volumes
+Single-machine mode reattaches to its **own** ClickHouse and Keeper volumes
 (`radar-testing_*`), which still hold whatever silver they held when
 this mode was last used; the Swarm stack's `radar-stores_*` volumes are
-left exactly as they were. If this is the first time testing mode has
+left exactly as they were. If this is the first time single-machine mode has
 run on this machine, its silver starts empty and needs one
 `./bootstrap/silver_snapshot.sh restore`.
 
@@ -1277,10 +1277,10 @@ not retrieved.
 
 Stop the tiers in the reverse of their start order. The commands differ
 per mode, because each is torn down with the tool that started it:
-`docker compose down` in testing mode, `docker stack rm` in intended
+`docker compose down` in single-machine mode, `docker stack rm` in intended
 mode.
 
-**Optional first (for testing mode) — keep only the shipped 30-day
+**Optional first (for single-machine mode) — keep only the shipped 30-day
 history.** The pipeline polls continuously, so a store that has been
 running holds the seed *plus* everything since. Stop the ingest path
 before trimming, or the next poll lands mid-clean-up and puts the excess
@@ -1296,7 +1296,7 @@ docker exec pipeline_processing python3 -c "import main; main.recompute_all()"  
 `trim <YYYYMMDDHHMMSS>` takes an explicit cutoff. Skip all three to keep
 the live history.
 
-**Testing mode:**
+**Single-machine mode:**
 
 ``` bash
 docker compose -f 5-serving/docker-compose.serving.yml down
@@ -1394,7 +1394,7 @@ them, and both are idempotent:
   `rs.initiate(rs0)`, guarded by `rs.status()`, and is a no-operation
   once the set exists.
 - **PostgreSQL gold schema** — `postgres-init/01_schema.sql` is executed
-  once, at first database creation. In testing mode the image's own
+  once, at first database creation. In single-machine mode the image's own
   `/docker-entrypoint-initdb.d` hook runs it; in intended mode Patroni
   runs `postgres-init/init-gold.sh` from its `bootstrap.post_init` hook
   instead, because Patroni performs `initdb` itself and never invokes
@@ -1420,7 +1420,7 @@ The gold layer is built per user. Until at least one profile exists,
 The following section records the reasoning behind the storage and
 pipeline decisions.
 
-## Every difference between testing mode and intended mode {#every-difference-between-testing-mode-and-intended-mode}
+## Every difference between single-machine mode and intended mode {#every-difference-between-testing-mode-and-intended-mode}
 
 The two modes run **identical application code**. No Python file, table
 name, cluster name or service name differs between them. Everything that
@@ -1527,7 +1527,7 @@ them, and the driver finds a live node:
 
 Without the first of these, losing s1r1's *machine* would stop the
 pipeline even though the shard's other two replicas hold every row — the
-data would survive a failure the connection could not. In testing mode
+data would survive a failure the connection could not. In single-machine mode
 all three degenerate to a single address and behave exactly as before.
 
 ### Services that exist only in intended mode
@@ -1542,7 +1542,7 @@ all three degenerate to a single address and behave exactly as before.
 | `etcd-1`, `etcd-2`, `etcd-3`      | Patroni's leader lock             |
 
 In `docker-compose.stores.yml` the first four rows are gated behind
-`profiles: ["full"]`, so testing mode simply does not start them. The
+`profiles: ["full"]`, so single-machine mode simply does not start them. The
 Swarm stack has no profiles and always deploys everything.
 
 ### Configuration files that exist in more than one version
@@ -1587,7 +1587,7 @@ nested inside a distributed query**
 `… WHERE GLOBALEVENTID IN (SELECT … FROM gdelt_mentions …)` fails with
 `Code: 288`. Every query in the project therefore uses plain aggregates
 and literal id lists — see [Retention](#retention-the-365-day-rule),
-where this is worked through in full. In testing mode the planner has
+where this is worked through in full. In single-machine mode the planner has
 one shard and nothing to distribute, so the restriction never bites and
 a bad query shape would pass unnoticed.
 
@@ -1603,7 +1603,7 @@ a bad query shape would pass unnoticed.
 - **Row counts read immediately after an insert can be low** on six
   nodes, while the second shard and the replicas are still being filled.
   `silver_snapshot.sh restore` printed 51,914 and then 103,972 seconds
-  later. Testing mode is exact.
+  later. Single-machine mode is exact.
 - **`ON CLUSTER` DDL** has to reach six nodes through Keeper rather than
   one, so the first schema creation takes seconds rather than being
   instantaneous.
@@ -1631,7 +1631,7 @@ alone, and rejects every connection with
 then retries indefinitely, so the symptom is a pipeline that hangs at 0%
 CPU rather than an error. This cannot be fixed by *clearing* a volume
 from a compose argument — Compose has no conditional "empty this volume"
-directive — but it can be fixed by never sharing them. Testing mode's
+directive — but it can be fixed by never sharing them. Single-machine mode's
 volumes are named `${STORE_VOLUMES:-radar-testing}_*`; the Swarm stack
 names its own.
 
@@ -1643,7 +1643,7 @@ derived: one `recompute_all()` rebuilds it from silver.
 MongoDB is deliberately **not** mode-scoped, so user profiles and tags
 survive the switch intact.
 
-### Capabilities that testing mode does not have
+### Capabilities that single-machine mode does not have
 
 - **No redundancy of any kind.** Losing the single ClickHouse node loses
   silver; losing the single MongoDB node loses profiles and tags; losing
@@ -1884,7 +1884,7 @@ sweep of orphaned rows — all inside one publish transaction, after
 `user_articles` has been rebuilt.
 
 **Where it runs is the only thing that differs between the modes.**
-`SPARK_MASTER` is `local[*]` in testing mode, so the job runs inside the
+`SPARK_MASTER` is `local[*]` in single-machine mode, so the job runs inside the
 processing container with no cluster to deploy, and
 `spark://spark-master:7077` in intended mode, where Swarm spreads the
 master and `SPARK_WORKERS` workers across machines with no placement
@@ -2021,7 +2021,7 @@ and `recompute_user` re-runs that user's filter against the whole of
 silver. Articles that were previously in silver but matched nobody are
 therefore promoted into that user's gold at once, without waiting for
 new data to arrive. This is also why MongoDB runs as a replica set even
-in testing mode: change streams are unavailable on a standalone server.
+in single-machine mode: change streams are unavailable on a standalone server.
 
 The watermark trigger covers the other direction — new data arriving for
 existing preferences. It fires whenever the watermark **changes**:
@@ -2084,13 +2084,13 @@ that the stores would then have to deduplicate.
 The recovery behaviour is **not** the same in the two modes, and the
 difference matters.
 
-| Failure | Testing mode (plain `docker compose`) | Intended mode (Docker Swarm) |
+| Failure | Single-machine mode (plain `docker compose`) | Intended mode (Docker Swarm) |
 |----|----|----|
 | A single container crashes | Docker restarts it **on the same machine**, because every pipeline service declares `restart: unless-stopped` | Swarm restarts the task, by the same principle |
 | The Docker daemon is restarted | Containers come back automatically | Same |
 | **The whole machine fails** | **Nothing happens.** There is no second machine, and no data is lost — but the pipeline stops until the machine returns | Swarm detects the node is gone and **re-creates the whole pipeline on another node** carrying the `role=pipeline` label |
 
-In testing mode the machine is a single point of failure for
+In single-machine mode the machine is a single point of failure for
 *processing*, though never for *data*: the durable state is in the
 stores, and a restarted pipeline re-polls GDELT and continues. That is
 an acceptable trade for a single-machine test environment.
@@ -2771,7 +2771,7 @@ Two consequences follow, and the whole of this section is about them.
 
 ### Why the JVM dies
 
-In testing mode `SPARK_MASTER=local[*]`, so the JVM runs **inside the
+In single-machine mode `SPARK_MASTER=local[*]`, so the JVM runs **inside the
 processing container** rather than on a separate worker machine. It is
 the largest single memory consumer in the stack (\~1.7 GiB). When the
 host runs short of memory, the Linux kernel's out-of-memory killer picks
@@ -2909,7 +2909,7 @@ pipeline no longer needs a human to notice.
 
 ### It matters at least as much in intended mode
 
-The failure was found in testing mode, but nothing about the fix is
+The failure was found in single-machine mode, but nothing about the fix is
 specific to it, and intended mode has *more* ways to reach the same
 state, not fewer.
 

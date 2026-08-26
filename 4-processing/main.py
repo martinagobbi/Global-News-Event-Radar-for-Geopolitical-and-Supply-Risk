@@ -176,7 +176,7 @@ def recompute_all() -> dict:
     every rule had to be changed in both places and could silently diverge.
 
     Spark is used in BOTH modes, and only SPARK_MASTER differs: `local[*]` in
-    testing mode, so the job runs inside this container with no cluster to
+    single-machine mode, so the job runs inside this container with no cluster to
     deploy, and `spark://spark-master:7077` in intended mode, with bases for distribution.
 
     Dropping the pandas path is what allowed GOLD_EVENTS_LIMIT to go. That cap

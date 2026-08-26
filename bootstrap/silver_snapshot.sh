@@ -21,7 +21,7 @@
 # ═════════════════════════════════════════════════════════════════════════════
 set -euo pipefail
 
-# Which container to run clickhouse-client in. Testing mode uses plain Compose,
+# Which container to run clickhouse-client in. Single-machine mode uses plain Compose,
 # where the container is named exactly this. Intended mode runs the stores as a
 # SWARM STACK, and Swarm ignores `container_name` — the task is called something
 # like radar-stores_clickhouse-s1r1.1.<taskid>, with a different id every time it
@@ -173,7 +173,7 @@ case "${1:-}" in
       # replicas. Measured on the six-node cluster: it printed 51,914 immediately
       # after restoring, and 103,972 (the true total) a few seconds later. The
       # data is not lost and nothing needs re-running; only the figure below is
-      # premature. Testing mode has one shard and one replica, so it is exact
+      # premature. Single-machine mode has one shard and one replica, so it is exact
       # there. Re-run `SELECT count() FROM gdelt_events FINAL` to confirm.
       printf '  %-16s now %s rows\n' "$t" "$rows"
     done

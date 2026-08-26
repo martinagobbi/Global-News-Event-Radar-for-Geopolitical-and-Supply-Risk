@@ -117,7 +117,7 @@ services:
           memory: 512M
 
   # ── Spark cluster: the silver -> gold compute ──────────────────────────────
-  # Intended mode is the reason this exists as a cluster at all. Testing mode
+  # Intended mode is the reason this exists as a cluster at all. Single-machine mode
   # runs the SAME job with SPARK_MASTER=local[*], inside the processing
   # container, so it needs neither of these two services.
   #
@@ -133,7 +133,7 @@ services:
   # A 2 GB Spark worker scheduled onto either group overcommits the machine, and
   # the kernel then kills the largest process on it — which would be ClickHouse
   # or MongoDB, not Spark. That is the same failure that killed the driver JVM in
-  # testing mode on 2026-08-16, relocated onto a machine holding durable state.
+  # single-machine mode on 2026-08-16, relocated onto a machine holding durable state.
   #
   # So both Spark services carry the same constraint as the rest of this stack.
   # The backend replicas are pinned for the same reason: three copies is not much
@@ -175,7 +175,7 @@ services:
       # ── Why the default is ONE worker, not two ──────────────────────────────
       # Every worker now lands on the pipeline machine (see the constraint
       # below), so the replica count is bounded by that machine's RAM. Budget at
-      # 8 GiB, from measurements taken in testing mode:
+      # 8 GiB, from measurements taken in single-machine mode:
       #
       #     OS + Docker daemon                        ~1.00 GiB
       #     ingestion + parsing + validation          ~0.20 GiB
@@ -208,7 +208,7 @@ services:
       <<: *store-env
       STATUS_DIR: /data/status
       MONGO_COLLECTION: ${MONGO_COLLECTION:-users}
-      # Distributed here; local[*] in testing mode. The only difference.
+      # Distributed here; local[*] in single-machine mode. The only difference.
       SPARK_MASTER: ${SPARK_MASTER:-spark://spark-master:7077}
       # How the silver -> gold job is parallelised. All four are read by
       # spark_gold.py and must be passed in explicitly, or the code defaults

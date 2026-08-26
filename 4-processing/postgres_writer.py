@@ -23,7 +23,7 @@ replaced (delete-then-insert). pipeline_status is replaced with a single row.
 The connection is described by a single POSTGRES_DSN, which in intended mode
 lists all three cluster members with target_session_attrs=read-write, so libpq
 finds whichever node Patroni has made leader. Failover therefore needs no
-configuration change here; in testing mode the same variable names one host.
+configuration change here; in single-machine mode the same variable names one host.
 """
 
 import hashlib
