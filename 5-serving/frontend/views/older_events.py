@@ -12,7 +12,7 @@ from data.user_store import get_user_profile, is_first_login
 
 
 DATA_REFRESH_SECONDS = 900
-default_briefing_days = 30
+default_briefing_days = 60
 
 use_neutral_spinner()
 st.title("Historical Radar View")
