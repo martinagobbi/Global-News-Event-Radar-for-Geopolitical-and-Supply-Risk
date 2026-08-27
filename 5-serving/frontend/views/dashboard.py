@@ -288,14 +288,5 @@ if not events:
 render_briefing(events, selected_countries=profile.get("territories", []))
 
 # ── Polling loop ───────────────────────────────────────────────────────────
-# st.fragment(run_every=...) reruns just this block on a timer WITHOUT keeping
-# the script alive between runs, so Streamlit's running indicator turns off
-# once the page has rendered.
-@st.fragment(run_every=STATUS_POLL_SECONDS)
-def _status_poller() -> None:
-    live = get_events_version(user_id)
-    if live != st.session_state.get("gold_version"):
-        st.session_state.gold_version = live
-        st.rerun()          # full rerun only when the gold layer actually changed
-
-_status_poller()
+time.sleep(STATUS_POLL_SECONDS)
+st.rerun()
