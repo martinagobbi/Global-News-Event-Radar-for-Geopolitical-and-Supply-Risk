@@ -16,7 +16,7 @@ In single-machine mode, the pipeline, the stores, and the serving frontend are a
 # REQUIRES to have Docker up and running.
 # Preferrably, you may set "Settings -> Resources -> Advanced -> Resource Allocation -> Memory limit" to at least 6 GB
 
-# Steps 1 through 5 below can be run as one line, separated with "&&"'s like so:
+# Steps 1 through 4 below can be run as one line, separated with "&&"'s like so:
 docker compose --env-file .env.testing -f docker-compose.stores.yml up -d && docker compose --env-file .env.testing up -d --build && ./bootstrap/silver_snapshot.sh restore && docker compose -f 5-serving/docker-compose.serving.yml up --build
 
 # 1. Stores
