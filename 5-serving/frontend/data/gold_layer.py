@@ -11,7 +11,7 @@ def get_system_status() -> dict:
 def get_events(
     user_id: str,
     briefing_days: int | None = None,
-    max_age_days: int = 90,
+    max_age_days: int = 180,
     min_age_days: int | None = None,
     exclude_archived: bool = True,
 ) -> list[dict]:
