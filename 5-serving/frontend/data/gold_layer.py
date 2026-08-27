@@ -52,9 +52,21 @@ def get_tagged_events(user_id: str, tag: str) -> list[dict]:
     return group_events(payload["events"])
 
 
-def get_events_summary(user_id: str) -> list[dict]:
-    """Lightweight data for the heatmap."""
-    payload = get_json(f"/users/{user_id}/events-summary")
+def get_events_summary(
+    user_id: str,
+    briefing_days: int | None = None,
+    max_age_days: int = 180,
+) -> list[dict]:
+    """
+    Lightweight data for the heatmap.
+
+    Takes the same window arguments as get_events() so the map and the briefing
+    it sits above always describe the same set of events.
+    """
+    params = f"max_age_days={max_age_days}"
+    if briefing_days is not None:
+        params += f"&briefing_days={briefing_days}"
+    payload = get_json(f"/users/{user_id}/events-summary?{params}")
     return payload["summary"]
 
 
