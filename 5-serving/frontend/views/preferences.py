@@ -72,10 +72,10 @@ st.caption("---------------------------------------------------------")
 
 st.subheader("Default briefing window (days)")
 briefing_days = st.slider(
-    "", 1, 90, min(profile.get("briefing_days", 90), 90)
+    "", 1, 90, min(profile.get("briefing_days", 60), 90)
 )
 st.caption(
-    "How far back the Radar View reaches by default. 90 days keeps a freshly "
+    "How far back the Radar View reaches by default. 60 days keeps a freshly "
     "loaded 30-day backfill visible for months."
 )
 
