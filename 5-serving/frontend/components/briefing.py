@@ -11,6 +11,8 @@ def _render_event_table(events: list[dict]) -> None:
         {
             "Event": f'\"{event["card_title"]}\"',
             "Country": event["country"],
+            # ── New column added below ──
+            "Coordinates": f"{event.get('latitude', 'N/A')}, {event.get('longitude', 'N/A')}", 
             "Date": datetime.strptime(str(event["event_date"])[:10], "%Y-%m-%d").date(),
             "Tag you applied": event.get("user_tag") or "You did not apply a tag",
             "Top source": event.get("top_article_url"),
