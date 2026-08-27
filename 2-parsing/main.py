@@ -42,13 +42,21 @@ ever moves forwards.
 Three rules keep the layer from stalling on one bad slice, which is the failure
 mode a watermark exists to prevent:
 
-    * bounded retries — a slice that fails is retried MAX_SLICE_ATTEMPTS times and
-      then moved to DEAD_LETTER_DIR. Without this the same slice is retried every
-      few seconds forever, and because slices are handled oldest-first, EVERY
-      later slice is blocked behind it.
-    * orphan sweep — a slice whose events and mentions files never both arrive can
-      never be published, so after RAW_SLICE_ORPHAN_MAX_AGE it is dead-lettered too
-      rather than accumulating on disk indefinitely.
+    * bounded retries — a slice that raises PermanentError is dead-lettered at
+      once; anything else is assumed transient and retried until TRANSIENT_MAX_WAIT
+      has elapsed, then dead-lettered. MAX_SLICE_ATTEMPTS is logged alongside this
+      but no longer decides it — a count cannot express "wait out a restart".
+      Without this bound the same slice is retried forever, and because slices are
+      handled oldest-first, EVERY later slice is blocked behind it.
+    * orphan sweeps — two backstops, NOT how a partial slice is normally resolved:
+      a slice missing its partner is published as a singleton on its very next
+      scan (see _ready_slices()), so neither sweep exists to wait one out.
+      _sweep_raw_orphans() catches a file in RAW_CSV_DIR stuck for some OTHER
+      reason (unreadable, or left behind by an interrupted run) and dead-letters
+      it after RAW_SLICE_ORPHAN_MAX_AGE. _sweep_parsed_orphans() catches the same
+      failure on the published side — a manifest or data file left in
+      LATEST_FILES_DIR that validation never consumed — after
+      PARSED_SLICE_ORPHAN_MAX_AGE, so it cannot deadlock list_files() forever.
     * bounded back-pressure — publishing waits for validation to drain
       `latest_files`, but if that has not happened within BACKPRESSURE_MAX_WAIT
       the wait is reported instead of continuing in silence.
@@ -66,7 +74,8 @@ Environment variables
     FILE_STABLE_SECONDS      min file age before reading   (default 3)
     STATE_DIR                watermark location            (default /data/state)
     DEAD_LETTER_DIR          abandoned slices              (default /data/dead_letter)
-    MAX_SLICE_ATTEMPTS       tries before dead-lettering   (default 3)
+    MAX_SLICE_ATTEMPTS       attempt count, LOGGED ONLY — see TRANSIENT_MAX_WAIT (default 3)
+    TRANSIENT_MAX_WAIT       seconds a transient failure may retry before dead-lettering (default 250)
     RAW_SLICE_ORPHAN_MAX_AGE     age at which raw data is abandoned (default 1800)
     PARSED_SLICE_ORPHAN_MAX_AGE  age at which parsed data left for validation is removed (default 720)
     BACKPRESSURE_MAX_WAIT    wait before reporting a stalled consumer (default 600)
