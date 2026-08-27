@@ -163,8 +163,8 @@ PROFILES: dict[str, dict] = {
 }
 
 COMMON = {
-    "briefing_days": 30, 
-    "older_news_days": 90, 
+    "briefing_days": 60, 
+    "older_news_days": 180, 
     "status": "registered",
     "timezone": "Europe/Rome",
 }
