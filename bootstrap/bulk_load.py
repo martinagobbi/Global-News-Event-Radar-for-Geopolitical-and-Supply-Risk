@@ -29,9 +29,10 @@ It is deliberately faithful to the pipeline it replaces:
                  does, so the gold can never drift from what the pipeline
                  would have produced.
 
-Enrichment (Newspaper3k article titles/keywords) is OFF by default: it scrapes
-every article URL and is by far the slowest step. Turn it on with ENRICH=1 if you
-want the enriched fields, and expect the load to take hours instead of minutes.
+Enrichment (Newspaper3k article titles/keywords), in this bulk load for backfill
+(not in live validation), is OFF by default: it scrapes every article URL and is
+by far the slowest step. Turn it on with ENRICH=1 if you want the enriched fields,
+and expect the load to take hours instead of minutes.
 
 Progress and timings are appended to the report file so the run can be measured.
 
