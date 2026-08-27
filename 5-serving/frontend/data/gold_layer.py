@@ -20,7 +20,7 @@ def get_events(
     The backend already applied InRawText filter, ordering, and 20-article cap.
 
     min_age_days keeps only events OLDER than that many days — used by the
-    "Older news" tab so it does not repeat what the main briefing already shows.
+    "Historical Radar View" tab so it does not repeat what the main briefing already shows.
     """
     # Grouping must see archived members too; otherwise a grouped card can be
     # split before the frontend has a chance to rebuild its set.

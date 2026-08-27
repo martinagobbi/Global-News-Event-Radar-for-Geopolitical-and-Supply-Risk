@@ -122,8 +122,8 @@ briefing_days = st.slider(
 )
 
 st.caption(
-    "How far back the Radar View reaches by default. "
-    "60 days keeps a freshly loaded 30-day backfill visible for months."
+    "How far back the Radar View reaches by default. News older than this may go in the “Historical Radar View” tab, "
+    "depending on what is set for the older-risk lookback below."
 )
 
 
@@ -141,9 +141,9 @@ older_news_days = st.slider(
 )
 
 st.caption(
-    "Upper limit of the separate “Older news” tab. That tab shows events OLDER "
-    "than the briefing window above, up to this limit — so keep it larger than "
-    "the briefing window, or the tab will be empty."
+    "Upper limit of the separate “Historical Radar View” tab. That tab shows events older "
+    "than the briefing window above, up to this limit — making this smaller than "
+    "the briefing window, will leave the Historical Radar View empty."
 )
 
 
