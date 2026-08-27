@@ -125,8 +125,8 @@ def get_profile(user_id: str) -> dict:
         "display_name": user_id,
         "territories": [],
         "keywords": {},
-        "briefing_days": 30,
-        "older_news_days": 90,
+        "briefing_days": 60,
+        "older_news_days": 180,
         "status": "new",
     }
     try:
