@@ -225,6 +225,8 @@ def recompute_all() -> dict:
         # behaviour, which is the intended way to rule it out when diagnosing a
         # gold that looks wrong.
         since = None
+        prev = None
+        
         if INCREMENTAL_GOLD and watermark and watermark is not postgres_writer.KEEP:
             prev = postgres_writer.read_silver_watermark()
             n = _bump_incremental_counter()
@@ -239,7 +241,20 @@ def recompute_all() -> dict:
                 since = prev
                 logger.info("INCREMENTAL recompute: mentions after %s", since)
 
-        result = spark_gold.recompute(since=since)
+        # <-- Fallback Logic Starts Here -->
+        try:
+            result = spark_gold.recompute(since=since)
+        except Exception as exc: 
+            # If this was a forced full run (since is None) BUT we have a valid baseline 
+            # to add to (prev is not None and watermark advanced), fall back to incremental.
+            if since is None and prev is not None and watermark > prev:
+                logger.warning("full recompute failed (%s); falling back to incremental since %s", exc, prev)
+                since = prev
+                result = spark_gold.recompute(since=since)
+            else:
+                raise  # If we cannot fall back (e.g., brand new database), re-raise the error
+        # <-- Fallback Logic Ends Here -->
+
         # The sweep and the status mirror stay here, in plain Python: they are small
         # transactional statements against PostgreSQL and MongoDB with nothing to
         # distribute. Spark's publish() runs the same sweep inside its own
