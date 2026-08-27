@@ -44,7 +44,7 @@ def get_app_start_time():
 STATUS_POLL_SECONDS  = 30
 DATA_REFRESH_SECONDS = 900   # 15 minutes — aligned with ingestion cadence
 
-default_briefing_days = 30
+default_briefing_days = 60
 
 use_neutral_spinner()
 st.title("Radar View")
