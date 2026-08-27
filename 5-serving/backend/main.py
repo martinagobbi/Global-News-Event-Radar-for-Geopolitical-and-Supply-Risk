@@ -232,8 +232,16 @@ def get_event(user_id: str, global_event_id: str) -> dict:
 
 
 @app.get("/users/{user_id}/events-summary")
-def events_summary(user_id: str) -> dict:
-    events = get_events_for_user(user_id, max_age_days=90)
+def events_summary(
+    user_id: str,
+    max_age_days: int = 180,
+    briefing_days: int | None = None,
+) -> dict:
+    # The heatmap must cover exactly the same window as the briefing below it,
+    # otherwise the map shows hot spots with no matching card in the list.
+    events = get_events_for_user(user_id, max_age_days=max_age_days)
+    if briefing_days is not None:
+        events = [e for e in events if int(e.get("age_days", 0)) <= briefing_days]
     tags = get_tags(user_id)
 
     # Aggrega per coordinata: somma event_count e filtra null
