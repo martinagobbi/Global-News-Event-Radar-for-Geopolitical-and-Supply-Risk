@@ -57,6 +57,7 @@ try:
         st.stop()
 
     profile = get_user_profile(user_id)
+    briefing_days = int(profile.get("briefing_days") or default_briefing_days)
     territory_options = get_territory_options()
 
     user_tz = profile.get("timezone", "Europe/Rome")
@@ -228,8 +229,8 @@ should_refresh = (
 )
 
 if should_refresh:
-    st.session_state.cached_events       = get_events(user_id)
-    st.session_state.cached_summary      = get_events_summary(user_id)
+    st.session_state.cached_events = get_events(user_id, briefing_days=briefing_days,)
+    st.session_state.cached_summary = get_events_summary(user_id)
     st.session_state.last_data_fetch     = now
     st.session_state.gold_version        = live_gold_version
     if manual_refresh:
@@ -264,11 +265,6 @@ with legend_col:
     )
 
 with status_col:
-    briefing_days = profile.get(
-        "briefing_days",
-        default_briefing_days,
-    )
-
     st.subheader("Radar status")
 
     st.markdown(
