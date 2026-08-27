@@ -96,6 +96,12 @@ st.caption(
     "to adding esoteric words as well. You can add up to 1000 words per question."
 )
 
+st.caption(
+    "Capitalisation does not matter. Pluralisation sometimes does: if a word's plural is "
+    "not just the same word but with an \"s\" at the end, then you may want to include "
+    "the plural version separately."
+)
+
 keywords = render_keyword_questions(
     profile,
     prefix="onboard",
