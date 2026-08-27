@@ -399,7 +399,7 @@ _SINGLE_EVENT_SQL = """
 """
 
 
-def get_events_for_user(user_id: str, max_age_days: int = 90) -> list[dict]:
+def get_events_for_user(user_id: str, max_age_days: int = 180) -> list[dict]:
     """
     Return all event cards for a user.
     Applies InRawText filter, sorts by Confidence/Tone, caps at 20 articles per event.
