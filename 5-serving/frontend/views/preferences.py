@@ -110,7 +110,7 @@ keywords = render_keyword_questions(
 
 st.caption("---------------------------------------------------------")
 
-
+"""
 st.subheader("Default briefing window (days)")
 
 briefing_days = st.slider(
@@ -148,7 +148,7 @@ st.caption(
 
 
 st.caption("---------------------------------------------------------")
-
+"""
 
 st.subheader("Time Zone")
 
