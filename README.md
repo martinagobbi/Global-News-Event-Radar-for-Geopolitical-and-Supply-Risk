@@ -12,6 +12,8 @@ In single-machine mode, the pipeline, the stores, and the serving frontend are a
 
 ### Single-machine mode startup
 
+Note: step 3 will continue retrying automatically until ClickHouse is available. This is fully normal and does not mean there is any problem. ClickHouse will become available by itself.
+
 ```bash
 # REQUIRES to have Docker up and running.
 # Preferrably, you may set "Settings -> Resources -> Advanced -> Resource Allocation -> Memory limit" to at least 6 GB
