@@ -65,7 +65,7 @@ from pathlib import Path
 
 logger = logging.getLogger("processing.retention")
 
-RETENTION_DAYS = float(os.getenv("RETENTION_DAYS", "365"))
+RETENTION_DAYS = float(os.getenv("RETENTION_DAYS", "185"))
 DEAD_LETTER_RETENTION_DAYS = float(os.getenv("DEAD_LETTER_RETENTION_DAYS", "365"))
 CLICKHOUSE_CLUSTER = os.getenv("CLICKHOUSE_CLUSTER", "gnews_cluster")
 STATE_DIR = Path(os.getenv("STATE_DIR", "/data/state"))
