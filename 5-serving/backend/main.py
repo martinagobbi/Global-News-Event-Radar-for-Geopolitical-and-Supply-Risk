@@ -33,8 +33,8 @@ class UserProfile(BaseModel):
     user_id: str
     territories: list[str] = []
     keywords: dict[str, list[str]] = {}
-    briefing_days: int = Field(default=30, ge=1, le=90)
-    older_news_days: int = Field(default=90, ge=31, le=365)
+    briefing_days: int = Field(default=60, ge=1, le=90)
+    older_news_days: int = Field(default=180, ge=31, le=365)
     status: str = "registered"
     display_name: Optional[str] = None
     timezone: str = "Europe/Rome"  # Defaults to UTC+1 / UTC+2 (CEST)
