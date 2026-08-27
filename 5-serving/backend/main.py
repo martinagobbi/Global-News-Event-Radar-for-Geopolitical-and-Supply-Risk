@@ -188,7 +188,7 @@ def update_tag(user_id: str, global_event_id: str, payload: dict) -> dict:
 @app.get("/users/{user_id}/events")
 def list_events(
     user_id: str,
-    max_age_days: int = 90,
+    max_age_days: int = 180,
     briefing_days: int | None = None,
     min_age_days: int | None = None,
     exclude_archived: bool = True,
