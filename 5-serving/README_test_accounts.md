@@ -7,8 +7,8 @@ implemented: three fixed test accounts are seeded by
 | Username | Password | Supply chain |
 |---|---|---|
 | `radar_electronics` | `chips2026` | Semiconductors / electronics — Asia-Pacific |
-| `radar_pharma` | `vials2026` | Pharmaceuticals / biologics — Europe |
-| `radar_agrifood` | `grain2026` | Agri-food commodities — Americas + Africa |
+| `radar_pharma` | `vials2026` | Pharmaceuticals / healthcare — Europe + South Asia |
+| `radar_agrifood` | `grain2026` | Agri-food / retail — Americas + Africa + Southern Europe |
 
 The three profiles are mutually exclusive: no territory and no keyword appears
 in more than one account, and every supply-chain question carries at least 20
