@@ -81,7 +81,7 @@ STATUS_FILE  = Path(os.getenv("STATUS_DIR", "/data/status")) / "pipeline_status.
 # always full. Restarting therefore forces a clean rebuild, which is the safe
 # direction — the opposite of persisting it and resuming mid-cycle.
 INCREMENTAL_GOLD = os.getenv("INCREMENTAL_GOLD", "1") == "1"
-FULL_EVERY       = int(os.getenv("GOLD_FULL_EVERY", "12"))
+FULL_EVERY       = int(os.getenv("GOLD_FULL_EVERY", "2880"))
 _incremental_runs = 0
 
 
