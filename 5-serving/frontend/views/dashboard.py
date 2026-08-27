@@ -230,7 +230,7 @@ should_refresh = (
 
 if should_refresh:
     st.session_state.cached_events = get_events(user_id, briefing_days=briefing_days,)
-    st.session_state.cached_summary = get_events_summary(user_id)
+    st.session_state.cached_summary = get_events_summary(user_id, briefing_days=briefing_days)
     st.session_state.last_data_fetch     = now
     st.session_state.gold_version        = live_gold_version
     if manual_refresh:
