@@ -30,7 +30,7 @@ A long-running story keeps attracting coverage: the event row is stamped once,
 but articles arrive for as long as anyone is still writing. Measuring from the
 event date would delete a story that is still being reported; measuring from its
 newest article means an event survives exactly as long as the world keeps talking
-about it, and ages out 365 days after the last word.
+about it, and ages out 185 days after the last word.
 
 Schedule
 --------
