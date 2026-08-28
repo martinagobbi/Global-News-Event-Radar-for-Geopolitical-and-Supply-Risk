@@ -97,7 +97,19 @@ services:
       CLICKHOUSE_HOST: ${CLICKHOUSE_HOST:-clickhouse-s1r1}
       CLICKHOUSE_PORT: ${CLICKHOUSE_PORT:-9000}
       STATUS_DIR: /data/status
-      # TEMPORARY-TEST-GOLD_FULL_EVERY (revert after full-recompute test)
+      # How many watermark-triggered recomputes pass before one runs FULL rather
+      # than incremental. Passed explicitly for the same reason as the SPARK_*
+      # settings below: left unset, main.py's own default silently applies and
+      # this file appears to have no say. 2880 slices is ~30 days at the 15-min
+      # cadence, so a full rebuild is roughly monthly.
+      #
+      # It is the convergence bound for DELETIONS only, and only backend ones:
+      # incremental runs add but never remove, so unreferenced `articles` rows
+      # wait for the next full run. Nothing user-visible waits on it — a card
+      # that stops matching is removed at once by the change-stream
+      # recompute_user(), and retention deletes its own gold rows directly.
+      # Lower it (e.g. 12, ~3h) to reclaim that storage sooner; measured cost of
+      # a full run is ~8 min warm, ~16 min on a cold Spark session.
       GOLD_FULL_EVERY: ${GOLD_FULL_EVERY:-2880}
       # MongoDB replica set holding the per-user profiles (territories/keywords).
       MONGO_URI: ${MONGO_URI:-mongodb://mongo1:27017,mongo2:27017,mongo3:27017/?replicaSet=rs0}

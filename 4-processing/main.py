@@ -72,9 +72,24 @@ STATUS_FILE  = Path(os.getenv("STATUS_DIR", "/data/status")) / "pipeline_status.
 # watermark, which is the same work for the same result in the common case.
 #
 # FULL_EVERY forces a full run periodically, because incremental can only ADD
-# (see spark_gold.recompute). Without it, rows that stopped matching, orphaned
-# articles and retention deletes would never be cleared. At the 15-minute
-# cadence, 12 puts a full rebuild roughly every three hours.
+# (see spark_gold.recompute). At the 15-minute cadence, 2880 puts a full rebuild
+# roughly every 30 days; 12 would be every three hours.
+#
+# What actually waits on it is NARROWER than it first appears, and worth stating
+# so the number is not chosen against the wrong risk. Of the things an
+# incremental run cannot do:
+#   * rows that stopped matching — do NOT wait. A preference change is caught by
+#     the Mongo change stream, and recompute_user() publishes with
+#     incremental=False, which DELETEs and rebuilds that user's user_articles
+#     authoritatively (measured: 3271 -> 1391 rows, 2m26s after the edit).
+#   * retention deletes — do NOT wait. retention.delete_from_gold() removes the
+#     user_articles and articles rows itself, immediately.
+#   * the ORPHAN SWEEP — this is the one that waits. Unreferenced `articles` rows
+#     accumulate until the next full run.
+# And an unreferenced row is invisible to users: every serving query reaches
+# articles through `user_articles` (the one exception, triaged needs-action /
+# monitoring cards, is explicitly protected from the sweep). So FULL_EVERY sets
+# how long BACKEND STORAGE GARBAGE persists, not how stale a briefing can be.
 #
 # The counter is in memory on purpose: a restart resets it to 0, and run 0 is
 # always full. Restarting therefore forces a clean rebuild, which is the safe
