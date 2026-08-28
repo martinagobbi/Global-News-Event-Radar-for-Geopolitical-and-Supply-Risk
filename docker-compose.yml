@@ -97,6 +97,8 @@ services:
       CLICKHOUSE_HOST: ${CLICKHOUSE_HOST:-clickhouse-s1r1}
       CLICKHOUSE_PORT: ${CLICKHOUSE_PORT:-9000}
       STATUS_DIR: /data/status
+      # TEMPORARY-TEST-GOLD_FULL_EVERY (revert after full-recompute test)
+      GOLD_FULL_EVERY: ${GOLD_FULL_EVERY:-2880}
       # MongoDB replica set holding the per-user profiles (territories/keywords).
       MONGO_URI: ${MONGO_URI:-mongodb://mongo1:27017,mongo2:27017,mongo3:27017/?replicaSet=rs0}
       MONGO_DB: ${MONGO_DB:-radar}

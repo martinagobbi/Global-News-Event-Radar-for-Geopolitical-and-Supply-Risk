@@ -68,8 +68,7 @@ STATUS_FILE  = Path(os.getenv("STATUS_DIR", "/data/status")) / "pipeline_status.
 
 # ── Incremental gold ─────────────────────────────────────────────────────────
 # A watermark-triggered recompute normally re-evaluates ALL of silver for every
-# profile: a slice bringing 34 mentions rebuilt 111,430 candidates x 3 users in
-# ~134 s. Incremental considers only mentions newer than the last published
+# profile. Incremental considers only mentions newer than the last published
 # watermark, which is the same work for the same result in the common case.
 #
 # FULL_EVERY forces a full run periodically, because incremental can only ADD
