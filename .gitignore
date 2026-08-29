@@ -84,8 +84,12 @@ bootstrap/gold_snapshot.sh
 **/data/gold_seed_BAD/*
 # "Sectors"
 ./5-serving/frontend/configuration/sectors.py
+# R added automatically
+.Rhistory
 
 # 10. FOR LOCAL TESTING
 .venv/
 tests/
 diffs_to_make_sense_of/
+dev_tool_for_time_gauging/
+dev_tools_for_filter_diagnostics/
