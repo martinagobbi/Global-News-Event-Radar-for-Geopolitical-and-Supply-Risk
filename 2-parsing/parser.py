@@ -96,7 +96,7 @@ SUPPLY_CHAIN_KEYWORDS = {
     "harbor", "harbour",
     "shipping",
     "freight",
-    "cargo", "cargoes"
+    "cargo", "cargoes",
     "customs",
     "tariff",
     "logistics",
@@ -104,7 +104,7 @@ SUPPLY_CHAIN_KEYWORDS = {
     "supply-side",
     "warehouse",
     "storage",
-    "refinery", "refineries"
+    "refinery", "refineries",
     "factory", "factories",
     "plant",
     "semiconductor",
