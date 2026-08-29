@@ -586,8 +586,12 @@ def write_gold(df, table: str, mode: str = "append", truncate: bool = False) -> 
 # postgres_writer.write_user_articles = DELETE this user's rows, then INSERT
 #
 # ON CONFLICT would raise "cannot affect row a second time" if articles_stage
-# held two rows with the same doc_id — but it cannot: the DataFrame is
-# dropDuplicates(["doc_id"]) before it is staged. Oracle's MERGE had the same
+# held two rows with the same (doc_id, global_event_id) — but it cannot: the
+# DataFrame is dropDuplicates(["doc_id", "global_event_id"]) before it is
+# staged (build_catalogue, and again just before write_gold). A shared doc_id
+# alone is expected and fine — one URL routinely mentions several events — it
+# is the PAIR that must be unique, matching the articles table's composite
+# PRIMARY KEY (doc_id, global_event_id). Oracle's MERGE had the same
 # requirement (ORA-30926 otherwise), so this is not a new constraint.
 _ARTICLE_UPSERT_COLUMNS = [
     "doc_id", "document_identifier", "mention_identifier", "global_event_id",

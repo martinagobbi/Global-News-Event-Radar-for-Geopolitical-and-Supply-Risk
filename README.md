@@ -123,11 +123,11 @@ docker node promote <store2-hostname> <store3-hostname>
 
 # 4. (On store1): Label the machines, for the placement constraints to work
 docker node update --label-add store=store1 <store1-hostname>
-docker node update --label-add store=store2 <store1-hostname>
-docker node update --label-add store=store3 <store1-hostname>
-docker node update --label-add store=store4 <store1-hostname>
-docker node update --label-add store=store5 <store1-hostname>
-docker node update --label-add store=store6 <store1-hostname>
+docker node update --label-add store=store2 <store2-hostname>
+docker node update --label-add store=store3 <store3-hostname>
+docker node update --label-add store=store4 <store4-hostname>
+docker node update --label-add store=store5 <store5-hostname>
+docker node update --label-add store=store6 <store6-hostname>
 docker node update --label-add role=pipeline <pipeline1-hostname>
 
 # 5. (On store1, store2, or store3, the Docker Swarm managers) Build and push the images.
