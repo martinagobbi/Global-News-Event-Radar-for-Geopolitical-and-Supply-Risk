@@ -41,6 +41,7 @@ CONTROL_FILE_MAX_WAIT   = int(os.getenv("CONTROL_FILE_MAX_WAIT", "120"))
 
 EVENTS_NAME_SUFFIX = ".export.CSV"
 MENTIONS_NAME_SUFFIX = ".mentions.CSV"
+MANIFEST_SUFFIX = ".slice.json"
 
 def ensure_directories() -> None:
     ensure_ingestion_dirs()
@@ -219,11 +220,55 @@ def slice_deadline_passed(slice_id: str) -> bool:
     return age >= SLICE_RETRIEVAL_DEADLINE
 
 
+def _write_manifest(slice_id: str, kinds: list) -> None:
+    """
+    Declare, to the parsing layer, exactly which files this slice consists of.
+
+    ── Why a manifest and not a timing heuristic ────────────────────────────────
+    A slice is released as up to TWO files, by two separate os.replace() calls
+    below. Each rename is atomic on its own; the pair is not. A scan landing
+    between them sees an events-only slice — and because a lone file is a
+    LEGITIMATE final state here (this poller deliberately releases partial
+    slices once SLICE_RETRIEVAL_DEADLINE passes), file presence alone cannot
+    distinguish that from a slice that really does contain only events.
+
+    Guessing from timing answers the question with a probability, not a fact,
+    and silently reopens the race if the interval is ever retuned. This states
+    the fact instead: release_slice() already knows exactly what it is
+    releasing, from `staged`, before it moves a single file.
+
+    ── Written LAST, deliberately ───────────────────────────────────────────────
+    The manifest is written only after both renames above are done, so its
+    existence proves every file it names is already in place. Parsing therefore
+    needs no settle window at all: no manifest means "not ready yet"; a manifest
+    means "these files, all of them, now". Writing it first would instead create
+    a crash window where parsing waits on files that never arrive — writing it
+    last makes that crash self-correcting: the files simply sit, unmanifested,
+    until _sweep_raw_orphans() collects them.
+    """
+    payload = {
+        "slice_id": slice_id,
+        "kinds": sorted(kinds),
+        "files": sorted(f"{slice_id}{EVENTS_NAME_SUFFIX}" if k == "events"
+                        else f"{slice_id}{MENTIONS_NAME_SUFFIX}" for k in kinds),
+        "complete": sorted(kinds) == ["events", "mentions"],
+        "written_at": datetime.now(timezone.utc).isoformat(),
+    }
+    final = RAW_CSV_DIR / f"{slice_id}{MANIFEST_SUFFIX}"
+    tmp = final.with_name(f".{final.name}.tmp")
+    tmp.write_text(json.dumps(payload), encoding="utf-8")
+    os.replace(tmp, final)
+    print(f"[RELEASE] slice {slice_id} manifest: {'+'.join(payload['kinds']) or 'none'} "
+          f"(complete={payload['complete']})")
+
+
 def release_slice(slice_id: str) -> list:
     """
     Move a slice's staged files into the hand-off directory, mentions LAST so the
     parsing layer never sees a pair mid-write — the same ordering it already
-    relies on. Returns the released file names.
+    relies on. Writes a manifest last of all (see _write_manifest), so parsing
+    can trust a lone file as final without guessing from its age. Returns the
+    released file names.
     """
     staged = staged_kinds(slice_id)
     released = []
@@ -242,6 +287,7 @@ def release_slice(slice_id: str) -> list:
     if released:
         kinds = "+".join(sorted(staged.keys()))
         print(f"[RELEASE] slice {slice_id} -> parsing ({kinds}): {', '.join(released)}")
+        _write_manifest(slice_id, list(staged.keys()))
     return released
 
 def _retrieve_into_staging(session: requests.Session, url: str, kind: str,

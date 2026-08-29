@@ -12,8 +12,9 @@ The ingestion poller drops the raw GDELT files into RAW_CSV_DIR (/data/raw/csv):
     <slice>.mentions.CSV   (mentions, 16 columns, tab-separated, no header)
 where <slice> is the GDELT 15-minute timestamp (e.g. 20260514083000).
 
-This layer watches that directory and, for every slice whose events AND mentions
-files are both present and stable, it:
+This layer watches that directory for slices ingestion has declared complete
+via a manifest (ingestion writes it last, after every file it releases — see
+_read_raw_manifest()), and for each one it:
     1. keeps only supply-chain-relevant events (parser.passes_filter),
     2. keeps ALL mentions raw (validation does the referential-integrity filter),
      3. projects the retained columns and writes the pair into
@@ -51,8 +52,9 @@ mode a watermark exists to prevent:
     * orphan sweeps — two backstops, NOT how a partial slice is normally resolved:
       a slice missing its partner is published as a singleton on its very next
       scan (see _ready_slices()), so neither sweep exists to wait one out.
-      _sweep_raw_orphans() catches a file in RAW_CSV_DIR stuck for some OTHER
-      reason (unreadable, or left behind by an interrupted run) and dead-letters
+      _sweep_raw_orphans() catches a manifest or data file left in RAW_CSV_DIR
+      stuck for some OTHER reason (unreadable, an un-manifested file from an
+      ingestion crash, or a file this layer itself abandoned) and dead-letters
       it after RAW_SLICE_ORPHAN_MAX_AGE. _sweep_parsed_orphans() catches the same
       failure on the published side — a manifest or data file left in
       LATEST_FILES_DIR that validation never consumed — after
@@ -71,12 +73,11 @@ Environment variables
     LATEST_FILES_DIR         output dir  (default /data/latest_files)
     FILTER_EVENTS            keep only relevant events 1/0 (default 1)
     SCAN_INTERVAL_SECONDS    directory poll interval       (default 5)
-    FILE_STABLE_SECONDS      min file age before reading   (default 3)
     STATE_DIR                watermark location            (default /data/state)
     DEAD_LETTER_DIR          abandoned slices              (default /data/dead_letter)
     MAX_SLICE_ATTEMPTS       attempt count, LOGGED ONLY — see TRANSIENT_MAX_WAIT (default 3)
     TRANSIENT_MAX_WAIT       seconds a transient failure may retry before dead-lettering (default 250)
-    RAW_SLICE_ORPHAN_MAX_AGE     age at which raw data is abandoned (default 1800)
+    RAW_SLICE_ORPHAN_MAX_AGE     age at which raw data is abandoned (default 840)
     PARSED_SLICE_ORPHAN_MAX_AGE  age at which parsed data left for validation is removed (default 720)
     BACKPRESSURE_MAX_WAIT    wait before reporting a stalled consumer (default 600)
 """
@@ -106,7 +107,6 @@ RAW_CSV_DIR      = Path(os.getenv("RAW_CSV_DIR", os.getenv("INGESTION_CSV_DIR", 
 LATEST_FILES_DIR = Path(os.getenv("LATEST_FILES_DIR", "/data/latest_files"))
 FILTER_EVENTS    = os.getenv("FILTER_EVENTS", "1") == "1"
 SCAN_INTERVAL    = int(os.getenv("SCAN_INTERVAL_SECONDS", "5"))
-FILE_STABLE_SECS = int(os.getenv("FILE_STABLE_SECONDS", "3"))
 
 STATE_DIR        = Path(os.getenv("STATE_DIR", "/data/state"))
 SLICE_STATE_FILE = STATE_DIR / "parsing_slices.json"
@@ -118,7 +118,7 @@ MAX_SLICE_ATTEMPTS    = int(os.getenv("MAX_SLICE_ATTEMPTS", "3"))   # log line o
 # is set aside at once (PermanentError), and a transient one is given a budget in
 # SECONDS, because a count cannot express "wait out a restart".
 TRANSIENT_MAX_WAIT    = int(os.getenv("TRANSIENT_MAX_WAIT", "250"))
-RAW_SLICE_ORPHAN_MAX_AGE  = int(os.getenv("RAW_SLICE_ORPHAN_MAX_AGE", str(30 * 60)))
+RAW_SLICE_ORPHAN_MAX_AGE  = int(os.getenv("RAW_SLICE_ORPHAN_MAX_AGE", str(14 * 60)))
 PARSED_SLICE_ORPHAN_MAX_AGE = int(os.getenv("PARSED_SLICE_ORPHAN_MAX_AGE", str(12 * 60)))
 BACKPRESSURE_MAX_WAIT = int(os.getenv("BACKPRESSURE_MAX_WAIT", str(10 * 60)))
 
@@ -129,6 +129,7 @@ _first_failure: dict[str, float] = {}
 
 EVENTS_SUFFIX   = ".export.CSV"
 MENTIONS_SUFFIX = ".mentions.CSV"
+MANIFEST_SUFFIX = ".slice.json"
 
 
 # ── Watermark + retry state ──────────────────────────────────────────────────
@@ -203,7 +204,12 @@ def _dead_letter(slice_id: str, paths, reason: str) -> None:
     Move a slice's files out of the input directory so the pipeline can advance.
     They are MOVED, never deleted: an abandoned slice is evidence, and it can be
     replayed by copying it back. Each file is also logged in DEAD_LETTER_DIR.
+
+    A singleton slice has a None in place of its missing half (see
+    _ready_slices()), so callers pass paths like [ev, mn, ...] without
+    filtering it out themselves — that's done here, once, for every caller.
     """
+    paths = [p for p in paths if p is not None]
     target = DEAD_LETTER_DIR / slice_id
     try:
         target.mkdir(parents=True, exist_ok=True)
@@ -229,44 +235,74 @@ def _slice_of(path: Path) -> str | None:
     return None
  
  
-def _stable(path: Path) -> bool:
-    """True if the file is old enough to be considered fully written."""
+def _read_raw_manifest(slice_id: str) -> dict | None:
+    """
+    The manifest ingestion wrote for this slice, or None if it is not there yet.
+
+    Ingestion writes the manifest LAST, after every data file it intends to
+    release, so its presence is the completeness signal: no manifest means the
+    slice is still being released (or was never released); a manifest means the
+    files it names are all on disk now.
+    """
+    path = RAW_CSV_DIR / f"{slice_id}{MANIFEST_SUFFIX}"
     try:
-        return (time.time() - path.stat().st_mtime) >= FILE_STABLE_SECS
-    except OSError:
-        return False
- 
- 
+        with path.open(encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return None
+
+
 def _ready_slices() -> list[tuple[str, Path | None, Path | None]]:
     """
     Find slices ready to publish, as (slice_id, events_path, mentions_path) with
     either path possibly None.
 
-    Singletons are published, not held. The ingestion layer assembles a slice in
-    a staging folder and moves it here only once it is complete or its retrieval
-    deadline has passed, so anything in this directory is a DELIBERATE, final
-    release. A lone file is therefore not "half a slice still arriving" — it is
-    all there will ever be, and it still carries data that reaches silver: events
-    alone update the store (ReplacingMergeTree on GLOBALEVENTID), and mentions
-    alone attach to events already stored.
+    ── Why a manifest and not a file-age heuristic ──────────────────────────────
+    A slice is released as up to TWO files, by two separate os.replace() calls
+    in the ingestion layer. Each rename is atomic; the pair is not. A scan
+    landing between them sees an events-only slice — and because a lone file IS
+    a legitimate final state here (ingestion deliberately releases partial
+    slices once its own retrieval deadline passes), file presence alone cannot
+    distinguish that from a slice that really does contain only events.
+
+    Judging by file age answers this with a probability, not a fact: it guesses
+    that "too new" means "still being written", and a threshold sized for the
+    common case (two back-to-back local renames of already-staged files) is
+    still only a guess — one that gets worse, not better, the more this layer's
+    own write side (see _write_manifest) is used as the model, since there the
+    same kind of gap is proportional to how long a large mentions table takes to
+    project and serialize. The manifest answers with a fact instead: ingestion
+    already knows exactly what it is releasing, from `staged`, before it moves a
+    single file, so it simply states it.
+
+    Singletons are still published, not held: a manifest naming only "events" (or
+    only "mentions") is as final a release as a two-file one, and each half still
+    carries data that reaches silver on its own (events alone update the store
+    via ReplacingMergeTree; mentions alone attach to events already stored).
+
+    Only slices with a present, complete manifest are returned. A manifest
+    naming a file that is not yet on disk is logged and skipped for this
+    scan — should be impossible, since the manifest is written last.
     """
-    events: dict[str, Path] = {}
-    mentions: dict[str, Path] = {}
     if not RAW_CSV_DIR.exists():
         return []
-    for p in RAW_CSV_DIR.iterdir():
-        if not p.is_file() or p.name.startswith("."):
-            continue
-        sl = _slice_of(p)
-        if sl is None:
-            continue
-        (events if p.name.endswith(EVENTS_SUFFIX) else mentions)[sl] = p
 
     ready = []
-    for sl in sorted(set(events) | set(mentions)):       # oldest slice first
-        ev, mn = events.get(sl), mentions.get(sl)
-        if all(_stable(p) for p in (ev, mn) if p is not None):
-            ready.append((sl, ev, mn))
+    for manifest_path in sorted(RAW_CSV_DIR.glob(f"*{MANIFEST_SUFFIX}")):  # oldest slice first
+        sl = manifest_path.name[: -len(MANIFEST_SUFFIX)]
+        manifest = _read_raw_manifest(sl)
+        if manifest is None:
+            continue
+        kinds = manifest.get("kinds", [])
+        expected = [RAW_CSV_DIR / n for n in manifest.get("files", [])]
+        missing = [p.name for p in expected if not p.is_file()]
+        if missing:
+            logger.warning("slice %s manifest lists %s but %s absent — waiting",
+                            sl, manifest.get("files"), missing)
+            continue
+        ev = RAW_CSV_DIR / f"{sl}{EVENTS_SUFFIX}" if "events" in kinds else None
+        mn = RAW_CSV_DIR / f"{sl}{MENTIONS_SUFFIX}" if "mentions" in kinds else None
+        ready.append((sl, ev, mn))
     return ready
  
  
@@ -282,6 +318,14 @@ def _sweep_raw_orphans() -> None:
 
     Files are checked regardless of whether they have a partner, because with
     singletons publishable, "has no partner" no longer means "cannot progress".
+
+    ── Manifests are swept too ─────────────────────────────────────────────────
+    _slice_of() reads GDELT data filenames and returns None for a .slice.json,
+    so sweeping on it alone would carry the data files out and leave the
+    manifest behind — which would make _ready_slices() log "manifest lists X
+    but X absent" on every scan forever, for the one file the sweep would never
+    otherwise collect. It also catches the opposite case: a manifest whose data
+    files never arrived at all (ingestion crashed between staging and release).
     """
     if not RAW_CSV_DIR.exists():
         return
@@ -291,6 +335,8 @@ def _sweep_raw_orphans() -> None:
         if not p.is_file() or p.name.startswith("."):
             continue
         sl = _slice_of(p)
+        if sl is None and p.name.endswith(MANIFEST_SUFFIX):
+            sl = p.name[: -len(MANIFEST_SUFFIX)]
         if sl is None:
             continue
         try:
@@ -349,9 +395,6 @@ def _atomic_write(df: pd.DataFrame, final: Path) -> None:
     tmp = final.with_name(f".{final.name}.tmp")
     df.to_csv(tmp, sep="\t", header=False, index=False)
     os.replace(tmp, final)
- 
- 
-MANIFEST_SUFFIX = ".slice.json"
 
 
 def _write_manifest(slice_id: str, kinds: list[str]) -> None:
@@ -457,10 +500,13 @@ def process_pair(slice_id: str, ev_path: Path | None, mn_path: Path | None) -> N
              ([ "mentions" ] if mentions_df is not None else [])
     _write_manifest(slice_id, _kinds)
  
-    # Parsing owns deletion of the consumed source files.
+    # Parsing owns deletion of the consumed source files, and of the raw-side
+    # manifest that declared them — left behind, it would keep pointing
+    # _ready_slices() at files that are already gone.
     for p in (ev_path, mn_path):
         if p is not None:
             p.unlink(missing_ok=True)
+    (RAW_CSV_DIR / f"{slice_id}{MANIFEST_SUFFIX}").unlink(missing_ok=True)
 
     kinds = "+".join(k for k, v in (("events", ev_path), ("mentions", mn_path))
                      if v is not None)
@@ -505,7 +551,8 @@ def main() -> None:
                     # a full parse of the slice while later slices queue behind
                     # this one.
                     logger.error("Permanently rejected slice %s: %s", slice_id, exc)
-                    _dead_letter(slice_id, [ev, mn], f"permanently rejected: {exc}")
+                    _dead_letter(slice_id, [ev, mn, RAW_CSV_DIR / f"{slice_id}{MANIFEST_SUFFIX}"],
+                                 f"permanently rejected: {exc}")
                     state["attempts"].pop(slice_id, None)
                     _first_failure.pop(slice_id, None)
                     _save_state(state)
@@ -520,7 +567,7 @@ def main() -> None:
                     if waited >= TRANSIENT_MAX_WAIT:
                         # Give up on this slice rather than blocking every later
                         # one behind it — bounded lateness, not infinite retry.
-                        _dead_letter(slice_id, [ev, mn],
+                        _dead_letter(slice_id, [ev, mn, RAW_CSV_DIR / f"{slice_id}{MANIFEST_SUFFIX}"],
                                      f"{attempts} attempts over {waited:.0f}s")
                         state["attempts"].pop(slice_id, None)
                         _first_failure.pop(slice_id, None)
