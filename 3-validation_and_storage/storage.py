@@ -89,7 +89,7 @@ _EVENTS_BODY = """(
     ActionGeo_CountryCode  Nullable(String),
     ActionGeo_Lat          Nullable(Float64),
     ActionGeo_Long         Nullable(Float64),
-    -- Not Nullable, and not String despite every other column here being one:
+    -- DATEADDED is not Nullable, and not String:
     -- this is the ReplacingMergeTree version column for gdelt_events_local
     -- (see ENGINE clause below), and that position rejects both a Nullable
     -- wrapper and a non-integer/date underlying type outright:
@@ -138,6 +138,9 @@ _MENTIONS_BODY = """(
     --   (BAD_TYPE_OF_FIELD)
     -- Safe because _to_bool_uint() below always returns a real 0 or 1, never
     -- None — there is no unmapped value this column needs to represent.
+    -- And if there's a tie, which one is kept does not matter. The most recent one could
+    -- be a rip-off of the least recent, but it could also not be. As long as one is kept,
+    -- it's fine.
     enriched                   UInt8,
     INDEX idx_mentionid lower(MentionIdentifier) TYPE ngrambf_v1(4, 4096, 3, 0) GRANULARITY 4
 )"""

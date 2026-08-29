@@ -14,13 +14,16 @@ In single-machine mode, the pipeline, the stores, and the serving frontend are a
 
 Note: step 3 will continue retrying automatically until ClickHouse is available. This is fully normal and does not mean there is any problem. ClickHouse will become available by itself.
 
+REQUIRES to have Docker up and running.
+
+Preferrably, you may set "Settings -> Resources -> Advanced -> Resource Allocation -> Memory limit" to at least 6 GB, even though testing revealed that this pipeline can work with less.
+
 ```bash
-# REQUIRES to have Docker up and running.
-# Preferrably, you may set "Settings -> Resources -> Advanced -> Resource Allocation -> Memory limit" to at least 6 GB
-
-# Steps 1 through 4 below can be run as one line, separated with "&&"'s like so:
+# Steps 1 through 4 below can be run as one line, separated with "&&"'s like so.
 docker compose --env-file .env.single_machine -f docker-compose.stores.yml up -d && docker compose --env-file .env.single_machine up -d --build && ./bootstrap/silver_snapshot.sh restore && docker compose -f 5-serving/docker-compose.serving.yml up --build
+```
 
+```bash
 # 1. Stores
 docker compose --env-file .env.single_machine -f docker-compose.stores.yml up -d
 
@@ -30,6 +33,7 @@ docker compose --env-file .env.single_machine -f docker-compose.stores.yml up -d
 docker compose --env-file .env.single_machine up -d --build
 
 # 3. OPTIONAL BUT NECESSARY FOR PROPER TESTING: Silver data from articles spanning 27/06/2026 at 17:15 to 27/07/2026 at 17:15.
+# IMPORTANT: this will continue retrying automatically until ClickHouse is available. This is fully normal and does not mean there is any problem. ClickHouse will become available by itself.
 # This "seeded" data was chosen to make the testing-mode radar not empty at startup: the radar gets updated with the latest news every 15 minutes, and automatically drops news older than 185 days every midnight. Even seeding over a year of data will leave a gap in single-machine mode: all the per-15-minutes slices between the latest seeded/stored data and the data from the moment a tester starts up the testing-mode radar with these instructions.
 ./bootstrap/silver_snapshot.sh restore
 
@@ -71,11 +75,20 @@ caffeinate -is bash -c "docker compose --env-file .env.single_machine stop inges
 
 For convenience, we include for single-machine mode also shutdown instructions.
 
-**OPTIONAL**: Reset silver so the next startup can restore the seed cleanly
+All "**OPTIONAL**" and "**NOT OPTIONAL**" (see below) shutdown steps together.
+
+```bash
+docker compose --env-file .env.single_machine stop ingestion parsing validation && ./bootstrap/silver_snapshot.sh wipe && docker exec pipeline_processing python3 -c "import main; main.recompute_all()" && docker compose -f 5-serving/docker-compose.serving.yml down && docker compose --env-file .env.single_machine down && docker compose --env-file .env.single_machine -f docker-compose.stores.yml down
+```
+
+**OPTIONAL**: Reset silver so the next startup can restore the seed cleanly.
+
 ``` bash
 # All steps below as one line:
 docker compose --env-file .env.single_machine stop ingestion parsing validation && ./bootstrap/silver_snapshot.sh wipe && docker exec pipeline_processing python3 -c "import main; main.recompute_all()"
+```
 
+```bash
 # 1.
 docker compose --env-file .env.single_machine stop ingestion parsing validation        # Stops live data from being ingested
 
@@ -86,8 +99,9 @@ docker compose --env-file .env.single_machine stop ingestion parsing validation 
 docker exec pipeline_processing python3 -c "import main; main.recompute_all()"  # Recomputes gold from the now-empty silver layer (can take a few minutes, but this is indeed not an action the system would normally perform under any circumstance)
 ```
 
-**NOT OPTIONAL**: shutdown procedure (that does not destroy the volumes, so user preferences and data for users stay intact)
-``` bash
+**NOT OPTIONAL**: shutdown procedure (that does not destroy the volumes, so user preferences and data for users stay intact).
+
+```bash
 docker compose -f 5-serving/docker-compose.serving.yml down && docker compose --env-file .env.single_machine down && docker compose --env-file .env.single_machine -f docker-compose.stores.yml down
 ```
 

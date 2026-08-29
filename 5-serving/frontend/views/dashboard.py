@@ -206,7 +206,7 @@ if _watermark:
 else:
     st.caption(
         "Newest data held: not recorded yet — shown once the pipeline "
-        "next publishes."
+        "next publishes, in max 15 to 30 minutes, only possible after GDELT publishes new data."
     )
 
 st.info(
