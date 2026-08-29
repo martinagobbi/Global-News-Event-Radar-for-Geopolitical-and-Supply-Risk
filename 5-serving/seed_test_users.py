@@ -242,7 +242,7 @@ def _wait_for_backend() -> bool:
             if time.monotonic() >= deadline:
                 print(f"\nThe backend at {BACKEND_URL} did not respond within "
                       f"{BACKEND_WAIT_SECONDS}s. Is it running?")
-                print("  docker compose --env-file .env.testing up -d --build")
+                print("  docker compose --env-file .env.single_machine up -d --build")
                 return False
             if not announced:
                 print(f"waiting for the backend at {BACKEND_URL} ", end="", flush=True)

@@ -19,15 +19,15 @@ Note: step 3 will continue retrying automatically until ClickHouse is available.
 # Preferrably, you may set "Settings -> Resources -> Advanced -> Resource Allocation -> Memory limit" to at least 6 GB
 
 # Steps 1 through 4 below can be run as one line, separated with "&&"'s like so:
-docker compose --env-file .env.testing -f docker-compose.stores.yml up -d && docker compose --env-file .env.testing up -d --build && ./bootstrap/silver_snapshot.sh restore && docker compose -f 5-serving/docker-compose.serving.yml up --build
+docker compose --env-file .env.single_machine -f docker-compose.stores.yml up -d && docker compose --env-file .env.single_machine up -d --build && ./bootstrap/silver_snapshot.sh restore && docker compose -f 5-serving/docker-compose.serving.yml up --build
 
 # 1. Stores
-docker compose --env-file .env.testing -f docker-compose.stores.yml up -d
+docker compose --env-file .env.single_machine -f docker-compose.stores.yml up -d
 
 # 2. Pipeline (Ingestion; Parsing; Validation and Storage; Processing; Serving Backend)
 # Especially if running the code in this README multiple times, this may mention "orphans", and that's fine: those are idempotently-created intended-mode versions of what you will be opening. They need to stay in place in case intended mode is every run, but intended mode is too heavy to work on one machine.
 # NOTE: This step now includes an automated one-shot "seeder" container. It will wait for the backend to be ready and automatically create the three test profiles idempotently. 
-docker compose --env-file .env.testing up -d --build
+docker compose --env-file .env.single_machine up -d --build
 
 # 3. OPTIONAL BUT NECESSARY FOR PROPER TESTING: Silver data from articles spanning 27/06/2026 at 17:15 to 27/07/2026 at 17:15.
 # This "seeded" data was chosen to make the testing-mode radar not empty at startup: the radar gets updated with the latest news every 15 minutes, and automatically drops news older than 185 days every midnight. Even seeding over a year of data will leave a gap in single-machine mode: all the per-15-minutes slices between the latest seeded/stored data and the data from the moment a tester starts up the testing-mode radar with these instructions.
@@ -59,7 +59,7 @@ This loads some example data for single-machine mode. It is already going to be 
 
 # 1.
 # WARNING: this command can take a while, because it downloads at a much greater pace than the pipeline normally would (30 days of data rather than 15 minutes of it!). It might keep your computer awake for a long time unless you stop the process or close the computer.
-caffeinate -is bash -c "docker compose --env-file .env.testing stop ingestion parsing validation && ./bootstrap/silver_snapshot.sh wipe && env ENRICH=1 docker compose --env-file .env.testing -f docker-compose.bootstrap.yml run --rm --build bootstrap && ./bootstrap/silver_snapshot.sh trim 20260727171500 && ./bootstrap/silver_snapshot.sh export && docker compose --env-file .env.testing start ingestion parsing validation"
+caffeinate -is bash -c "docker compose --env-file .env.single_machine stop ingestion parsing validation && ./bootstrap/silver_snapshot.sh wipe && env ENRICH=1 docker compose --env-file .env.single_machine -f docker-compose.bootstrap.yml run --rm --build bootstrap && ./bootstrap/silver_snapshot.sh trim 20260727171500 && ./bootstrap/silver_snapshot.sh export && docker compose --env-file .env.single_machine start ingestion parsing validation"
 # If available in the present `data` Docker volume, can add `RELEASE_SOURCE=gdelt_release` right after `ENRICH=1`
 # (strongly recommended on macOS: a bind mount of ./data/release takes >25 min just to LIST the 5,762 ZIPs, versus 0.04 s from the named volume.)
 
@@ -74,10 +74,10 @@ For convenience, we include for single-machine mode also shutdown instructions.
 **OPTIONAL**: Reset silver so the next startup can restore the seed cleanly
 ``` bash
 # All steps below as one line:
-docker compose --env-file .env.testing stop ingestion parsing validation && ./bootstrap/silver_snapshot.sh wipe && docker exec pipeline_processing python3 -c "import main; main.recompute_all()"
+docker compose --env-file .env.single_machine stop ingestion parsing validation && ./bootstrap/silver_snapshot.sh wipe && docker exec pipeline_processing python3 -c "import main; main.recompute_all()"
 
 # 1.
-docker compose --env-file .env.testing stop ingestion parsing validation        # Stops live data from being ingested
+docker compose --env-file .env.single_machine stop ingestion parsing validation        # Stops live data from being ingested
 
 # 2.
 ./bootstrap/silver_snapshot.sh wipe                                             # Removes all silver data and prevents repeated restores accumulating physical duplicates
@@ -88,7 +88,7 @@ docker exec pipeline_processing python3 -c "import main; main.recompute_all()"  
 
 **NOT OPTIONAL**: shutdown procedure (that does not destroy the volumes, so user preferences and data for users stay intact)
 ``` bash
-docker compose -f 5-serving/docker-compose.serving.yml down && docker compose --env-file .env.testing down && docker compose --env-file .env.testing -f docker-compose.stores.yml down
+docker compose -f 5-serving/docker-compose.serving.yml down && docker compose --env-file .env.single_machine down && docker compose --env-file .env.single_machine -f docker-compose.stores.yml down
 ```
 
 ## Intended mode

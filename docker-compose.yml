@@ -64,7 +64,7 @@ services:
       CLICKHOUSE_CLUSTER: gnews_cluster
       CLICKHOUSE_OP_TIMEOUT: "120"   # caps every ClickHouse op (lookup/insert/OPTIMIZE)
       # How many replicas must acknowledge an append. 2 suits the six-node
-      # cluster; .env.testing sets 1, because a single replica can never satisfy
+      # cluster; .env.single_machine sets 1, because a single replica can never satisfy
       # a quorum of 2 and every insert would fail with error 285.
       CLICKHOUSE_INSERT_QUORUM: ${CLICKHOUSE_INSERT_QUORUM:-2}
       LATEST_FILES_DIR: /data/latest_files
@@ -200,7 +200,7 @@ networks:
   # PIPELINE_NET_EXTERNAL decides whether this tier JOINS an existing
   # `pipeline_network` or CREATES one.
   #
-  #   true  (default, .env.testing and .env.intended) — the network already
+  #   true  (default, .env.single_machine and .env.intended) — the network already
   #         exists and the pipeline attaches to it. In single-machine mode the stores
   #         compose project created it as a local bridge; in intended mode it is
   #         the attachable OVERLAY created once by hand

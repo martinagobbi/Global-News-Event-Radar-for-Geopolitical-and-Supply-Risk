@@ -10,7 +10,7 @@
         unchanged — there is simply one node to coordinate instead of six.
 
         With a single replica there is no redundancy, so the pipeline must run
-        with CLICKHOUSE_INSERT_QUORUM=1 (set in .env.testing): a quorum of 2
+        with CLICKHOUSE_INSERT_QUORUM=1 (set in .env.single_machine): a quorum of 2
         could never be reached and every insert would block.
     -->
     <remote_servers>

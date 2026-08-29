@@ -101,7 +101,7 @@ case "${1:-}" in
       echo "ERROR: ${TABLES[0]} Still does not exist after 5 minutes." >&2
       echo "       Is the pipeline running? The VALIDATION layer owns this schema" >&2
       echo "       and creates it at startup; the stores alone will not." >&2
-      echo "         docker compose --env-file .env.testing up -d --build" >&2
+      echo "         docker compose --env-file .env.single_machine up -d --build" >&2
       exit 1
     fi
     # NOTE: passing this check does NOT mean the tables accept writes. It proves
@@ -203,7 +203,7 @@ case "${1:-}" in
     echo "ensure_tables() once, at startup, so nothing recreates the tables until"
     echo "it restarts:"
     echo
-    echo "    docker compose --env-file .env.testing restart validation     # testing"
+    echo "    docker compose --env-file .env.single_machine restart validation     # testing"
     echo "    docker service update --force radar_validation                # intended"
     echo
     echo "then re-fill silver:"
