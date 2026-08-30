@@ -91,5 +91,4 @@ bootstrap/gold_snapshot.sh
 .venv/
 tests/
 diffs_to_make_sense_of/
-dev_tool_for_time_gauging/
 dev_tools_for_filter_diagnostics/
