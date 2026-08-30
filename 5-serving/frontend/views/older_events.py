@@ -68,6 +68,9 @@ historical_events = st.session_state.get("cached_historical_events", [])
 st.subheader("Historical Event Cards")
 
 if not historical_events:
-    st.info("No older events found matching your criteria.")
+    st.info(
+        "Either no older events match your criteria, or you need to wait a "
+        "few minutes for them to arrive."
+    )
 else:
     render_briefing(historical_events, selected_countries=profile.get("territories", []))

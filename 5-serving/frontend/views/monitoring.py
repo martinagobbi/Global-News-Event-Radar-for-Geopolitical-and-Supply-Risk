@@ -29,7 +29,10 @@ except BackendUnavailable:
     st.stop()
 
 if not events:
-    st.info("No events flagged for monitoring yet.")
+    st.info(
+        "Either no events match the current filters, or you need to wait a "
+        "few minutes for them to arrive."
+    )
 else:
     for event in events:
         render_event_card(event, context="yellow")

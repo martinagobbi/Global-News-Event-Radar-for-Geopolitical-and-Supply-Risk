@@ -100,8 +100,9 @@ FIRST_BUILD_BODY = (
 )
 
 NO_MATCHES_BODY = (
-    "No articles matched your territories and keywords in this period. Both "
-    "filters are narrow by design; widen the briefing window or add keywords."
+    "Either no articles matched your territories and keywords in this period, "
+    "or you need to wait a few minutes for them to arrive. Both filters are "
+    "narrow by design; please consider widening the briefing window or adding keywords."
 )
 
 

@@ -24,7 +24,10 @@ render_retention_notice(preferences="follows")
 archived = get_archived_events(user_id)
 
 if not archived:
-    st.info("No archived events yet.")
+    st.info(
+        "Either no events match the current filters, or you need to wait a "
+        "few minutes for them to arrive."
+    )
 else:
     for event in archived:
         render_event_card(event, context="archive")

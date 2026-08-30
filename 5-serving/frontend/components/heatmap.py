@@ -11,7 +11,10 @@ def render_heatmap(summary: list[dict], selected_countries: list[str]) -> None:
     ]
 
     if not filtered:
-        st.info("No geographic risk data is available for the selected filter.")
+        st.info(
+            "Either no geographic risk data matches the selected filter, or you "
+            "need to wait a few minutes for it to arrive."
+        )
         return
 
     frame = pd.DataFrame(filtered)

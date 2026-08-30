@@ -12,7 +12,7 @@ In single-machine mode, the pipeline, the stores, and the serving frontend are a
 
 ### Single-machine mode startup
 
-Note: step 3 will continue retrying automatically until ClickHouse is available. This is fully normal and does not mean there is any problem. ClickHouse will become available by itself.
+**Note: step 3 will continue retrying automatically until ClickHouse is available, even 10 or 20 times. This is fully normal and does not mean there is any problem. ClickHouse will become available by itself.**
 
 REQUIRES to have Docker up and running.
 

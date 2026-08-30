@@ -209,7 +209,7 @@ def render_event_card(event: dict, context: str = "main") -> None:
         date_to_show = str(event["event_date"]).removesuffix(" 00:00:00")
 
         if cameo_label:
-            st.write(f'GDELT-detected event type that might make this of interest: "{cameo_label}"')
+            st.write(f'GDELT-detected event type (may or may not be what makes this event of interest): "{cameo_label}"')
 
         st.write(f"Event date: {date_to_show}")
 
@@ -246,7 +246,10 @@ def render_event_card(event: dict, context: str = "main") -> None:
                         f"       Tone: {_tone_text(selected.get('mention_doc_tone'))}"
                     )
         else:
-            st.info("No related articles that match your keywords are available for this event.")
+            st.info(
+                "Either no related articles match your keywords for this event, "
+                "or you need to wait a few minutes for them to arrive."
+            )
 
         render_tag_buttons(event_ids, context=context, user_tag=event.get("user_tag"))
 

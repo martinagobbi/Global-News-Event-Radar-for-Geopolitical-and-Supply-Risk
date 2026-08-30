@@ -64,7 +64,7 @@ def render_briefing(
             render_event_card(event, context="main")
 
     else:
-        st.info("No events match the current filters.")
+        st.info("Either no events match the current filters, or you need to wait a few minutes for them to arrive.")
 
     """
     with tabs[1]:
