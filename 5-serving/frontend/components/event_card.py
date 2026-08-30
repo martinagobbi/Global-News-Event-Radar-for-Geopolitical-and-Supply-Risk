@@ -189,21 +189,21 @@ def render_event_card(event: dict, context: str = "main") -> None:
 
         if event.get("inrawtext_filtered"):
             st.info(
-                "ℹ️ Only articles explicitly identified by GDELT as covering this event "
+                "ℹ️ Only articles containing any of your keywords, and explicitly identified by GDELT as covering this event "
                 "are shown. Articles where GDELT merely inferred a connection have been "
                 "excluded to reduce noise and paywall risk."
             )
         elif articles and all(a.get("in_raw_text") == 0 for a in articles):
             st.warning(
                 "⚠️ Sources on this card are inferred associations and may not directly "
-                "report on a relevant event."
+                "report on a relevant event. Still only articles containing any of your keywords are shown."
             )
 
         num_articles = len(articles)
         articles_display = "≥20" if num_articles >= 20 else str(num_articles)
 
         meta = st.columns(2)
-        meta[0].metric("Number of articles", articles_display)
+        meta[0].metric("Articles that contain keywords you specified", articles_display)
         meta[1].metric("Goldstein score", _goldstein_text(event.get("goldstein")))
 
         date_to_show = str(event["event_date"]).removesuffix(" 00:00:00")
@@ -217,6 +217,7 @@ def render_event_card(event: dict, context: str = "main") -> None:
             st.write("Articles below are sorted by:")
             st.write("- Confidence score (percentage of confidence that the article is related to this event)")
             st.write("- Tone score (−100: max negative; +100: max positive)")
+            st.write("**Note**: most of an event's articles are not shown if they do not contain any of your keywords.")
             for i, a in enumerate(articles[:PREVIEW_ARTICLES]):
                 if i == 0:
                     st.caption("---------------------------------------------------------")
@@ -245,7 +246,7 @@ def render_event_card(event: dict, context: str = "main") -> None:
                         f"       Tone: {_tone_text(selected.get('mention_doc_tone'))}"
                     )
         else:
-            st.info("No related articles available for this event.")
+            st.info("No related articles that match your keywords are available for this event.")
 
         render_tag_buttons(event_ids, context=context, user_tag=event.get("user_tag"))
 
