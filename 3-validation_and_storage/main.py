@@ -154,20 +154,33 @@ def _dead_letter(paths, reason: str) -> None:
     Move a pair out of latest_files so parsing can publish the next one. The
     files are MOVED, never deleted, so an abandoned slice stays inspectable.
     Each moved file is also recorded in the dead-letter CSV log.
+
+    A pair can reach here with its files already gone — parsing's own orphan
+    sweep (2-parsing/main.py's _sweep_parsed_orphans) can claim the same slice
+    out from under a validation attempt that is still retrying it. That is not
+    a new abandonment, just a stale one discovered late, so nothing is moved
+    and no "abandoned... moved to" claim is logged for a slice this function
+    never actually touched.
     """
     key = Path(paths[0]).name.split(".")[0]
     target = DEAD_LETTER_DIR / key
     # Include the manifest, or latest_files never empties and parsing's
     # back-pressure blocks every later slice behind this one.
     paths = list(paths) + [LATEST_FILES_DIR / f"{key}{MANIFEST_SUFFIX}"]
+    moved = []
     try:
-        target.mkdir(parents=True, exist_ok=True)
         for p in paths:
             p = Path(p)
             if p.exists():
+                target.mkdir(parents=True, exist_ok=True)
                 os.replace(p, target / p.name)
                 _append_dead_letter_log(target / p.name)
-        logger.error("Pair %s abandoned after %s — moved to %s", key, reason, target)
+                moved.append(p.name)
+        if moved:
+            logger.error("Pair %s abandoned after %s — moved to %s", key, reason, target)
+        else:
+            logger.info("Pair %s already gone from latest_files (likely swept by "
+                        "parsing already) — nothing to dead-letter", key)
     except OSError as exc:
         logger.error("Could not dead-letter %s (%s); deleting to unblock: %s",
                      key, exc, [Path(p).name for p in paths])
@@ -227,6 +240,29 @@ def list_files() -> list[Path]:
     manifests = sorted(LATEST_FILES_DIR.glob(f"*{MANIFEST_SUFFIX}"))
     if not manifests:
         return []
+
+    # ── Supersession: a newer slice landed before this one was resolved ────────
+    # Back-pressure means parsing publishes only once latest_files is empty, so
+    # more than one manifest here should never happen. If it does anyway — the
+    # only known path today is parsing's own orphan sweep clearing a slow
+    # slice's files out from under this layer, but the check does not assume
+    # that's the only cause — a newer manifest already being on disk IS proof
+    # the older one is no longer this layer's to finish. Dead-letter it right
+    # away, with a reason distinct from the ordinary permanent/transient paths,
+    # rather than let a stale retry (or a read against files that may already be
+    # gone) run against it.
+    while len(manifests) > 1:
+        stale = manifests.pop(0)
+        stale_id = stale.name[: -len(MANIFEST_SUFFIX)]
+        stale_manifest = read_manifest(stale_id)
+        stale_paths = [LATEST_FILES_DIR / n
+                       for n in (stale_manifest or {}).get("files", [])]
+        stale_paths = [p for p in stale_paths if p.is_file()] or [stale]
+        newer_id = manifests[0].name[: -len(MANIFEST_SUFFIX)]
+        logger.error("slice %s superseded by %s before it was appended or "
+                     "dead-lettered — abandoning it", stale_id, newer_id)
+        _dead_letter(stale_paths, f"superseded by newer slice {newer_id} "
+                                  "published before this one finished")
 
     slice_id = manifests[0].name[: -len(MANIFEST_SUFFIX)]
     manifest = read_manifest(slice_id)
