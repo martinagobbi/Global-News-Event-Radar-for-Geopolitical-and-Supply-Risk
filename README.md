@@ -14,14 +14,21 @@ In single-machine mode, the pipeline, the stores, and the serving frontend are a
 
 **Note: step 3 will continue retrying automatically until ClickHouse is available, even 10 or 20 times. This is fully normal and does not mean there is any problem. ClickHouse will become available by itself.**
 
-REQUIRES to have Docker up and running.
+REQUIREMENT: have Docker up and running.
 
 Preferrably, you may set "Settings -> Resources -> Advanced -> Resource Allocation -> Memory limit" to at least 6 GB, even though testing revealed that this pipeline can work with less.
 
 ```bash
-# Steps 1 through 4 below can be run as one line, separated with "&&"'s like so.
+# On macOS, Linux, and Windows with WSL2, steps 1 through 4 below can be run as one line, separated with "&&"'s like so.
 docker compose --env-file .env.single_machine -f docker-compose.stores.yml up -d && docker compose --env-file .env.single_machine up -d --build && ./bootstrap/silver_snapshot.sh restore && docker compose -f 5-serving/docker-compose.serving.yml up --build
 ```
+
+```bash
+# ...On Windows without WSL2, please run this instead.
+docker compose --env-file .env.single_machine -f docker-compose.stores.yml up -d && docker compose --env-file .env.single_machine up -d --build && ./bootstrap/silver_snapshot.ps1 restore && docker compose -f 5-serving/docker-compose.serving.yml up --build
+```
+
+Those that follow are the same steps, broken down.
 
 ```bash
 # 1. Stores
@@ -32,10 +39,13 @@ docker compose --env-file .env.single_machine -f docker-compose.stores.yml up -d
 # NOTE: This step now includes an automated one-shot "seeder" container. It will wait for the backend to be ready and automatically create the three test profiles idempotently. 
 docker compose --env-file .env.single_machine up -d --build
 
-# 3. OPTIONAL BUT NECESSARY FOR PROPER TESTING: Silver data from articles spanning 27/06/2026 at 17:15 to 27/07/2026 at 17:15.
+# 3. (ONLY MACOS, LINUX, OR WINDOWS WITH WSL2) OPTIONAL BUT NECESSARY FOR PROPER TESTING: Silver data from articles spanning 27/06/2026 at 17:15 to 27/07/2026 at 17:15.
 # IMPORTANT: this will continue retrying automatically until ClickHouse is available. This is fully normal and does not mean there is any problem. ClickHouse will become available by itself.
 # This "seeded" data was chosen to make the testing-mode radar not empty at startup: the radar gets updated with the latest news every 15 minutes, and automatically drops news older than 185 days every midnight. Even seeding over a year of data will leave a gap in single-machine mode: all the per-15-minutes slices between the latest seeded/stored data and the data from the moment a tester starts up the testing-mode radar with these instructions.
 ./bootstrap/silver_snapshot.sh restore
+
+# 3. (ONLY WINDOWS WITHOUT WSL2) Same as the other version of step 3 above.
+.\bootstrap\silver_snapshot.ps1 restore
 
 # 4. Service frontend.
 # While all previous steps just need to be run on the backend/operator machine, this is the only code that each frontend machine will need.
@@ -124,6 +134,8 @@ The logic is that ClickHouse's shard 1 lives on store1–3 and shard 2 on store4
 ### Intended-mode startup
 
 As explained above, **intended mode cannot be run on one machine and should be ignored**. Intended mode's current set up is only a boilerplate to make single-machine mode scalable to multiple machines in theory, and re-uses a lot of the same code. Nonetheless, instructions to start it up are provided here.
+
+REQUIREMENTS: For all machines: Docker and a clone of the project repository.
 
 ```bash
 # 1. (On store1): Form the Docker Swarm
