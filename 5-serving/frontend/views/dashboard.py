@@ -124,8 +124,9 @@ elif gold_changed:
 
 # ── Header ─────────────────────────────────────────────────────────────────
 header_left, header_right = st.columns([3, 1])
+events = st.session_state.get("cached_events", [])
 with header_left:
-    st.caption("Events are filtered according to your registered territories and supply-chain keywords.")
+    st.caption(f"Events are filtered according to your registered territories and supply-chain keywords. The **{len(events)}** events from the last {briefing_days} days are shown.")
     render_retention_notice(preferences="follows")
 with header_right:
     manual_refresh = st.button("Refresh now")
@@ -236,10 +237,8 @@ if should_refresh:
     if manual_refresh:
         st.success("Data refreshed.")
 
-events       = st.session_state.get("cached_events", [])
 summary      = st.session_state.get("cached_summary", [])
 
-# ── Map ────────────────────────────────────────────────────────────────────
 st.subheader("Heatmap")
 
 with st.expander("View heatmap", expanded=False):
@@ -247,43 +246,21 @@ with st.expander("View heatmap", expanded=False):
         summary,
         profile.get("territories", []),
     )
+st.markdown(
+    """
+    Points are monitored geographic locations. Larger points indicate more events. The heat signature's colour changes accordingly.
+    """
+)
 
-legend_col, status_col = st.columns(2)
-
-with legend_col:
-    st.subheader("Map legend")
-    st.markdown(
-        """
-        **Points** — monitored geographic locations.  
-        Larger points indicate more events.
-
-        **Heatmap** — concentration of events.  
-        Brighter areas indicate a higher concentration of events.
-
-        *Colours indicate event concentration, not risk severity.*
-        """
-    )
-
-with status_col:
-    st.subheader("Radar status")
-
-    st.markdown(
-        f"""
-        **Main briefing:** last {briefing_days} days  
-        *(editable in Preferences)*
-
-        **Events:** {len(events)}
-        """
-    )
-
-# ── Briefing ───────────────────────────────────────────────────────────────
-st.subheader("Radar Briefing")
+st.subheader("Table of Events")
 
 if not events:
     if gold_never_built(system_status):
         render_first_build_notice()
     else:
         render_no_matches_notice()
+
+st.subheader("Event Cards")
 
 render_briefing(events, selected_countries=profile.get("territories", []))
 

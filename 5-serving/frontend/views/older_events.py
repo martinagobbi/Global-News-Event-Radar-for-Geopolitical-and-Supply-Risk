@@ -65,7 +65,7 @@ if should_refresh:
 historical_events = st.session_state.get("cached_historical_events", [])
 
 # ── Briefing ───────────────────────────────────────────────────────────────
-st.subheader("Historical Radar Briefing")
+st.subheader("Historical Event Cards")
 
 if not historical_events:
     st.info("No older events found matching your criteria.")
