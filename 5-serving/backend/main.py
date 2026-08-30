@@ -19,6 +19,7 @@ from postgres_store import (
     get_event_articles,
     get_events_by_ids,
     get_events_for_user,
+    get_events_for_user_by_ids,
     get_events_version,
     get_pipeline_status,
 )
@@ -269,20 +270,34 @@ def events_summary(
 
 @app.get("/users/{user_id}/archived-events")
 def archived_events(user_id: str) -> dict:
-    return tagged_events(user_id, "archive")
+    """
+    Events this user archived — UNLIKE requires_action/monitor, scoped to their
+    CURRENT live matches (joins user_articles). "Archive: Not important" means
+    the user is done with the event, so once a preference change removes it
+    from their live matches it should disappear here too, the same way it
+    would from Radar View — not linger just because it was once tagged.
+    """
+    tags = get_tags(user_id)
+    event_ids = [eid for eid, t in tags.items() if t == "archive"]
+    events = get_events_for_user_by_ids(user_id, event_ids)
+    return {"events": [{**e, "user_tag": "archive"} for e in events]}
 
 
 @app.get("/users/{user_id}/tagged-events/{tag}")
 def tagged_events(user_id: str, tag: str) -> dict:
     """
-    Events this user filed under one tag — 'requires_action', 'monitor' or
-    'archive'. Backs the per-triage pages in the frontend.
+    Events this user filed under 'requires_action' or 'monitor'. Backs the
+    per-triage pages in the frontend. ('archive' is served by archived_events
+    instead — routed here too, so the two endpoints agree regardless of which
+    one a caller hits.)
 
     Read by GLOBALEVENTID straight from `articles`, NOT through user_articles, so
     a triaged card survives the user later dropping the territory that first
     brought it in. Tags live in Mongo keyed by user_id, so one user's triage
     never affects another's.
     """
+    if tag == "archive":
+        return archived_events(user_id)
     tags = get_tags(user_id)
     event_ids = [eid for eid, t in tags.items() if t == tag]
     events = get_events_by_ids(event_ids)

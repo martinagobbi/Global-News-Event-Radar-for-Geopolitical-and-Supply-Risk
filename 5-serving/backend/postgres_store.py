@@ -466,10 +466,14 @@ def get_events_by_ids(global_event_ids: list[str]) -> list[dict]:
     Event cards for the given GLOBALEVENTIDs, read straight from `articles`.
 
     Deliberately does NOT join user_articles. A user's triaged events (needs
-    action / monitoring / archive) must survive changes to their perimeter: when
-    a territory is removed, processing rewrites user_articles and those documents
+    action / monitoring) must survive changes to their perimeter: when a
+    territory is removed, processing rewrites user_articles and those documents
     disappear from it — but the article rows themselves are only ever upserted,
     never deleted, so the triaged cards remain readable here.
+
+    NOT used for archive — see get_events_for_user_by_ids, which an archived
+    event must go through instead, so it disappears the same way a live
+    Radar View event would.
 
     The id set binds as a single array parameter. Oracle had no list binding and
     needed one generated placeholder per id, which also capped the set at 1000.
@@ -483,6 +487,55 @@ def get_events_by_ids(global_event_ids: list[str]) -> list[dict]:
         rows = _fetch_rows(_BY_IDS_SQL, {"ids": ids})
     except Exception as e:
         logger.error("get_events_by_ids failed: %s", e)
+        return []
+
+    groups: dict[str, list[dict]] = {}
+    for row in rows:
+        eid = str(row["global_event_id"])
+        row["url"] = row["document_identifier"]
+        groups.setdefault(eid, []).append(row)
+    return _sort_cards_newest_first(
+        [_build_event_card(eid, arts) for eid, arts in groups.items()])
+
+
+_BY_IDS_FOR_USER_SQL = """
+    SELECT
+        a.global_event_id, a.document_identifier, a.mention_identifier,
+        a.in_raw_text, a.confidence, a.mention_doc_tone, a.country,
+        a.risk_category, a.goldstein, a.cameo_code, a.cameo_label,
+        a.mention_source_name, a.latitude, a.longitude, a.event_date, a.date_added, a.age_days,
+        a.mention_time
+    FROM user_articles ua
+    JOIN articles a ON ua.doc_id = a.doc_id
+                   AND ua.global_event_id = a.global_event_id
+    WHERE ua.user_id = %(user_id)s
+      AND a.global_event_id = ANY(%(ids)s)
+    ORDER BY a.global_event_id, a.confidence DESC, ABS(a.mention_doc_tone) ASC
+"""
+
+
+def get_events_for_user_by_ids(user_id: str, global_event_ids: list[str]) -> list[dict]:
+    """
+    Event cards for the given GLOBALEVENTIDs, scoped to this user's CURRENT
+    live matches (joins user_articles) — unlike get_events_by_ids.
+
+    An id whose (doc_id, global_event_id) row is no longer in user_articles for
+    this user — because a preference change no longer matches it — is silently
+    omitted, the same way it would vanish from get_events_for_user. This is the
+    "archive" tag's intended behaviour: unlike requires_action/monitor, an
+    archived event does not survive a preference change that drops it. No
+    age_days cutoff here, matching get_events_by_ids — an archived event isn't
+    meant to age out, only to stop matching.
+
+    Returns [] on database error.
+    """
+    ids = [str(i) for i in global_event_ids if str(i).strip()]
+    if not ids:
+        return []
+    try:
+        rows = _fetch_rows(_BY_IDS_FOR_USER_SQL, {"user_id": user_id, "ids": ids})
+    except Exception as e:
+        logger.error("get_events_for_user_by_ids failed for %s: %s", user_id, e)
         return []
 
     groups: dict[str, list[dict]] = {}
