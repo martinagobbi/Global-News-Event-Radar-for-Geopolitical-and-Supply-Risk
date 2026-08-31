@@ -343,13 +343,22 @@ def read_partitioned(spark, table: str, where: str | None = None):
     # gdelt_events WHERE 1=0` returns `0, 0`. A wiped silver therefore fell
     # straight through into the full join instead of short-circuiting.
     #
+    # This count is DELIBERATELY UNFILTERED even when `where` narrows the read
+    # below it. "Silver is empty" has to mean the whole table has nothing in
+    # it — the wiped-silver case above — not "this incremental slice's `where`
+    # (mentions newer than the watermark) happens to match zero rows", which is
+    # the normal, frequent outcome of a narrow 15-minute incremental window and
+    # says nothing about whether silver as a whole is empty. Counting the
+    # filtered subset here would treat that ordinary case as a wiped silver
+    # store and short-circuit the whole recompute (skipping publish() and, with
+    # it, the pipeline_status write) instead of running it through to a
+    # legitimate "matched nothing new" result.
+    #
     # No FINAL here, deliberately: FINAL only collapses duplicate rows, so a raw
     # count is zero exactly when the deduplicated count is zero, and skipping it
     # keeps this a cheap key-only scan rather than a merge.
     count_sql = f"SELECT count() AS n FROM {table}"
-    if where:
-        count_sql += f" WHERE {where}"
-    n_rows = (
+    n_total = (
         spark.read.format("jdbc")
         .option("url", CH_URL)
         .option("query", count_sql)
@@ -357,17 +366,19 @@ def read_partitioned(spark, table: str, where: str | None = None):
         .load()
         .collect()[0]["n"]
     )
-    if not n_rows:
-        logger.warning("%s is empty%s", table,
-                       f" for WHERE {where}" if where else "")
+    if not n_total:
+        logger.warning("%s is empty", table)
         return None
 
     inner = (f"SELECT *, modulo(cityHash64(GLOBALEVENTID), {READ_PARTITIONS}) "
              f"AS {_BUCKET_COL} FROM {table} FINAL")
     if where:
         inner += f" WHERE {where}"
-    logger.info("reading %s over %d hash partitions (%s rows)%s",
-                table, READ_PARTITIONS, n_rows,
+    # n_total is the WHOLE table's count (see above), not the filtered subset's,
+    # so it is only ever an upper bound on what this read actually returns when
+    # `where` narrows it — logged as such rather than as "rows read".
+    logger.info("reading %s over %d hash partitions (%s rows in table)%s",
+                table, READ_PARTITIONS, n_total,
                 f"  WHERE {where}" if where else "")
     return (
         spark.read.format("jdbc")
@@ -711,7 +722,8 @@ def drop_stage_tables() -> None:
     logger.info("stage tables dropped")
 
 
-def publish(processed_uids: list[str], incremental: bool = False) -> None:
+def publish(processed_uids: list[str], incremental: bool = False,
+            only_user: bool = False) -> None:
     """
     Move the staged rows into the live tables, in ONE transaction, reproducing
     exactly what the pandas path does:
@@ -724,6 +736,8 @@ def publish(processed_uids: list[str], incremental: bool = False) -> None:
                         set is cleared), which is what write_user_articles([]) did.
       pipeline_status — replaced with the single row mirroring the validation
                         layer's status file, as write_pipeline_status did.
+                        `timestamp_of_last_update` is left where it was when
+                        only_user=True — see the comment below `preserve_ts`.
     """
     with _connect_postgres() as conn:
         cur = conn.cursor()
@@ -820,13 +834,21 @@ def publish(processed_uids: list[str], incremental: bool = False) -> None:
         # only started this instant — the timestamp chases the present forever
         # and never marks when data was last actually good.
         #
-        # main.recompute_all() already passes postgres_writer.KEEP for this, but
-        # it writes AFTER this function, and KEEP preserves whatever is in the
-        # row — which is whatever this INSERT just put there. So the guard has to
-        # exist here too, or the one downstream is preserving a value this line
-        # already spoiled. recompute_user() publishes through here without going
-        # via recompute_all() at all, and has no other protection.
-        ts = (previous_ts if state == "ERROR" and previous_ts is not None
+        # A PER-USER publish (only_user=True) must not advance it either, for a
+        # different reason: this run was triggered by one person editing their
+        # own preferences, not by new silver data landing, so nothing about how
+        # fresh the GOLD DATA is has actually changed. Advancing the clock here
+        # would make every user's dashboard report gold as freshly rebuilt off
+        # the back of a change that only affected one person's article set.
+        #
+        # main.recompute_all() already passes postgres_writer.KEEP for the ERROR
+        # case, but it writes AFTER this function, and KEEP preserves whatever is
+        # in the row — which is whatever this INSERT just put there. So the guard
+        # has to exist here too, or the one downstream is preserving a value this
+        # line already spoiled. recompute_user() publishes through here without
+        # going via recompute_all() at all, and has no other protection.
+        preserve_ts = only_user or state == "ERROR"
+        ts = (previous_ts if preserve_ts and previous_ts is not None
               else datetime.now(timezone.utc).replace(tzinfo=None))
 
         cur.execute("DELETE FROM pipeline_status")
@@ -1026,7 +1048,8 @@ def recompute(only_user: str | None = None, since: str | None = None) -> dict:
                 len(processed_uids),
                 f"  [incremental, mentions after {since}]" if since else "  [full]")
 
-    publish(processed_uids, incremental=since is not None)
+    publish(processed_uids, incremental=since is not None,
+            only_user=only_user is not None)
     # Only dropped once the rows are safely published; if publish() raised, the
     # stage tables are left behind on purpose so the run can be inspected.
     drop_stage_tables()
