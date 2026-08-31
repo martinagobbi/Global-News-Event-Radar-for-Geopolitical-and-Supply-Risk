@@ -91,7 +91,7 @@ All "**OPTIONAL**" and "**NOT OPTIONAL**" (see below) shutdown steps together.
 docker compose --env-file .env.single_machine stop ingestion parsing validation && ./bootstrap/silver_snapshot.sh wipe && docker exec pipeline_processing python3 -c "import main; main.recompute_all()" && docker compose -f 5-serving/docker-compose.serving.yml down && docker compose --env-file .env.single_machine down && docker compose --env-file .env.single_machine -f docker-compose.stores.yml down
 ```
 
-**OPTIONAL**: Reset silver so the next startup can restore the seed cleanly.
+**OPTIONAL**: Reset silver so the next startup can restore the seed cleanly. This removes the data added while you were running the dashboard. If you shut down without doing this, then start up around 45 minutes later, you will be told that the dashboard is three 15-minute slices behind, because of course no data was ingested while everything was shut down.
 
 ``` bash
 # All steps below as one line:
