@@ -57,11 +57,6 @@
 -- here: that would turn a stored row into a failed publish, and the whole
 -- recompute with it. Two earlier mismatches did exactly that in principle:
 --
---   SMALLINT vs Int32   SMALLINT is 16-bit (-32768..32767); silver's counters are
---                       Nullable(Int32). `age_days` is the live risk — it is
---                       datediff(today, event_date), so an event dated far in the
---                       past or a corrupt `Day` overflows it. Verified: inserting
---                       99999 raises `ERROR: smallint out of range`. Now INTEGER.
 --   VARCHAR(n) vs String  every silver text column is an unbounded String, so any
 --                       length cap here is a stricter rule than the source. In
 --                       particular VARCHAR(50) on global_event_id constrained an
@@ -82,7 +77,6 @@ CREATE TABLE articles (
   confidence          INTEGER,
   mention_doc_tone    DOUBLE PRECISION,
   country             TEXT,
-  risk_category       TEXT,
   goldstein           DOUBLE PRECISION,
   cameo_code          TEXT,
   cameo_label         TEXT,
@@ -98,7 +92,6 @@ CREATE TABLE articles (
   mention_time        TIMESTAMP,
   date_added          TIMESTAMP,
   event_date          TIMESTAMP,
-  age_days            INTEGER,
   CONSTRAINT pk_articles PRIMARY KEY (doc_id, global_event_id)
 );
 

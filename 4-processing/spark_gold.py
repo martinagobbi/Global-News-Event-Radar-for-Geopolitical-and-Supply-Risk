@@ -433,7 +433,6 @@ def build_catalogue(events, mentions, cameo_lookup):
           .withColumn("mention_doc_tone", F.col("MentionDocTone").cast("double"))
           .withColumn("country", F.when(country.isNotNull() & (country != ""), country)
                                   .otherwise(F.col("ActionGeo_CountryCode")))
-          .withColumn("risk_category", F.lit(""))
           .withColumn("goldstein", F.col("GoldsteinScale").cast("double"))
           .withColumn("cameo_code", F.col("EventCode").cast("string"))
           # The publisher the article came from (e.g. "bbc.co.uk"), shown on the
@@ -445,7 +444,6 @@ def build_catalogue(events, mentions, cameo_lookup):
           .withColumn("longitude", F.col("ActionGeo_Long").cast("double"))
           .withColumn("event_date", event_date)
           .withColumn("date_added", F.to_timestamp(F.col("DATEADDED").cast("string"), "yyyyMMddHHmmss"))
-          .withColumn("age_days", F.datediff(F.current_date(), event_date))
           # The ARTICLE's own timestamp; event_date above is per-EVENT and so
           # identical across a card. Mirrors gold._mention_time().
           .withColumn("mention_time",
@@ -565,9 +563,9 @@ def user_predicate(profile: dict):
 
 ARTICLE_COLUMNS = [
     "doc_id", "document_identifier", "mention_identifier", "global_event_id",
-    "in_raw_text", "confidence", "mention_doc_tone", "country", "risk_category",
+    "in_raw_text", "confidence", "mention_doc_tone", "country",
     "goldstein", "cameo_code", "cameo_label", "mention_source_name", "latitude", "longitude",
-    "event_date", "date_added", "age_days", "mention_time",
+    "event_date", "date_added", "mention_time",
 ]
 
 
@@ -606,9 +604,9 @@ def write_gold(df, table: str, mode: str = "append", truncate: bool = False) -> 
 # requirement (ORA-30926 otherwise), so this is not a new constraint.
 _ARTICLE_UPSERT_COLUMNS = [
     "doc_id", "document_identifier", "mention_identifier", "global_event_id",
-    "in_raw_text", "confidence", "mention_doc_tone", "country", "risk_category",
+    "in_raw_text", "confidence", "mention_doc_tone", "country",
     "goldstein", "cameo_code", "cameo_label", "mention_source_name", "latitude", "longitude",
-    "event_date", "date_added", "age_days", "mention_time",
+    "event_date", "date_added", "mention_time",
 ]
 
 _UPSERT_ARTICLES = (
@@ -656,11 +654,11 @@ _STAGE_DDL = {
           mention_identifier VARCHAR(2000), global_event_id VARCHAR(50),
           in_raw_text SMALLINT, confidence SMALLINT,
           mention_doc_tone DOUBLE PRECISION,
-          country VARCHAR(200), risk_category VARCHAR(500),
+          country VARCHAR(200),
           goldstein DOUBLE PRECISION,
           cameo_code VARCHAR(10), cameo_label VARCHAR(200), mention_source_name VARCHAR(500),
           latitude DOUBLE PRECISION, longitude DOUBLE PRECISION,
-          event_date TIMESTAMP, date_added TIMESTAMP, age_days SMALLINT,
+          event_date TIMESTAMP, date_added TIMESTAMP,
           mention_time TIMESTAMP)
     """,
     "user_articles_stage": """

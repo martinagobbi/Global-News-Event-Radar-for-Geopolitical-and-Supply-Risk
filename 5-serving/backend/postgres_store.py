@@ -34,7 +34,6 @@ TABLE articles (
     confidence           INTEGER,
     mention_doc_tone     DOUBLE PRECISION,
     country              TEXT,
-    risk_category        TEXT,
     goldstein            DOUBLE PRECISION,
     cameo_code           TEXT,
     cameo_label          TEXT,
@@ -42,7 +41,6 @@ TABLE articles (
     latitude             DOUBLE PRECISION,
     longitude            DOUBLE PRECISION,
     event_date           TIMESTAMP,
-    age_days             INTEGER,
 -- Types mirror silver and are never stricter; NOT NULL is confined to the three
 -- IDENTITY columns, matching silver's GLOBALEVENTID + MentionIdentifier. Every
 -- other column is nullable because "not provided" is carried end to end.
@@ -307,7 +305,6 @@ def _build_event_card(global_event_id: str, raw_articles: list[dict]) -> dict:
         "cameo_code":         meta.get("cameo_code", ""),
         "cameo_label":        meta.get("cameo_label", ""),
         "mention_source_name": meta.get("mention_source_name", ""),
-        "risk_category":      meta.get("risk_category", ""),
         "goldstein":          meta.get("goldstein"),
         "event_date":         str(meta.get("event_date", "")),
         "date_added":         str(meta.get("date_added", "")),
@@ -344,7 +341,6 @@ _EVENTS_SQL = """
         a.confidence,
         a.mention_doc_tone,
         a.country,
-        a.risk_category,
         a.goldstein,
         a.cameo_code,
         a.cameo_label,
@@ -353,7 +349,10 @@ _EVENTS_SQL = """
         a.longitude,
         a.event_date,
         a.date_added,
-        a.age_days,
+        -- Computed fresh on every read from event_date, rather than stored: a
+        -- stored value only reflects "today" as of whichever recompute last
+        -- touched the row, and most rows are never touched again.
+        (CURRENT_DATE - a.event_date::date) AS age_days,
         a.mention_time
     FROM user_articles ua
     -- The WHOLE key. `articles` is keyed on (doc_id, global_event_id) because one
@@ -363,7 +362,7 @@ _EVENTS_SQL = """
     JOIN articles a ON ua.doc_id = a.doc_id
                    AND ua.global_event_id = a.global_event_id
     WHERE ua.user_id = %(user_id)s
-      AND a.age_days <= %(max_age_days)s
+      AND (CURRENT_DATE - a.event_date::date) <= %(max_age_days)s
     ORDER BY a.global_event_id, a.confidence DESC, ABS(a.mention_doc_tone) ASC
 """
 
@@ -376,7 +375,6 @@ _SINGLE_EVENT_SQL = """
         a.confidence,
         a.mention_doc_tone,
         a.country,
-        a.risk_category,
         a.goldstein,
         a.cameo_code,
         a.cameo_label,
@@ -385,7 +383,7 @@ _SINGLE_EVENT_SQL = """
         a.longitude,
         a.event_date,
         a.date_added,
-        a.age_days,
+        (CURRENT_DATE - a.event_date::date) AS age_days,
         a.mention_time
     FROM user_articles ua
     -- The WHOLE key. `articles` is keyed on (doc_id, global_event_id) because one
@@ -452,8 +450,9 @@ _BY_IDS_SQL = """
     SELECT
         a.global_event_id, a.document_identifier, a.mention_identifier,
         a.in_raw_text, a.confidence, a.mention_doc_tone, a.country,
-        a.risk_category, a.goldstein, a.cameo_code, a.cameo_label,
-        a.mention_source_name, a.latitude, a.longitude, a.event_date, a.date_added, a.age_days,
+        a.goldstein, a.cameo_code, a.cameo_label,
+        a.mention_source_name, a.latitude, a.longitude, a.event_date, a.date_added,
+        (CURRENT_DATE - a.event_date::date) AS age_days,
         a.mention_time
     FROM articles a
     WHERE a.global_event_id = ANY(%(ids)s)
@@ -502,8 +501,9 @@ _BY_IDS_FOR_USER_SQL = """
     SELECT
         a.global_event_id, a.document_identifier, a.mention_identifier,
         a.in_raw_text, a.confidence, a.mention_doc_tone, a.country,
-        a.risk_category, a.goldstein, a.cameo_code, a.cameo_label,
-        a.mention_source_name, a.latitude, a.longitude, a.event_date, a.date_added, a.age_days,
+        a.goldstein, a.cameo_code, a.cameo_label,
+        a.mention_source_name, a.latitude, a.longitude, a.event_date, a.date_added,
+        (CURRENT_DATE - a.event_date::date) AS age_days,
         a.mention_time
     FROM user_articles ua
     JOIN articles a ON ua.doc_id = a.doc_id

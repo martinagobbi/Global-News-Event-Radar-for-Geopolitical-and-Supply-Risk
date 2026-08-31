@@ -8,8 +8,8 @@ Connection defaults match 5-serving/backend/postgres_store.py. The three tables
 
     articles(doc_id BYTEA PK, document_identifier, mention_identifier,
              global_event_id, in_raw_text, confidence, mention_doc_tone, country,
-             risk_category, goldstein, cameo_code, cameo_label, mention_source_name,
-             latitude, longitude, event_date, date_added, age_days, mention_time)
+             goldstein, cameo_code, cameo_label, mention_source_name,
+             latitude, longitude, event_date, date_added, mention_time)
     user_articles(user_id, doc_id)   PK (user_id, doc_id)
     pipeline_status(status, timestamp_of_last_update)
 
@@ -74,9 +74,9 @@ def _doc_id(document_identifier: str) -> bytes:
 # drift apart.
 _ARTICLE_COLUMNS = [
     "doc_id", "document_identifier", "mention_identifier", "global_event_id",
-    "in_raw_text", "confidence", "mention_doc_tone", "country", "risk_category",
+    "in_raw_text", "confidence", "mention_doc_tone", "country",
     "goldstein", "cameo_code", "cameo_label", "mention_source_name", "latitude", "longitude",
-    "event_date", "date_added", "age_days", "mention_time",
+    "event_date", "date_added", "mention_time",
 ]
 
 _UPSERT_ARTICLES = (
@@ -118,9 +118,6 @@ _ADDED_STATUS_COLUMNS = [
 # database initialisation, so an existing volume keeps whatever it was created
 # with — and the old types were STRICTER than silver:
 #
-#   SMALLINT   16-bit, against silver's Nullable(Int32). `age_days` is the live
-#              risk: datediff(today, event_date) overflows it for an event dated
-#              far enough in the past. Measured: 99999 -> "smallint out of range".
 #   VARCHAR(n) a length cap, against silver's unbounded String. VARCHAR(50) on
 #              global_event_id in particular constrained an identifier this
 #              pipeline promises never to interpret.
@@ -134,16 +131,28 @@ _WIDENED_COLUMNS = [
     ("articles", "mention_identifier",  "TEXT"),
     ("articles", "global_event_id",     "TEXT"),
     ("articles", "country",             "TEXT"),
-    ("articles", "risk_category",       "TEXT"),
     ("articles", "cameo_code",          "TEXT"),
     ("articles", "cameo_label",         "TEXT"),
     ("articles", "mention_source_name", "TEXT"),
     ("articles", "in_raw_text",         "INTEGER"),
     ("articles", "confidence",          "INTEGER"),
-    ("articles", "age_days",            "INTEGER"),
     ("user_articles", "user_id",         "TEXT"),
     ("user_articles", "global_event_id", "TEXT"),
 ]
+
+# Columns retired from the gold schema. DROP COLUMN IF EXISTS never errors
+# (unlike ALTER COLUMN TYPE above), so this needs no try/except — an installation
+# that already lacks the column is a no-op, and one that still has it is fixed on
+# the next recompute.
+#   risk_category — never populated by the real pipeline (always ""); only
+#                   mock/demo data used it.
+#   age_days      — was datediff(today, event_date) computed once, at recompute
+#                   time, and never refreshed for a row the next recompute didn't
+#                   happen to touch again — so it went stale between full runs
+#                   (every GOLD_FULL_EVERY cycles, ~30 days by default). Replaced
+#                   by computing it from event_date at query time in
+#                   5-serving/backend/postgres_store.py, which cannot go stale.
+_DROPPED_COLUMNS = ["risk_category", "age_days"]
 
 _schema_checked = False
 
@@ -187,6 +196,8 @@ def ensure_schema() -> None:
                     logger.debug("widen %s.%s -> %s skipped: %s",
                                  table, column, ddl_type, exc)
                     conn.rollback()
+            for column in _DROPPED_COLUMNS:
+                cur.execute(f"ALTER TABLE articles DROP COLUMN IF EXISTS {column}")
             _migrate_to_pair_key(cur)
             conn.commit()
         _schema_checked = True
@@ -234,7 +245,6 @@ def _migrate_to_pair_key(cur) -> None:
           confidence          SMALLINT,
           mention_doc_tone    DOUBLE PRECISION,
           country             VARCHAR(200),
-          risk_category       VARCHAR(500),
           goldstein           DOUBLE PRECISION,
           cameo_code          VARCHAR(10),
           cameo_label         VARCHAR(200),
@@ -244,7 +254,6 @@ def _migrate_to_pair_key(cur) -> None:
           mention_time        TIMESTAMP,
           date_added          TIMESTAMP,
           event_date          TIMESTAMP,
-          age_days            SMALLINT,
           CONSTRAINT pk_articles PRIMARY KEY (doc_id, global_event_id))
     """)
     cur.execute("CREATE INDEX ix_articles_event ON articles (global_event_id)")
