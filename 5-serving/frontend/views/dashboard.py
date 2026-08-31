@@ -180,7 +180,7 @@ if _watermark:
             _light = "🟢" if _lag <= 1 else ("🟡" if _lag == 2 else "🔴")
             _behind = ((_lag == 0)*"up to date" +
                        (_lag == 1)*"latest slice scheduled to be displayable in a few minutes" +
-                       (_lag > 1)*f"{_lag} slices behind — part of GDELT may be down")
+                       (_lag > 1)*f"{_lag} slices behind. The pipeline may have been turned off for a while, or part of GDELT may be down. In either case, please wait longer, between 15 minutes and an hour.")
 
             _wm_local = _wm_dt.astimezone(tz)
             _expected_local = _expected.astimezone(tz)

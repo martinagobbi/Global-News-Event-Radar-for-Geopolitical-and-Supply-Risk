@@ -32,7 +32,7 @@ POLL_INTERVAL_SECONDS = 15 * 60
 # every 15 minutes, so a file still missing after 10 is very unlikely to appear,
 # and continuing to wait would only delay the next slice. Past this the slice is
 # released with whatever was retrieved — possibly nothing.
-SLICE_RETRIEVAL_DEADLINE = int(os.getenv("SLICE_RETRIEVAL_DEADLINE", "600"))
+SLICE_RETRIEVAL_DEADLINE = int(os.getenv("SLICE_RETRIEVAL_DEADLINE", "3600"))
 # How often to re-attempt a missing file inside that window.
 RETRY_TICK = int(os.getenv("RETRY_TICK", "60"))
 # Re-read cadence for a control file that parsed but listed no URLs.
