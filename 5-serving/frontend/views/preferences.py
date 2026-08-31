@@ -110,45 +110,45 @@ keywords = render_keyword_questions(
 
 st.caption("---------------------------------------------------------")
 
-"""
-st.subheader("Default briefing window (days)")
 
-briefing_days = st.slider(
-    "",
-    1,
-    90,
-    min(profile.get("briefing_days", 60), 90),
-    key="briefing_days",
-)
+# st.subheader("Default briefing window (days)")
 
-st.caption(
-    "How far back the Radar View reaches by default. News older than this may go in the “Historical Radar View” tab, "
-    "depending on what is set for the older-risk lookback below."
-)
+# briefing_days = st.slider(
+#     "",
+#     1,
+#     90,
+#     min(profile.get("briefing_days", 60), 90),
+#     key="briefing_days",
+# )
 
-
-st.caption("---------------------------------------------------------")
+# st.caption(
+#     "How far back the Radar View reaches by default. News older than this may go in the “Historical Radar View” tab, "
+#     "depending on what is set for the older-risk lookback below."
+# )
 
 
-st.subheader("Optional older-risk lookback (days)")
-
-older_news_days = st.slider(
-    "",
-    31,
-    365,
-    max(profile.get("older_news_days", 180), 31),
-    key="older_news_days",
-)
-
-st.caption(
-    "Upper limit of the separate “Historical Radar View” tab. That tab shows events older "
-    "than the briefing window above, up to this limit — making this smaller than "
-    "the briefing window, will leave the Historical Radar View empty."
-)
+# st.caption("---------------------------------------------------------")
 
 
-st.caption("---------------------------------------------------------")
-"""
+# st.subheader("Optional older-risk lookback (days)")
+
+# older_news_days = st.slider(
+#     "",
+#     31,
+#     365,
+#     max(profile.get("older_news_days", 180), 31),
+#     key="older_news_days",
+# )
+
+# st.caption(
+#     "Upper limit of the separate “Historical Radar View” tab. That tab shows events older "
+#     "than the briefing window above, up to this limit — making this smaller than "
+#     "the briefing window, will leave the Historical Radar View empty."
+# )
+
+
+# st.caption("---------------------------------------------------------")
+
 
 st.subheader("Time Zone")
 
