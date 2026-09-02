@@ -58,8 +58,7 @@ def render_briefing(
     #with tabs[0]:
     if briefing_events:
         _render_event_table(briefing_events)
-        st.divider()
-
+        st.subheader("Event Cards")
         for event in briefing_events:
             render_event_card(event, context="main")
 

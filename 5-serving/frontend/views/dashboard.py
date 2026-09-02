@@ -260,8 +260,6 @@ if not events:
     else:
         render_no_matches_notice()
 
-st.subheader("Event Cards")
-
 render_briefing(events, selected_countries=profile.get("territories", []))
 
 # ── Polling loop ───────────────────────────────────────────────────────────
