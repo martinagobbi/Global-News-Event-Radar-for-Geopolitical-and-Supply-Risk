@@ -208,8 +208,8 @@ if save_top or save_bottom:
                 "user_id": user_id,
                 "territories": monitored_territories,
                 "keywords": keywords,
-                "briefing_days": briefing_days,
-                "older_news_days": older_news_days,
+                # "briefing_days": briefing_days,
+                # "older_news_days": older_news_days,
                 "status": "registered",
                 "timezone": selected_timezone,
             }
