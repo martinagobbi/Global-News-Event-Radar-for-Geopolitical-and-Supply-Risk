@@ -124,15 +124,45 @@ elif gold_changed:
     "This may be from new articles that just came in or from your own preference changes.")
 
 # ── Header ─────────────────────────────────────────────────────────────────
+# The button is created first (its click state is needed by the data fetch
+# below), but header_left's own content is filled in further down, once that
+# fetch has run — otherwise its event count would show the pre-refresh figure
+# for one render whenever the recompute notice clears. See dashboard.py's
+# git history / recompute_notice.py for why that one render matters.
 header_left, header_right = st.columns([3, 1])
-events = st.session_state.get("cached_events", [])
+with header_right:
+    manual_refresh = st.button("Refresh now")
+
+# ── Data fetch (rate-limited) ──────────────────────────────────────────────
+now = time.time()
+if "last_data_fetch" not in st.session_state:
+    st.session_state.last_data_fetch = 0
+
+first_load = "cached_events" not in st.session_state
+
+should_refresh = (
+    manual_refresh
+    or first_load
+    or gold_changed
+    or (now - st.session_state.last_data_fetch >= DATA_REFRESH_SECONDS)
+)
+
+if should_refresh:
+    st.session_state.cached_events = get_events(user_id, briefing_days=briefing_days,)
+    st.session_state.cached_summary = get_events_summary(user_id, briefing_days=briefing_days)
+    st.session_state.last_data_fetch     = now
+    st.session_state.gold_version        = live_gold_version
+
+events  = st.session_state.get("cached_events", [])
+summary = st.session_state.get("cached_summary", [])
+
 with header_left:
     st.caption(f"Events are filtered according to your registered territories and supply-chain keywords. The **{len(events)}** events from the last {briefing_days} days are shown.")
     render_retention_notice(preferences="follows")
     text = "Future developments of the stories presented here may later be affected by factors entirely unrelated to supply chains, which may thus not feature in this briefing."
-    st.caption(f"<span style=font-size:0.72rem; opacity:0.65;>{text}</span>", unsafe_allow_html=True)
-with header_right:
-    manual_refresh = st.button("Refresh now")
+    st.caption(f"<span style='font-size:0.72rem; opacity:0.65;'>{text}</span>", unsafe_allow_html=True)
+if manual_refresh and should_refresh:
+    st.success("Data refreshed.")
 
 # ── Silver watermark ───────────────────────────────────────────────────────
 _SLICE = 15 * 60
@@ -217,30 +247,6 @@ st.info(
     "Future developments of the stories presented here may later be affected by factors "
     "entirely unrelated to supply chains, which may thus not feature in this briefing."
 )
-
-# ── Data fetch (rate-limited) ──────────────────────────────────────────────
-now = time.time()
-if "last_data_fetch" not in st.session_state:
-    st.session_state.last_data_fetch = 0
-
-first_load = "cached_events" not in st.session_state
-
-should_refresh = (
-    manual_refresh
-    or first_load
-    or gold_changed
-    or (now - st.session_state.last_data_fetch >= DATA_REFRESH_SECONDS)
-)
-
-if should_refresh:
-    st.session_state.cached_events = get_events(user_id, briefing_days=briefing_days,)
-    st.session_state.cached_summary = get_events_summary(user_id, briefing_days=briefing_days)
-    st.session_state.last_data_fetch     = now
-    st.session_state.gold_version        = live_gold_version
-    if manual_refresh:
-        st.success("Data refreshed.")
-
-summary      = st.session_state.get("cached_summary", [])
 
 st.subheader("Heatmap")
 
