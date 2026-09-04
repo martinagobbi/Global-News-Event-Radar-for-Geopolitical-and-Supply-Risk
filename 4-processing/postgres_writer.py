@@ -359,6 +359,13 @@ def delete_orphan_articles(protected_event_ids=()) -> int:
     other orphan and the card leaves the Archive page. The tag is left in place,
     so re-adding the territory later brings the entry back.
 
+    Note this sweep is about REACHABILITY, not age — it has no date predicate at
+    all, and an archived row that still matches a user is not an orphan however
+    old it is. Age is handled by the other two mechanisms: the Archive page stops
+    listing a card at 180 days (5-serving/backend/postgres_store.
+    ARCHIVE_MAX_AGE_DAYS), and retention.py deletes the rows and the tag at
+    RETENTION_DAYS (185) counted from the event's most recent article.
+
     Deleting the rest is precise and destroys nothing else: rows still referenced
     by ANY user are kept by the NOT EXISTS, `user_articles` is untouched, and so
     are MongoDB and the silver layer. This is why the cleanup does not require

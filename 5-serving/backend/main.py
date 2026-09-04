@@ -272,10 +272,12 @@ def events_summary(
 def archived_events(user_id: str) -> dict:
     """
     Events this user archived — UNLIKE requires_action/monitor, scoped to their
-    CURRENT live matches (joins user_articles). "Archive: Not important" means
-    the user is done with the event, so once a preference change removes it
-    from their live matches it should disappear here too, the same way it
-    would from Radar View — not linger just because it was once tagged.
+    CURRENT live matches (joins user_articles) AND to the same age window the
+    live views use. "Archive: Not important" means the user is done with the
+    event, so it should disappear here exactly when it would disappear from
+    Radar View — whether that is a preference change that stops matching it or
+    simply age (ARCHIVE_MAX_AGE_DAYS, 180 days) — not linger just because it
+    was once tagged.
     """
     tags = get_tags(user_id)
     event_ids = [eid for eid, t in tags.items() if t == "archive"]

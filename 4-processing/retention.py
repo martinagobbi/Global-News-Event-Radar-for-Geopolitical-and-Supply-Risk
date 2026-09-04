@@ -15,8 +15,8 @@ This module removes stale data that is older than the configured retention windo
 The dead-letter log is intentionally not part of the retention cleanup: it is a
 record of what was abandoned, where records over one year old are automatically wiped.
 
-This module removes events that have gone quiet for a year, and everything
-hanging off them:
+This module removes events that have gone quiet for RETENTION_DAYS, and
+everything hanging off them:
 
     an event whose MOST RECENT article is older than RETENTION_DAYS
       -> delete the event      from ClickHouse gdelt_events
@@ -39,12 +39,20 @@ a laptop that sleeps overnight would otherwise never clean up at all. The last
 run is recorded in RETENTION_STATE_FILE on the shared volume, written atomically,
 so the decision survives a restart.
 
-365 days is a starting point, not a fixed constant: RETENTION_DAYS sets it, so
+185 days is a starting point, not a fixed constant: RETENTION_DAYS sets it, so
 changing the window needs no migration and no code change. It is still long
 enough that it deletes nothing the project currently holds — silver spans
-2026-06-27 to 2026-08-16, so a cutoff at 2025-08-16 matches no row (verified:
-0 events, 0 mentions) — but unlike the ten-year window it replaced, it is short
-enough to actually fire once the store has a year of history behind it.
+2026-06-27 to 2026-08-16, so a cutoff at 2026-02-12 matches no row — but unlike
+the ten-year window it replaced, it is short enough to actually fire once the
+store has half a year of history behind it.
+
+It also sets the outer bound the serving layer's card pages are built against:
+the Archive stops listing an event at 180 days
+(5-serving/backend/postgres_store.ARCHIVE_MAX_AGE_DAYS), five days inside this
+window, so a card is always dropped from the page before its rows are deleted
+here and never disappears mid-session because storage was reclaimed underneath
+it. Lowering RETENTION_DAYS below 180 inverts that ordering and should be done
+together with ARCHIVE_MAX_AGE_DAYS.
 
 Deleting a condemned event's mentions by GLOBALEVENTID is equivalent to testing
 each mention's own MentionTimeDate: if the MAXIMUM is below the cutoff then every

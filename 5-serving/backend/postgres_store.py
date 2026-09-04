@@ -87,6 +87,29 @@ _RETRIES  = int(os.getenv("POSTGRES_RETRIES", "3"))
 # beyond normal jitter, and well short of a user not noticing.
 PIPELINE_STALE_SECONDS = int(os.getenv("PIPELINE_STALE_SECONDS", str(60 * 60)))
 
+# Age ceiling for the Archive page, in days.
+#
+# The Archive used to have no ceiling at all: an archived event stayed listed
+# for as long as it kept matching the user's preferences, which in practice
+# meant until 4-processing/retention.py deleted the rows outright. That put the
+# Archive out of step with every other card page — Radar View stops at
+# briefing_days and Historical Radar View at older_news_days (180 by default),
+# so an archived event outlived the very window it was archived out of.
+#
+# 180 matches that older_news_days default, so the Archive now spans exactly the
+# union of the two live views and nothing more. It deliberately sits just BELOW
+# retention's 185-day window (4-processing/retention.py RETENTION_DAYS): the
+# card stops being listed here first, and the rows behind it are deleted a few
+# days later, so a user never sees an entry vanish mid-session because storage
+# reclaimed it underneath them.
+#
+# Measured on event_date, like `age_days` everywhere else in this file. Retention
+# measures from the event's MOST RECENT article instead, so a still-developing
+# story can drop off the Archive at 180 days and keep its rows well past 185 —
+# that is the same asymmetry the Radar and Historical views already have, not a
+# new one.
+ARCHIVE_MAX_AGE_DAYS = int(os.getenv("ARCHIVE_MAX_AGE_DAYS", "180"))
+
 _DSN = os.getenv("POSTGRES_DSN") or \
     f"postgresql://{_USER}:{_PASSWORD}@{_HOST}:{_PORT}/{_DB}"
 
@@ -472,7 +495,7 @@ def get_events_by_ids(global_event_ids: list[str]) -> list[dict]:
 
     NOT used for archive — see get_events_for_user_by_ids, which an archived
     event must go through instead, so it disappears the same way a live
-    Radar View event would.
+    Radar View event would: both when it stops matching and when it ages out.
 
     The id set binds as a single array parameter. Oracle had no list binding and
     needed one generated placeholder per id, which also capped the set at 1000.
@@ -510,22 +533,39 @@ _BY_IDS_FOR_USER_SQL = """
                    AND ua.global_event_id = a.global_event_id
     WHERE ua.user_id = %(user_id)s
       AND a.global_event_id = ANY(%(ids)s)
+      -- Same age test as _EVENTS_SQL, so an archived card ages out on exactly
+      -- the clock the live views use. See ARCHIVE_MAX_AGE_DAYS.
+      AND (CURRENT_DATE - a.event_date::date) <= %(max_age_days)s
     ORDER BY a.global_event_id, a.confidence DESC, ABS(a.mention_doc_tone) ASC
 """
 
 
-def get_events_for_user_by_ids(user_id: str, global_event_ids: list[str]) -> list[dict]:
+def get_events_for_user_by_ids(
+    user_id: str,
+    global_event_ids: list[str],
+    max_age_days: int = ARCHIVE_MAX_AGE_DAYS,
+) -> list[dict]:
     """
     Event cards for the given GLOBALEVENTIDs, scoped to this user's CURRENT
     live matches (joins user_articles) — unlike get_events_by_ids.
 
-    An id whose (doc_id, global_event_id) row is no longer in user_articles for
-    this user — because a preference change no longer matches it — is silently
-    omitted, the same way it would vanish from get_events_for_user. This is the
-    "archive" tag's intended behaviour: unlike requires_action/monitor, an
-    archived event does not survive a preference change that drops it. No
-    age_days cutoff here, matching get_events_by_ids — an archived event isn't
-    meant to age out, only to stop matching.
+    TWO things drop an id from the result, and both are the "archive" tag's
+    intended behaviour:
+
+    * It no longer matches. An id whose (doc_id, global_event_id) row has left
+      user_articles — because a preference change no longer matches it — is
+      silently omitted, the same way it would vanish from get_events_for_user.
+      Unlike requires_action/monitor, an archived event does not survive a
+      preference change that drops it.
+    * It got old. Anything older than max_age_days (ARCHIVE_MAX_AGE_DAYS, 180
+      by default) is omitted too, so the Archive ages out on the same clock as
+      the Radar and Historical views rather than outliving them.
+
+    Neither one deletes anything. The rows and the Mongo tag are removed by
+    4-processing/retention.py at RETENTION_DAYS (185), a few days after the card
+    stops being listed here; a row that has merely stopped matching is removed
+    by the orphan sweep (4-processing/postgres_writer.delete_orphan_articles),
+    which does not protect archived events precisely so that can happen.
 
     Returns [] on database error.
     """
@@ -533,7 +573,10 @@ def get_events_for_user_by_ids(user_id: str, global_event_ids: list[str]) -> lis
     if not ids:
         return []
     try:
-        rows = _fetch_rows(_BY_IDS_FOR_USER_SQL, {"user_id": user_id, "ids": ids})
+        rows = _fetch_rows(
+            _BY_IDS_FOR_USER_SQL,
+            {"user_id": user_id, "ids": ids, "max_age_days": max_age_days},
+        )
     except Exception as e:
         logger.error("get_events_for_user_by_ids failed for %s: %s", user_id, e)
         return []
