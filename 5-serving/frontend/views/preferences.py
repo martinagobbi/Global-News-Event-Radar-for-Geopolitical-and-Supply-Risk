@@ -12,7 +12,6 @@ from data.gold_layer import get_events_version
 from data.user_store import get_user_profile, is_first_login, save_user_profile
 from zoneinfo import available_timezones
 
-
 use_neutral_spinner()
 
 st.title("User setup")
@@ -52,7 +51,7 @@ save_top = st.button(
     type="primary",
     key="save_profile_top",
 )
-
+top_message_placeholder = st.empty()
 
 st.caption("---------------------------------------------------------")
 
@@ -190,46 +189,53 @@ save_bottom = st.button(
     type="primary",
     key="save_profile_bottom",
 )
-
+bottom_message_placeholder = st.empty()
 
 if save_top or save_bottom:
+    saving_profile_string = "Checking..."
+    top_message_placeholder.info(saving_profile_string)
+    bottom_message_placeholder.info(saving_profile_string)
 
-    # Read the gold fingerprint BEFORE saving:
-    # the rebuild is triggered by the save itself, so a fingerprint taken
-    # afterwards could already be the new one and the notice would never appear.
-    try:
-        version_before_save = get_events_version(user_id)
-    except BackendUnavailable:
-        version_before_save = None
+    # Build the dictionary of what the UI currently says
+    current_ui_state = {
+        "territories": monitored_territories,
+        "keywords": keywords,
+        "timezone": selected_timezone,
+    }
+    
+    # Check if anything actually changed compared to the loaded profile
+    if (profile.get("territories", []) == current_ui_state["territories"] and 
+        profile.get("keywords", {}) == current_ui_state["keywords"] and
+        profile.get("timezone", DEFAULT_TZ) == current_ui_state["timezone"]):
+        
+        # Nothing changed! Just show success and stop.
+        top_message_placeholder.info("No changes to save.")
+        bottom_message_placeholder.info("No changes to save.")
+    else:   
+        try:
+            version_before_save = get_events_version(user_id)
+        except BackendUnavailable:
+            version_before_save = None
 
-    try:
-        save_user_profile(
-            {
+        saving_profile_string = "Saving. Please do not leave this page. If you do, your preferences may not be saved correctly."
+        top_message_placeholder.info(saving_profile_string)
+        bottom_message_placeholder.info(saving_profile_string)
+        try:
+            save_user_profile({
                 "user_id": user_id,
                 "territories": monitored_territories,
                 "keywords": keywords,
-                # "briefing_days": briefing_days,
-                # "older_news_days": older_news_days,
                 "status": "registered",
                 "timezone": selected_timezone,
-            }
-        )
+            })
+        except BackendUnavailable:
+            st.error("🔴 Couldn't save...")
+            st.stop()
 
-    except BackendUnavailable:
-        st.error(
-            "🔴 Couldn't save — the profile database is temporarily unavailable. "
-            "Your account was not created. Please try again shortly."
-        )
-        st.stop()
+        mark_recompute_pending(version_before_save)
+        render_recompute_notice()
 
-    st.success("Profile saved.")
-
-    # The save has triggered a rebuild of this user's article pool;
-    # say so here and keep saying it on the dashboard until the new pool lands.
-    mark_recompute_pending(version_before_save)
-    render_recompute_notice()
-
-    st.page_link(
-        "views/dashboard.py",
-        label="Open Radar View",
-    )
+        top_message_placeholder.success("Profile saved.")
+        bottom_message_placeholder.success("Profile saved.")
+        
+        st.page_link("views/dashboard.py", label="Open Radar View")

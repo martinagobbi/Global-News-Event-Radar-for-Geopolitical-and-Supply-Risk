@@ -41,7 +41,10 @@ NOTICE_ICON = "🔄"
 NOTICE_TITLE = "Updating your briefing."
 NOTICE_BODY = (
     "Your new preferences are being applied to the set of articles that might "
-    "interest you. This usually takes a few seconds — you will be told when the "
+    "interest you. If you only removed territories, you might be already able to see the results "
+    "of your changes despite this banner (that signals a backend refresh) being present. "
+    "If you made other changes, you might need to wait for the backend recompute to look through our entire database "
+    "before seeing the results. This usually takes a few seconds — you will be told when the "
     "new set is ready."
 )
 
@@ -101,8 +104,7 @@ FIRST_BUILD_BODY = (
 
 NO_MATCHES_BODY = (
     "Either no articles matched your territories and keywords in this period, "
-    "or you need to wait a few minutes for them to arrive. Both filters are "
-    "narrow by design; please consider widening the briefing window or adding keywords."
+    "or you need to wait a few minutes for them to arrive."
 )
 
 

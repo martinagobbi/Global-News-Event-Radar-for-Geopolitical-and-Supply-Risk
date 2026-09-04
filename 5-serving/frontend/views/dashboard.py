@@ -120,7 +120,8 @@ if recompute_pending(live_gold_version):
 
 # ── Gold changes trigger the normal fetch below, which also regroups cards. ──
 elif gold_changed:
-    st.success("The set of articles that might interest you has been updated.")
+    st.success("The set of articles that might interest you has been updated! " \
+    "This may be from new articles that just came in or from your own preference changes.")
 
 # ── Header ─────────────────────────────────────────────────────────────────
 header_left, header_right = st.columns([3, 1])
@@ -128,6 +129,8 @@ events = st.session_state.get("cached_events", [])
 with header_left:
     st.caption(f"Events are filtered according to your registered territories and supply-chain keywords. The **{len(events)}** events from the last {briefing_days} days are shown.")
     render_retention_notice(preferences="follows")
+    text = "Future developments of the stories presented here may later be affected by factors entirely unrelated to supply chains, which may thus not feature in this briefing."
+    st.caption(f"<span style=font-size:0.72rem; opacity:0.65;>{text}</span>", unsafe_allow_html=True)
 with header_right:
     manual_refresh = st.button("Refresh now")
 

@@ -84,7 +84,7 @@ def render_tag_buttons(global_event_ids: list[str], context: str = "main", user_
 
     if layout == "main":
         col1.button("🔴 Apply tag: Needs action from us", key=k_main_red, use_container_width=True)
-        col2.button("🟡 Apply tag: Look out for developments", key=k_main_yellow, use_container_width=True)
+        col2.button("🟡 Apply tag: Looking out for developments", key=k_main_yellow, use_container_width=True)
         col3.button("Archive: Not important", key=k_main_arc, use_container_width=True)
 
     elif layout == "red":
